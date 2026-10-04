@@ -3355,14 +3355,14 @@ Then go on to Phase 2. Task 10, Step 1 marks Phase 1 landed and Task 9 passed in
 
 Spec §2.1–2.8. A **whole-library walk** — a full walk, or a delta with no cursor yet — asks the adapter for a plan of units, fetches the units with several walkers, commits them with one writer, runs the watch lane as soon as the seed has landed, and resumes in place after a failure. A delta with a cursor and the gap-closer keep Phase 1's single walk.
 
-Phase 2 starts only after PR 1 has merged and Task 9 has passed, on its own branch (Task 10, Step 1).
+Phase 2 starts once PR 1 has merged and Task 9's first watch walk has passed, on its own branch (Task 10, Step 1). Task 9's item walk on production waits on the owner; Task 20 does not open PR 2 until it has passed.
 
 ### Departures from the spec's letter
 
 Each is repeated in the task where it happens.
 
 1. **`list_unit` yields pages, not items: `UnitPage(items, resume_at)`.** Only the adapter knows where its overlap put the next request, so it states where a unit resumes; the spec's `AsyncIterator[SourceItem]` cannot say it. The queue holds `_Fetched(unit_key, page)` — the spec's `(unit_key, items, cursor)` under other names. (Task 11.)
-2. **A resumed unit counts up to `PAGE_OVERLAP` items twice in `items_seen`.** Its first page re-reads the overlap its last committed page already counted. The catalog is unaffected, because ingest upserts on `(source_id, external_id)`; the spec's "nothing counted twice" holds exactly for an adapter without overlap, which is what Task 17's resume case asserts. (Task 17.)
+2. **A resumed unit counts up to `PAGE_OVERLAP` items twice in `items_seen`.** Its first page re-reads the overlap its last committed page already counted. The catalog is unaffected, because ingest upserts on `(source_id, external_id)`; the spec's "nothing counted twice" holds exactly for an adapter without overlap, which is what Task 17's resume case asserts. The overlap is also all a resume reaches back: a resumed unit's first page has no page before it, so a resume after more than `PAGE_OVERLAP` deletions ahead of a unit's position misses items, exactly as an in-walk shift does, without the WARNING. A full walk's sweep then retracts the items it skipped, up to the sweep's ceiling, until a later full walk reads them again. (Task 17.)
 3. **The writer commits a unit's pages once they add up to `USHER_SYNC_BATCH_SIZE` items, and when the unit ends — not after every page.** A batch can run past the size by less than a page. At the defaults (pages and batches of 1,000), a page after a unit's first adds at most 950 new items, because 50 overlap the page before. So most commits carry two pages. (Task 16.)
 4. **The run and its first heartbeat are committed before the plan is made; the units ride the next commit.** A plan that fails still leaves a row, and a run with a heartbeat and no units is a walk that died while planning. (Tasks 16, 17.)
 5. **A `failed` run with units resumes whatever its heartbeat says.** Only a `running` run whose heartbeat is younger than 10 minutes is refused. (Task 17.)
@@ -3373,6 +3373,7 @@ Each is repeated in the task where it happens.
 10. **The seed is planned only when both watch filters narrow the library, and a fallback plan keeps its seed.** A server that ignored a filter would make the seed a whole-library walk ahead of the real one. (Task 14.)
 11. **The watch lane after the walk reads back to the instant the walk began.** `WatchStateSyncService.sync` takes `since_at_most`. Without it, the run after the seed has moved the cursor past the walk's start, and a state saved meanwhile for an item not yet stored would be skipped. (Task 18.)
 12. **A run whose sweep was refused is not resumed.** The next attempt reads the library again, because a resume would re-run the sweep over the same rows and refuse again. (Task 17.)
+13. **The watch lane gets the same liveness as a whole-library walk.** The spec gives the heartbeat to whole-library walks; a watch-state run carries one too, set when it is inserted or reclaimed and on every batch, and a `running` watch run whose heartbeat is younger than 10 minutes refuses a second walk with `WalkRefused` before any write. `usher sync` and a worker job handle that refusal as they handle an item walk's; the push lane's gap-closer logs it and returns, and the after-seed hook reports it and lets the walk go on. (Tasks 17, 18.)
 
 ### Review Focus (Phase 2)
 
@@ -3398,10 +3399,10 @@ Each is repeated in the task where it happens.
 | `src/usher/adapters/emby/limit.py` | **new** — `ListingLimit`, the shared backoff |
 | `src/usher/adapters/emby/paging.py` | `OffsetWindow(stop=…)`, `cursor`, `request_limit` |
 | `src/usher/adapters/emby/adapter.py` | `_pages`, `plan_walk`, `list_unit`, the seed, the limiter around `_page` |
-| `src/usher/adapters/emby/session.py` | `_ROUTE_WORDS` gains `Views`, `Shows`, `NextUp` |
+| `src/usher/adapters/emby/session.py` | `_ROUTE_WORDS` gains `Views`, `NextUp` |
 | `src/usher/adapters/factory.py`, `src/usher/composition.py`, `src/usher/api/deps.py`, `src/usher/config.py` | `unit_max_items`, `listing_concurrency`, `walkers` |
 | `src/usher/services/reconcile.py` | the planned walk: walkers, one writer, the stage barrier, `after_seed`, the heartbeat, `_claim`, `WalkRefused`, the unit histogram |
-| `src/usher/services/watch_sync.py` | `sync(…, since_at_most=…)` |
+| `src/usher/services/watch_sync.py` | the heartbeat and the refusal of a live watch walk; `sync(…, since_at_most=…)` |
 | `src/usher/services/handlers.py`, `src/usher/cli.py`, `src/usher/api/lanes.py` | `after_seed` and `since_at_most`; what each caller does with `WalkRefused`; `sync-status`'s plan line; the gap-closer's `plan=False` |
 | `src/usher/api/dto/source.py`, `src/usher/api/routers/sources.py`, `web/src/api/schema.d.ts`, `web/src/test/fixtures/admin.ts` | `last_sync` on the status response |
 | `dashboards/03-pipeline.json`, `dashboards/README.md` | panel 11, the listing limit and the mean unit duration, and its section |
@@ -3410,7 +3411,7 @@ Each is repeated in the task where it happens.
 | `tests/contract/source_harness.py`, `tests/contract/source_adapter_contract.py`, `tests/contract/sync_run_repository_contract.py` | `given_item_in_libraries`; the unit cases; the `latest_run` cases |
 | `tests/fixtures/emby/view_item.json`, `tests/fixtures/emby/README.md` | **new** fixture; the Phase 2 listing facts |
 | `tests/unit/test_adapters_emby_limit.py` | **new** |
-| `tests/unit/test_domain_sync.py`, `test_ports_source.py`, `test_db_models_ingest.py`, `test_db_migration_status.py`, `test_adapters_emby_adapter.py`, `test_adapters_emby_contract.py`, `test_adapters_emby_paging.py`, `test_adapters_emby_planning.py`, `test_adapters_factory.py`, `test_fakes_emby_server.py`, `test_config.py`, `test_composition.py`, `test_services_reconcile.py`, `test_services_watch_sync.py`, `test_services_handlers.py`, `test_api_lanes.py`, `test_cli.py`, `test_telemetry_metric_names.py`, `test_dashboards.py`, `test_alerts.py`, `test_no_third_party_data.py` (all under `tests/unit/`) | as each task says |
+| `tests/unit/test_domain_sync.py`, `test_ports_source.py`, `test_db_models_ingest.py`, `test_db_migration_status.py`, `test_backup_manifest.py`, `test_adapters_emby_adapter.py`, `test_adapters_emby_contract.py`, `test_adapters_emby_paging.py`, `test_adapters_emby_planning.py`, `test_adapters_factory.py`, `test_fakes_emby_server.py`, `test_config.py`, `test_composition.py`, `test_services_reconcile.py`, `test_services_watch_sync.py`, `test_services_handlers.py`, `test_api_lanes.py`, `test_cli.py`, `test_cli_errors.py`, `test_telemetry_metric_names.py`, `test_dashboards.py`, `test_alerts.py`, `test_no_third_party_data.py` (all under `tests/unit/`) | as each task says |
 | `tests/integration/test_migrations.py`, `test_sync_run_repository.py`, `test_bulk_repository.py`, `test_services_reconcile.py`, `test_ingest_end_to_end.py`, `test_pipeline_deps.py`, `test_pipeline_spans.py`, `test_cli_pipeline.py`, `test_admin_sources.py` (all under `tests/integration/`) | as each task says |
 | `docs/prd/02-…`, `03-…`, `07-…`, `08-…`, `10-…`, `CHANGELOG.md`, `.env.example`, `docs/guide/configuration.md`, `docs/guide/command-line.md`, `web/src/features/operator/Config.settings.ts`, `.claude/rules/emby-push-and-ingest.md`, `.claude/rules/db-and-sql.md` | per task |
 | `docs/plans/progress.md`, `docs/prd/README.md` | this plan's status cells (Tasks 10, 20, 21) |
@@ -3442,11 +3443,11 @@ git log --oneline -1   # the merge of PR 1
 
 Every later Phase 2 command runs in this worktree.
 
-Mark Phase 1 in both status tables. In `docs/plans/progress.md`, the Tasks 1–8 row becomes `✅ landed (PR #<n>)`, and the Task 9 row becomes `✅ passed` with the two times Task 9 measured. `docs/prd/README.md`'s row says the same in the same words. This is the Phase 2 branch's first commit:
+Mark Phase 1 in both status tables, claiming only what has run. In `docs/plans/progress.md`, the Tasks 1–8 row becomes `✅ landed (PR #<n>)`, the Task 9 row becomes `🔨 the first watch walk passed in <s> s; the item walk on production waits on the owner`, with `<s>` the time Task 9 Step 3 printed, and the Tasks 10–20 row becomes `🔨 in progress`. `docs/prd/README.md` holds one row for this plan, and its cell says the same in one sentence: `🔨 Phase 1 landed (PR #<n>); its first watch walk passed in <s> s, and its item walk on production waits on the owner. Phase 2 in progress`. Task 20 Step 4 flips the Task 9 row to `✅ passed` once Task 9 Step 4's time is in. This is the Phase 2 branch's first commit, and it carries the plan's own amendments with it:
 
 ```bash
-git add docs/plans/progress.md docs/prd/README.md
-git commit -m "docs(plan): fast first sync phase 1 has landed and passed its acceptance"
+git add docs/plans/2026-10-01-fast-first-sync.md docs/plans/progress.md docs/prd/README.md
+git commit -m "docs(plan): fast first sync phase 1 has landed and its first watch walk passed"
 ```
 
 - [ ] **Step 2: Ask the owner, and check that production is idle**
@@ -3623,7 +3624,7 @@ Expected: every section printed, and the last command prints `0` — no 32-hex i
 | Pages/s with 4 walkers against 2 (section 7) | 4 is faster | If 4 is no faster than 2, Task 15's `sync_walkers` default is **2**, and every `4` in Tasks 15–16 that names the default (setting, `.env.example`, catalogue entry, guide, PRD 08) becomes 2. |
 | `covered` (section 2) | `True` | Expected either way: the planner's fallback exists for `False`. Record both numbers. |
 | An unknown `ParentId` (section 4) | the whole source (`equals_whole_source=True`) | Record what it answered. The fake keeps the worst case either way; the adapter never sends a vanished view's id (Task 13). |
-| NextUp paging (section 8) | `disjoint=True`, `types` all `Episode`, `with_series` equal to `page0` | If not disjoint, Task 14 reads NextUp as one page of `USHER_SOURCE_PAGE_SIZE` instead of paging it. |
+| NextUp paging (section 8) | `disjoint=True`, `types` all `Episode`, `with_series` equal to `page0` | Record what it printed. Task 14 needs no change either way: NextUp is small, so its first page is short and at its total, and ends the walk whatever its paging. |
 | `Ids` (section 9) | `plain` equals `asked` | If only `recursive` finds them, Task 14 adds `Recursive=true` and `IncludeItemTypes=Series` to the series request. |
 
 `USHER_SYNC_UNIT_MAX_ITEMS` stays 100,000 unless section 5's middle page costs more than twice its head page; then it is 50,000, and Task 13's default and every place that names it change with it.
@@ -3634,7 +3635,7 @@ Add rows to the `## Listing protocol (fast first sync)` table in `tests/fixtures
 
 ```markdown
 | `/Users/{id}/Views` | every view the account sees, with a `CollectionType`; `boxsets` and `playlists` point at items held elsewhere | the planner skips those two kinds; `view_item.json` is one view's shape |
-| `ParentId=<view>` with `Limit=0` | that library's count over `Movie,Series,Episode`; the libraries summed to <sum> against a source total of <total> | the plan's coverage check |
+| `ParentId={view}` with `Limit=0` | that library's count over `Movie,Series,Episode`; the libraries summed to <sum> against a source total of <total> | the plan's coverage check |
 | `ParentId` no view carries | <what section 4 printed> | the fake answers the whole library, the worst case; the adapter never sends a vanished view's id |
 | Pages inside one library | head <s> s, middle <s> s, deep <s> s at 1,000 items | offset chunks of `USHER_SYNC_UNIT_MAX_ITEMS` |
 | Concurrent pages at the deployment gate | 1 walker <p>/s, 2 walkers <p>/s, 4 walkers <p>/s | the `USHER_SYNC_WALKERS` default |
@@ -3642,7 +3643,13 @@ Add rows to the `## Listing protocol (fast first sync)` table in `tests/fixtures
 | `Ids=a,b,c` | the named items, without `Recursive` | the seed's series request |
 ```
 
-Fill every `<…>` from `facts2.out` before committing — nothing in angle brackets survives this step.
+Below the section's opening paragraph (`Recorded 2026-10-01 … the shape of the item fixtures above.`), add one more, so the provenance stays true for the new rows:
+
+```markdown
+The rows from `/Users/{id}/Views` on were recorded on <date> by Phase 2's probe, a second read-only script outside the repository, which printed counts, seconds, booleans and type names, never an id, a name or a token. The one shape it kept is `view_item.json`, every value in it invented.
+```
+
+Fill every `<…>` from `facts2.out`, and `<date>` with the day Step 4 ran, before committing — nothing in angle brackets survives this step.
 
 In the intro paragraph, change `**Every value in these seven files is invented**` to `**Every value in these eight files is invented**`, and add a row to the file table:
 
@@ -3658,7 +3665,7 @@ In the intro paragraph, change `**Every value in these seven files is invented**
 {
   "Name": "Example Library",
   "ServerId": "0000000000000000000000000000feed",
-  "Id": "0000000000000000000000000000b001",
+  "Id": "0000000000000000000000000000d001",
   "IsFolder": true,
   "Type": "CollectionFolder",
   "CollectionType": "movies"
@@ -3682,7 +3689,7 @@ export USHER_SECRET_KEY=0123456789abcdef0123456789abcdef
 timeout 90 sh -c 'until uv run alembic upgrade head; do sleep 2; done'
 PYTHONPATH=. uv run python scripts/measure_ingest.py --items 50000 --batch-size 1000 \
   | tee /var/tmp/sync-speed/measure_ingest.out
-sha256sum /var/tmp/sync-speed/measure_ingest.out
+sha256sum /var/tmp/sync-speed/measure_ingest.out | tee /var/tmp/sync-speed/measure_ingest.out.sha256
 docker stop ffs-measure
 ```
 
@@ -3731,7 +3738,7 @@ def test_a_whole_library_walk_runs_its_stages_seed_then_titles_then_episodes() -
     assert set(STAGE_ORDER) == set(WalkStage)
 ```
 
-Append to `tests/unit/test_ports_source.py` (add `from collections.abc import AsyncIterator` and `from datetime import UTC, datetime`; `from usher.domain.enums import SourceKind` beside `HdrFormat`; `from usher.domain.ids import new_id`, `from usher.domain.source import Source`, `from usher.domain.sync import WalkStage`, `from usher.ports.errors import PortDataMalformed, PortUnavailable`; and `DEFAULT_UNIT_KEY, WHOLE_LIBRARY, SourceItem, SourceItemKind, UnitPage, pages_of` to the `usher.ports.source` import):
+Append to `tests/unit/test_ports_source.py` (add `from collections.abc import AsyncIterator`, `from contextlib import aclosing`, `from datetime import UTC, datetime` and `from typing import TYPE_CHECKING`; `from usher.domain.enums import SourceKind` beside `HdrFormat`; `from usher.domain.ids import new_id`, `from usher.domain.source import Source`, `from usher.domain.sync import WalkStage`, `from usher.ports.errors import PortDataMalformed, PortUnavailable`; and `DEFAULT_UNIT_KEY, WHOLE_LIBRARY, SourceItem, SourceItemKind, UnitPage, pages_of` to the `usher.ports.source` import):
 
 ```python
 # --- the walk plan ------------------------------------------------------------
@@ -3789,6 +3796,26 @@ async def test_a_walk_is_never_paged_into_an_empty_page() -> None:
     assert await _read(pages_of(_stream(_walked("a", "b")), start_index=5, size=2)) == []
 
 
+async def test_a_consumer_that_stops_early_closes_the_walk_it_was_paging() -> None:
+    """The walk under the pages is closed at once, not whenever it is collected.
+
+    Left to the collector, a walk's read-ahead would keep a request in flight.
+    """
+    closed: list[bool] = []
+
+    async def walk() -> AsyncIterator[SourceItem]:
+        try:
+            for item in _walked("a", "b", "c", "d", "e"):
+                yield item
+        finally:
+            closed.append(True)
+
+    async with aclosing(pages_of(walk(), size=2)) as pages:
+        async for _ in pages:
+            break
+    assert closed == [True]
+
+
 def _fake() -> "FakeSourceAdapter":
     from tests.fakes.source_adapter import FakeSourceAdapter
 
@@ -3826,7 +3853,7 @@ def test_the_default_unit_refuses_a_key_it_never_planned() -> None:
         SourceAdapter.list_unit(_fake(), "library:Films")
 ```
 
-The `"FakeSourceAdapter"` return annotation is a string; add `if TYPE_CHECKING: from tests.fakes.source_adapter import FakeSourceAdapter` under `from typing import TYPE_CHECKING` at the top of the module, the way the module already imports the fake lazily inside its cases.
+The `"FakeSourceAdapter"` return annotation is a string; below the imports, add `if TYPE_CHECKING: from tests.fakes.source_adapter import FakeSourceAdapter`, using the `TYPE_CHECKING` import from the list above, the way the module already imports the fake lazily inside its cases.
 
 - [ ] **Step 2: Write the failing contract cases**
 
@@ -3896,7 +3923,7 @@ The resume case waits for Task 13. Until `EmbyAdapter` pages its own units, the 
 - [ ] **Step 3: Run them to see them fail**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_domain_sync.py tests/unit/test_ports_source.py tests/unit/test_source_adapter_contract.py tests/unit/test_adapters_emby_contract.py`
-Expected: collection errors — `ImportError: cannot import name 'STAGE_ORDER'` and `cannot import name 'DEFAULT_UNIT_KEY'`.
+Expected: collection errors, which interrupt the run before any case: `ImportError: cannot import name 'STAGE_ORDER'` from `test_domain_sync.py`, and `cannot import name 'WalkStage'` from the other three, where `from usher.domain.sync import WalkStage` sorts ahead of the port's names.
 
 - [ ] **Step 4: The domain's stages**
 
@@ -3971,7 +3998,8 @@ async def pages_of(
 
     `resume_at` counts every item the walk produced, skipped ones included, so it
     is the `start_index` that resumes after the page. A walk that fails mid-page
-    yields the items it had, then raises. Never yields an empty page.
+    yields the items it had, then raises. Never yields an empty page. A consumer
+    that stops closes `items` at once.
     """
     received = 0
     held: list[SourceItem] = []
@@ -3988,6 +4016,12 @@ async def pages_of(
         if held:
             yield UnitPage(tuple(held), resume_at=received)
         raise
+    finally:
+        # A consumer that stops closes the walk now, read-ahead included, rather
+        # than leaving it to the garbage collector.
+        aclose = getattr(items, "aclose", None)
+        if aclose is not None:
+            await aclose()
     if held:
         yield UnitPage(tuple(held), resume_at=received)
 ```
@@ -3999,9 +4033,9 @@ In `SourceAdapter`, between `push_messages_received` and `probe_push`:
         """How to walk the whole library, unit by unit.
 
         By default one unit, `all`, which is `list_items(None)`. The units outside
-        `SEED`, taken together, yield at least every item `list_items(None)` does;
-        they may overlap, because ingest upserts. A `SEED` unit may repeat items
-        other units yield.
+        `SEED`, taken together, yield exactly the items `list_items(None)` yields,
+        possibly more than once: they may overlap, because ingest upserts. A `SEED`
+        unit may repeat items other units yield.
         """
         return WHOLE_LIBRARY
 
@@ -4100,10 +4134,11 @@ Expected: PASS — the two contract cases run on both subclasses, and the count 
 
 - [ ] **Step 8: Plant and verify**
 
-1. In `pages_of`, yield `resume_at=received - start_index`. Expect `test_a_resume_point_counts_the_items_it_skipped` to fail on `[(['d', 'e'], 2)] == [(['d', 'e'], 5)]`.
+1. In `pages_of`, yield `resume_at=received - start_index` from the in-loop `yield` only, the one under `if len(held) >= size:`. Expect `test_a_resume_point_counts_the_items_it_skipped` to fail on `[(['d', 'e'], 2)] == [(['d', 'e'], 5)]`.
 2. In `pages_of`'s `except`, drop the partial page (`raise` alone). Expect `test_a_walk_that_fails_mid_page_yields_what_it_had_and_then_raises` to fail, missing `(['c'], 3)`.
 3. In `FakeSourceAdapter.plan_walk`, plan every library but the last (`list(self._libraries.items())[:-1]`). Expect `TestFakeSourceAdapter::test_the_plan_s_units_together_yield_what_a_whole_walk_yields` to fail on `walked == whole`.
 4. In `SourceAdapter.list_unit`, drop the key check. Expect `test_the_default_unit_refuses_a_key_it_never_planned` and `TestEmbyAdapter::test_a_unit_the_plan_never_named_is_refused` to fail with `DID NOT RAISE`.
+5. In `pages_of`, drop the `finally:` and its body. Expect `test_a_consumer_that_stops_early_closes_the_walk_it_was_paging` to fail on `[] == [True]`: the walk is closed only later, by the event loop's finalizer.
 
 - [ ] **Step 9: Commit**
 
@@ -4127,7 +4162,7 @@ Spec §2.5, "The migration". A table `sync_run_units` keyed on `(run_id, unit_ke
 - Create: `src/usher/db/migrations/versions/m10g_sync_run_units.py`
 - Modify: `src/usher/db/repositories/sync.py`, `tests/fakes/sync_run_repository.py`
 - Modify: `src/usher/db/backup_manifest.py`, `docs/runbooks/disaster-recovery.md`, `scripts/audit_bounded_columns.py`
-- Modify: `tests/unit/test_db_migration_status.py`, `.claude/rules/db-and-sql.md`, `tests/integration/test_migrations.py`
+- Modify: `tests/unit/test_db_migration_status.py`, `tests/unit/test_backup_manifest.py`, `.claude/rules/db-and-sql.md`, `tests/integration/test_migrations.py`
 - Test: `tests/contract/sync_run_repository_contract.py`, `tests/integration/test_sync_run_repository.py`, `tests/unit/test_db_models_ingest.py`, `tests/unit/test_domain_sync.py`, `tests/integration/test_bulk_repository.py`
 - Modify: `docs/prd/02-data-model.md`
 
@@ -4187,7 +4222,11 @@ Append to `SyncRunRepositoryContract`:
         one = run(source_id)
         await repository.add(one)
         await repository.add_units(
-            [unit(one.id, "charlie"), unit(one.id, "alpha", expected_items=40), unit(one.id, "bravo")]
+            [
+                unit(one.id, "charlie"),
+                unit(one.id, "alpha", expected_items=40),
+                unit(one.id, "bravo"),
+            ]
         )
         stored = await repository.units_for(one.id)
         assert [each.unit_key for each in stored] == ["alpha", "bravo", "charlie"]
@@ -4287,14 +4326,15 @@ Append to `SyncRunRepositoryContract`:
         """`get`, `latest_incomplete_run` and `list_for_source` each carry it.
 
         The last two read the row through a `SELECT *` of their own, so a column the
-        model lacked, or the model a column, fails there and nowhere else.
+        model lacked, or the model a column, fails there and nowhere else. The run is
+        a watch-state one: the kind `latest_incomplete_run` has always served.
         """
-        one = run(source_id, heartbeat_at=EARLIER)
+        one = run(source_id, kind=SyncRunKind.WATCH_STATE, heartbeat_at=EARLIER)
         await repository.add(one)
         await repository.save(one.evolve(heartbeat_at=LATER, items_seen=10))
 
         stored = await repository.get(one.id)
-        incomplete = await repository.latest_incomplete_run(source_id, SyncRunKind.FULL)
+        incomplete = await repository.latest_incomplete_run(source_id, SyncRunKind.WATCH_STATE)
         [listed] = await repository.list_for_source(source_id)
         assert stored is not None and incomplete is not None
         assert (stored.heartbeat_at, incomplete.heartbeat_at, listed.heartbeat_at) == (
@@ -4313,9 +4353,7 @@ async def test_a_negative_unit_position_is_a_port_error(
     """The CHECK mirrors `SyncRunUnit.position`'s `ge=0` for a writer that skips the model."""
     one = run(source_id)
     await repository.add(one)
-    broken = SyncRunUnit.model_construct(
-        **{**unit(one.id, "alpha").model_dump(), "position": -1}
-    )
+    broken = SyncRunUnit.model_construct(**{**unit(one.id, "alpha").model_dump(), "position": -1})
     with pytest.raises(RepositoryConflict) as caught:
         await repository.add_units([broken])
     assert caught.value.constraint == "ck_sync_run_units_position_non_negative"
@@ -4349,7 +4387,19 @@ async def test_a_caught_unit_conflict_leaves_the_session_usable(
 ```
 
 In `tests/unit/test_db_models_ingest.py` (import `SyncRunUnitRow`, `SyncRunUnit`, `SyncRunUnitStatus`, `WalkStage`):
-- `test_all_ingest_tables_registered`: add `"sync_run_units"` to the set.
+- `test_all_ingest_tables_registered`: add `"sync_run_units"` to the set, which then outgrows a line, so the assertion reads:
+
+```python
+    assert {
+        "seasons",
+        "episodes",
+        "jobs",
+        "sync_runs",
+        "sync_run_units",
+        "raw_payloads",
+    } <= set(Base.metadata.tables)
+```
+
 - `test_every_row_matches_its_domain_model_field_for_field`: add `assert _columns(SyncRunUnitRow) == set(SyncRunUnit.model_fields)`.
 - `test_every_new_enum_column_stores_values_not_names`: add `(SyncRunUnitRow.__table__.c.stage, WalkStage)` and `(SyncRunUnitRow.__table__.c.status, SyncRunUnitStatus)`.
 - `test_every_not_null_column_a_raw_insert_may_omit_has_a_server_default`: add `SyncRunUnitRow.__table__.c.position`, `.items_seen` and `.status`.
@@ -4371,7 +4421,10 @@ Bump the migration bookkeeping, which is red until the migration exists: in `tes
 - [ ] **Step 2: Run them to see them fail**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_domain_sync.py tests/unit/test_sync_run_repository_contract.py tests/unit/test_db_models_ingest.py tests/unit/test_db_migration_status.py`
-Expected: collection errors — `ImportError: cannot import name 'SyncRunUnit'` — and, once that is fixed, the head check failing on `'m10f' == 'm10g'`.
+Expected: collection errors, which interrupt the run before any case: `ImportError: cannot import name 'SyncRunUnit'` from `test_domain_sync.py` and the contract runner, and `cannot import name 'SyncRunUnitRow'` from `test_db_models_ingest.py`.
+
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_db_migration_status.py`
+Expected: two failures, `test_code_head_revision_matches_the_head_migration_on_disk` on `'m10f' == 'm10g'` and `test_the_repointing_chain_on_disk_is_the_one_three_documents_spell_out` on the chain's extra `'m10g'`. The landing-count case passes: the prose and the chain already agree on seventeen.
 
 - [ ] **Step 3: The domain**
 
@@ -4393,8 +4446,9 @@ class SyncRunUnitStatus(StrEnum):
 In `SyncRun`, after `finished_at`:
 
 ```python
-    #: Moved by a whole-library walk's writer on every commit. A running walk whose
-    #: heartbeat has gone stale is a dead one; a run that never had one never planned.
+    #: Moved on every commit by a whole-library walk's writer, and by the watch lane.
+    #: A running walk whose heartbeat has gone stale is a dead one. An item walk with
+    #: none never planned; a watch-state run with none predates heartbeats.
     heartbeat_at: AwareDatetime | None = None
 ```
 
@@ -4517,9 +4571,7 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     # Never a server default: a run written before this revision has no heartbeat,
     # and that is what marks it as a walk without a plan.
-    op.add_column(
-        "sync_runs", sa.Column("heartbeat_at", sa.DateTime(timezone=True), nullable=True)
-    )
+    op.add_column("sync_runs", sa.Column("heartbeat_at", sa.DateTime(timezone=True), nullable=True))
     op.create_table(
         "sync_run_units",
         sa.Column("run_id", sa.UUID(), nullable=False),
@@ -4655,7 +4707,7 @@ def _unit_to_domain(row: SyncRunUnitRow) -> SyncRunUnit:
     )
 ```
 
-`populate_existing` matters: `save_unit` writes `position` as a SQL expression, and without it the select hands back the identity map's copy of the row as it was before the update.
+`populate_existing` is defensive. Nothing holds a unit row in the identity map today, because `add_units` lets its rows go once they are flushed and `save_unit` updates through SQL; a row held there, though, would come back from the select as it was before a `save_unit`, whose `position` is a SQL expression.
 
 `tests/fakes/sync_run_repository.py` — `from collections.abc import Sequence`; import `SyncRunUnit, SyncRunUnitStatus`. In `__init__`: `self._units: dict[tuple[uuid.UUID, str], SyncRunUnit] = {}`. Before `list_for_source`:
 
@@ -4664,7 +4716,9 @@ def _unit_to_domain(row: SyncRunUnitRow) -> SyncRunUnit:
         # All or nothing, as the SAVEPOINT makes it on Postgres.
         keys = [(unit.run_id, unit.unit_key) for unit in units]
         if len(set(keys)) != len(keys) or any(key in self._units for key in keys):
-            raise RepositoryConflict("a walk unit is already stored", constraint="pk_sync_run_units")
+            raise RepositoryConflict(
+                "a walk unit is already stored", constraint="pk_sync_run_units"
+            )
         if any(unit.run_id not in self._runs for unit in units):
             raise RepositoryConflict(
                 "a walk unit names no stored run",
@@ -4676,7 +4730,9 @@ def _unit_to_domain(row: SyncRunUnitRow) -> SyncRunUnit:
         key = (unit.run_id, unit.unit_key)
         stored = self._units.get(key)
         if stored is None:
-            raise RepositoryNotFound(f"no unit {unit.unit_key!r} of sync run {unit.run_id} to update")
+            raise RepositoryNotFound(
+                f"no unit {unit.unit_key!r} of sync run {unit.run_id} to update"
+            )
         if stored.status is SyncRunUnitStatus.COMPLETED:
             return
         self._units[key] = unit.evolve(position=max(stored.position, unit.position))
@@ -4691,8 +4747,12 @@ def _unit_to_domain(row: SyncRunUnitRow) -> SyncRunUnit:
 `src/usher/db/backup_manifest.py`, after the `"sync_runs"` entry:
 
 ```python
-        "sync_run_units": _rebuildable("A whole-library walk's plan; the next walk plans again", "sync"),
+        "sync_run_units": _rebuildable(
+            "A whole-library walk's plan; the next walk plans again", "sync"
+        ),
 ```
+
+`tests/unit/test_backup_manifest.py`, `test_the_class_counts_are_the_ones_this_task_argued_for`: `BackupClass.REBUILDABLE: 20,` becomes `BackupClass.REBUILDABLE: 21,`.
 
 `docs/runbooks/disaster-recovery.md`, the rebuilt column of the table: `` `curated_rows`, `user_taste`, `jobs`, `sync_runs`, `import_runs` `` becomes `` `curated_rows`, `user_taste`, `jobs`, `sync_runs`, `sync_run_units`, `import_runs` ``.
 
@@ -4713,6 +4773,8 @@ PUBLISHED: Mapping[str, Mapping[str, int]] = {
 ```
 
 Five new bounded columns, the same way on every reading, because none is staged: `stage` and `status` are `VARCHAR(16)` behind enums whose longest members are 8 and 9 characters, so **safe**; `position`, `expected_items` and `items_seen` are `INTEGER` bounded only below, written by `add_units`/`save_unit`, which translate on the SQLSTATE class, so **translated**.
+
+The `safe` column moves by two on every reading, so `readings_table`'s docstring follows it: `` `safe` runs 20/18/14 today `` becomes `` `safe` runs 22/20/16 today ``. Its `m08b` figures stay, because `PUBLISHED_AT_M08B` does.
 
 `tests/integration/test_bulk_repository.py` drives every translated column through its real writer. Import `SyncRunUnit, WalkStage` beside `SyncRun`; after `_refused_sync_run`:
 
@@ -4775,7 +4837,7 @@ and in `_BOUNDED_ARMS`, after the `sync_runs` arms:
 `docs/prd/02-data-model.md`, "Supporting tables" — replace the `sync_runs` row and add one after it:
 
 ```markdown
-| `sync_runs` | Per-source run bookkeeping: kind, cursor, status, stats, and `heartbeat_at`, which a whole-library walk's writer moves on every commit ([03](03-sources-and-sync.md)). One row per walk: an attempt that resumes an unfinished walk continues its row, and every other attempt starts one. `error` is prose and `error_code` is the kind — a nullable `VARCHAR(32)` holding `availability_ceiling` or `gap_delta_ceiling`, null for every failure an operator has no command for |
+| `sync_runs` | Per-source run bookkeeping: kind, cursor, status, stats, and `heartbeat_at` (🔶 nothing moves it yet). One row per walk: an attempt that resumes an unfinished walk continues its row, and every other attempt starts one. `error` is prose and `error_code` is the kind — a nullable `VARCHAR(32)` holding `availability_ceiling` or `gap_delta_ceiling`, null for every failure an operator has no command for |
 | `sync_run_units` | A whole-library walk's plan: `(run_id, unit_key, stage, label, position, expected_items, items_seen, status)`, keyed on `(run_id, unit_key)` and deleted with its run. `unit_key` is the adapter's own opaque key and never leaves the database. `position` only rises and `completed` is final |
 ```
 
@@ -4783,8 +4845,6 @@ and in `_BOUNDED_ARMS`, after the `sync_runs` arms:
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_domain_sync.py tests/unit/test_sync_run_repository_contract.py tests/unit/test_db_models_ingest.py tests/unit/test_db_migration_status.py tests/unit/test_backup_manifest.py tests/unit/test_bounded_column_ledger.py tests/integration/test_sync_run_repository.py tests/integration/test_migrations.py tests/integration/test_bulk_repository.py`
 Expected: PASS, with Docker up. Then `uv run python scripts/audit_bounded_columns.py --check` prints `no drift`. A `bucket drift` complaint means a column landed in a bucket other than the one Step 7 names — read which before changing a figure, because the figure is the claim.
-
-The plan-against-a-stored-unit case logs one `SAWarning` (`New instance … conflicts with persistent instance`) on Postgres, as `test_add_rejects_a_duplicate_id` already does for runs: SQLAlchemy warns, issues the INSERT anyway, and the primary key refuses it. No warning filter turns that into an error here.
 
 - [ ] **Step 10: Plant and verify**
 
@@ -4803,7 +4863,7 @@ git add src/usher/domain/sync.py src/usher/ports/repository/sync.py src/usher/db
   tests/fakes/sync_run_repository.py tests/contract/sync_run_repository_contract.py \
   tests/integration/test_sync_run_repository.py tests/integration/test_migrations.py \
   tests/integration/test_bulk_repository.py tests/unit/test_db_models_ingest.py \
-  tests/unit/test_domain_sync.py tests/unit/test_db_migration_status.py \
+  tests/unit/test_domain_sync.py tests/unit/test_db_migration_status.py tests/unit/test_backup_manifest.py \
   .claude/rules/db-and-sql.md docs/runbooks/disaster-recovery.md docs/prd/02-data-model.md
 git commit -m "sync: persist a whole-library walk's units and its writer's heartbeat (m10g)"
 ```
@@ -4844,7 +4904,7 @@ import pytest
 from usher.adapters.emby.planning import LibraryUnit, episode_chunks, parse_unit_key
 from usher.domain.sync import WalkStage
 
-VIEW = "0000000000000000000000000000b001"
+VIEW = "0000000000000000000000000000d001"
 
 
 @pytest.mark.parametrize(
@@ -5067,11 +5127,11 @@ Expected: FAIL — `TypeError: OffsetWindow.__init__() got an unexpected keyword
         return max(0, min(self.limit, self.stop - self.start))
 ```
 
-In `receive`, the `ended` line becomes:
+In `receive`, `stopped` joins the `ended` line's conditions; `short`, `reached` and `drained` stay as they are:
 
 ```python
         stopped = self.stop is not None and self._cursor >= self.stop
-        ended = not entries or (len(entries) < self.limit and reached) or drained or stopped
+        ended = not entries or (short and reached) or drained or stopped
 ```
 
 Run the Step 4 command. Expected: PASS.
@@ -5085,8 +5145,13 @@ Append to `tests/unit/test_fakes_emby_server.py`:
 
 
 async def _listed(driver: _Driver, **params: str) -> list[str]:
+    # A page wide enough for every item, as `_filtered` asks for: the fake's default
+    # page of two would cut these three-item listings short.
     body = await driver.session.json_body(
-        "GET", f"/Users/{USER_ID}/Items", params={"SortBy": "SortName", **params}, op="list"
+        "GET",
+        f"/Users/{USER_ID}/Items",
+        params={"SortBy": "SortName", "Limit": "10", **params},
+        op="list",
     )
     return [entry["Id"] for entry in body["Items"]]
 
@@ -5097,7 +5162,7 @@ def _given_three_movies(driver: _Driver) -> None:
 
 
 async def test_views_are_listed_with_their_collection_types(driver: _Driver) -> None:
-    films, sets, mixed = (f"{0xB001 + offset:032x}" for offset in range(3))
+    films, sets, mixed = (f"{0xD001 + offset:032x}" for offset in range(3))
     driver.server.add_view(films, "Films")
     driver.server.add_view(sets, "Sets", collection_type="boxsets")
     driver.server.add_view(mixed, "Mixed", collection_type=None)
@@ -5111,7 +5176,7 @@ async def test_views_are_listed_with_their_collection_types(driver: _Driver) -> 
 
 
 async def test_a_parent_id_lists_only_what_was_placed_in_that_view(driver: _Driver) -> None:
-    films, shows = f"{0xB001:032x}", f"{0xB002:032x}"
+    films, shows = f"{0xD001:032x}", f"{0xD002:032x}"
     driver.server.add_view(films, "Films")
     driver.server.add_view(shows, "Shows")
     _given_three_movies(driver)
@@ -5123,7 +5188,7 @@ async def test_a_parent_id_lists_only_what_was_placed_in_that_view(driver: _Driv
 
 async def test_a_parent_id_no_view_carries_lists_the_whole_library(driver: _Driver) -> None:
     """The worst answer a server can give, so the adapter must never send one."""
-    films = f"{0xB001:032x}"
+    films = f"{0xD001:032x}"
     driver.server.add_view(films, "Films")
     _given_three_movies(driver)
     driver.server.place("m0", films)
@@ -5249,7 +5314,7 @@ Run the command above. Expected: PASS.
 
 - [ ] **Step 7: Write the failing adapter tests**
 
-In `tests/unit/test_adapters_emby_adapter.py`: add `from contextlib import aclosing`; `PAGE_OVERLAP` from `usher.adapters.emby.paging`; `from usher.domain.sync import WalkStage`; `DEFAULT_UNIT_KEY, WalkPlan, WalkUnit` to the `usher.ports.source` import. Give `_adapter` a `unit_max_items: int = 100_000` keyword it passes to `EmbyAdapter`. After `_numbered`, add:
+In `tests/unit/test_adapters_emby_adapter.py`: add `from contextlib import aclosing`; `PAGE_OVERLAP` from `usher.adapters.emby.paging`; `from usher.domain.sync import WalkStage`; `DEFAULT_UNIT_KEY, WalkUnit` to the `usher.ports.source` import. Give `_adapter` a `unit_max_items: int = 100_000` keyword it passes to `EmbyAdapter`. After `_numbered`, add:
 
 ```python
 def _series(index: int) -> SourceItem:
@@ -5283,7 +5348,7 @@ def _library(
     collection_type: str | None = "movies",
 ) -> str:
     """A view holding `items`, each seeded into the server. Returns the view's id."""
-    view_id = f"{0xB000 + number:032x}"
+    view_id = f"{0xD000 + number:032x}"
     server.add_view(view_id, name, collection_type=collection_type)
     for item in items:
         server.add_item(item, T0)
@@ -5627,7 +5692,7 @@ async def test_a_count_without_a_total_fails_the_plan() -> None:
 In `test_every_path_this_adapter_issues_redacts_to_a_route_with_no_identifier`, after `server.set_watch_state(...)`:
 
 ```python
-    films = f"{0xB001:032x}"
+    films = f"{0xD001:032x}"
     server.add_view(films, "Films")
     server.place("movie-1", films)
 ```
@@ -5642,13 +5707,17 @@ after the `push_watch_state` line inside the `try`:
 and add `"/Users/{user_id}/Views",` to the pinned set.
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_adapters_emby_adapter.py`
-Expected: FAIL — `TypeError: EmbyAdapter.__init__() got an unexpected keyword argument 'unit_max_items'` in every new case; the redaction case on `/Users/{user_id}/{id}`.
+Expected: FAIL, four ways, the last three because the adapter still plans with the port's default:
+- `TypeError: EmbyAdapter.__init__() got an unexpected keyword argument 'unit_max_items'` in every case built through `_adapter` or `_recorded`, the existing `_adapter` cases among them;
+- `test_walkers_resuming_together_read_the_libraries_once`, which builds its own adapter, with `PortDataMalformed`: the default plan holds no `titles:` unit;
+- `test_a_count_that_fails_fails_the_plan` and `test_a_count_without_a_total_fails_the_plan`, built through `_on`, with `DID NOT RAISE`: the default plan counts nothing;
+- the redaction case on the pinned `/Users/{user_id}/Views`, which nothing has issued yet.
 
 - [ ] **Step 8: Plan, and walk the plan**
 
 `src/usher/adapters/emby/session.py` — add `"Views",` to `_ROUTE_WORDS`.
 
-`src/usher/adapters/emby/adapter.py` — `AsyncGenerator` joins the `collections.abc` import; import `PAGE_OVERLAP` beside `OffsetWindow`, `from usher.adapters.emby.planning import LibraryUnit, episode_chunks, parse_unit_key`, `from usher.domain.sync import WalkStage`, and `DEFAULT_UNIT_KEY, UnitPage, WalkPlan, WalkUnit` from `usher.ports.source`. After `ITEM_TYPES`:
+`src/usher/adapters/emby/adapter.py` — import `PAGE_OVERLAP` beside `OffsetWindow`, `from usher.adapters.emby.planning import LibraryUnit, episode_chunks, parse_unit_key`, `from usher.domain.sync import WalkStage`, and `DEFAULT_UNIT_KEY, UnitPage, WalkPlan, WalkUnit` from `usher.ports.source`. After `ITEM_TYPES`:
 
 ```python
 # Views that only point at items held in libraries. Walking them reads those
@@ -5904,7 +5973,7 @@ and replace Task 11's `given_item_in_libraries`:
         self._server.add_item(item, changed_at)
         for name in libraries:
             if name not in self._view_ids:
-                self._view_ids[name] = f"{0xB001 + len(self._view_ids):032x}"
+                self._view_ids[name] = f"{0xD001 + len(self._view_ids):032x}"
                 self._server.add_view(self._view_ids[name], name)
         self._server.place(item.external_id, *(self._view_ids[name] for name in libraries))
 ```
@@ -5944,22 +6013,22 @@ Expected: PASS. On the Emby arm the plan case now walks three real libraries; th
 
 - [ ] **Step 11: Plant and verify**
 
-1. `episode_chunks` with `held // unit_max_items` (floor). Expect the planning chunk case to fail at `101` and `250`.
+1. `episode_chunks` with `held // unit_max_items` (floor). Expect the planning chunk case to fail at `101` and `250`, and `test_a_library_s_episodes_are_planned_in_chunks_of_the_unit_size` on two chunks where it expects three: the library holds seven items, the series among them.
 2. `rest.split(":", 2)` in place of `rsplit`. Expect only the colon-bearing round-trip case to fail.
-3. `request_limit` returning `self.limit` always. Expect `test_a_bounded_window_asks_for_no_more_than_its_stop_allows` (at `== 3`) and `test_a_bounded_chunk_reads_past_its_end_by_the_overlap_and_no_further` (`170 == 150`) to fail.
+3. `request_limit` returning `self.limit` always. Expect four cases to fail: `test_a_bounded_window_asks_for_no_more_than_its_stop_allows` (at `== 3`), `test_a_bounded_window_already_at_its_stop_asks_for_nothing` (`4 == 0`), `test_a_bounded_chunk_reads_past_its_end_by_the_overlap_and_no_further` (`160 == 150`: the requests start at 0, 20, …, 120, and the one at 120 now ends at 160), and `test_a_chunk_resumed_at_its_stop_asks_for_nothing` (a listing goes out at `StartIndex=53`).
 4. `stopped = False`. Expect `test_a_bounded_window_asks_for_no_more_than_its_stop_allows` to fail on its last line.
 5. `stop = unit.upper` (no reach past the end). Expect the bounded-chunk case to fail on `100 == 150`.
 6. `resume_at = window.cursor` with the `advance()` result unassigned. Expect `test_a_page_s_resume_point_is_the_next_request_s_start_reach_back_included` to fail on `4 == 2`.
-7. Drop `_library_unit`'s known-library check. Expect `test_a_library_removed_between_attempts_ends_its_unit_empty` to fail on `gone == []`.
+7. Drop `_library_unit`'s known-library check. Expect `test_a_library_removed_between_attempts_ends_its_unit_empty` to fail on `gone == []`, and `test_walkers_resuming_together_read_the_libraries_once` on `0 == 1`: no walker reads the views at all.
 8. Drop the `NOT_LIBRARIES` test in `_views`. Expect `test_collection_and_playlist_views_are_not_libraries` to fail on the `ParentId` set.
 9. The fallback condition reduced to `if not libraries:`. Expect `test_libraries_that_hold_less_than_the_total_fall_back_to_one_walk` and the collection case's last assertion to fail.
 10. `_known_libraries` without its `async with self._library_lock:`. Expect `test_walkers_resuming_together_read_the_libraries_once` to fail on `2 == 1`.
-11. `counts.append(answer if isinstance(answer, int) else 0)` with the raise removed. Expect `test_a_count_that_fails_fails_the_plan` to fail with `DID NOT RAISE`.
+11. `counts.append(answer if isinstance(answer, int) else 0)` with the raise removed. Expect `test_a_count_that_fails_fails_the_plan` and `test_a_count_without_a_total_fails_the_plan` to fail with `DID NOT RAISE`.
 12. `_count` returning `0` in place of its raise. Expect `test_a_count_without_a_total_fails_the_plan` to fail with `DID NOT RAISE`.
 13. Drop `if window.request_limit == 0: return`. Expect `test_a_chunk_resumed_at_its_stop_asks_for_nothing` to fail on `_listings(seen) == []`.
 14. Drop `_unit_pages`' `if items:`. Expect `test_a_movie_library_s_episodes_unit_ends_on_one_empty_page` to fail on `pages == []`.
 15. Remove `"Views"` from `_ROUTE_WORDS`. Expect the redaction case to fail on `/Users/{user_id}/{id}`.
-16. In the fake, `placed = set()` for an unknown `ParentId`. Expect `test_a_parent_id_no_view_carries_lists_the_whole_library` to fail.
+16. In the fake, an unknown `ParentId` filters everything out: `placed = set(self._placed[parent]) if parent in self._placed else (set() if parent is not None else None)`, so a listing with no `ParentId` still lists everything. Expect `test_a_parent_id_no_view_carries_lists_the_whole_library` to fail.
 
 - [ ] **Step 12: Commit**
 
@@ -6126,7 +6195,7 @@ In `tests/unit/test_adapters_emby_adapter.py`, import `IDS_PER_REQUEST, SEED_UNI
 
 
 def _watching(server: FakeEmbyServer) -> None:
-    """Two movies and two episodes watched, one of each untouched, one episode up next.
+    """Three movies and two episodes watched, one of each untouched, one episode up next.
 
     `movie-3` is both played and part-way through, so two listings carry it.
     `next-0` belongs to `series-1`, which no watched item does.
@@ -6234,7 +6303,7 @@ async def test_the_seed_holds_what_the_account_watched_and_watches_next_each_ser
 
 
 async def test_the_seed_asks_only_for_series_no_page_held_a_hundred_at_a_time() -> None:
-    """`series-done` is played itself, so its own listing page carries it and `Ids` never names it."""
+    """`series-done` is played, so its own listing page carries it and `Ids` never names it."""
     server = FakeEmbyServer()
     count = IDS_PER_REQUEST + 1
     server.add_item(replace(_series(0), external_id="series-done", name="Series Done"), T0)
@@ -6444,7 +6513,8 @@ After `_library_unit`:
         )
         series: list[SourceItem] = []
         for chunk in batched(missing, IDS_PER_REQUEST):
-            params = {"Ids": ",".join(chunk), "Fields": ITEM_FIELDS}
+            # `Limit` is the chunk's length: every id asked for comes back, and no more.
+            params = {"Ids": ",".join(chunk), "Fields": ITEM_FIELDS, "Limit": str(len(chunk))}
             body = await self._page(await self._items_path(), params, 0)
             entries = body.get("Items")
             if not isinstance(entries, list):
@@ -6459,7 +6529,7 @@ If Task 10 recorded that only `Recursive=true` finds items by `Ids`, add `"Recur
 
 ```python
     async def _count(self, view_id: str | None, *, filters: str | None = None) -> int:
-        """How many items a walk lists: in one library, or the whole source, or its filtered share."""
+        """How many items a walk lists: in one library, the whole source, or its filtered share."""
         params = {
             "Recursive": "true",
             "IncludeItemTypes": ITEM_TYPES,
@@ -6491,7 +6561,7 @@ Expected: PASS. Task 13's planner cases still hold: each filters out the seed, o
 3. Append the seed after the library units (`units.extend(seed)` at the end, `units: list[WalkUnit] = []` at the start). Expect `test_a_plan_starts_with_the_seed_and_so_does_its_fallback` to fail on `plan.units[0] == SEED_UNIT`.
 4. `WalkPlan((whole,), …)` in the fallback. Expect the same case to fail on its premise line.
 5. `series: list[SourceItem] = []; return series` at the top of `_series_for`. Expect `test_the_seed_holds_what_the_account_watched_and_watches_next_each_series_first` to fail on the sorted ids (`series-0` and `series-1` missing).
-6. `held = yielded` in `_series_for`. Expect `test_the_seed_asks_only_for_series_no_page_held_a_hundred_at_a_time` to fail on the asked set (`series-done` asked for).
+6. `held = yielded` in `_series_for`. Expect `test_the_seed_asks_only_for_series_no_page_held_a_hundred_at_a_time` to fail first on `[2, 100] == [1, 100]`, the sizes line ahead of the asked set: `series-done` is asked for too, so the second chunk holds two.
 7. `batched(missing, len(missing) or 1)`. Expect the same case to fail on `[101] == [1, 100]`.
 8. Drop the `item.external_id not in yielded` filter. Expect the watched case to fail on the sorted ids (`movie-3` twice).
 9. Drop the `listings.append(...)` line. Expect the watched case to fail (`next-0` and `series-1` missing).
@@ -6524,7 +6594,7 @@ Spec §2.6 and the `usher.source.listing.concurrency` half of §2.8. One `Listin
 - Modify: `src/usher/adapters/factory.py`, `src/usher/composition.py` (`adapter_factory`), `src/usher/config.py`
 - Modify: `.env.example`, `web/src/features/operator/Config.settings.ts`, `docs/guide/configuration.md`
 - Modify: `docs/prd/03-sources-and-sync.md`, `docs/prd/08-operations.md`, `docs/prd/10-telemetry-and-dashboards.md`, `CHANGELOG.md`
-- Test: `tests/unit/test_adapters_emby_adapter.py`, `tests/unit/test_adapters_factory.py`, `tests/unit/test_composition.py`, `tests/unit/test_config.py`, `tests/unit/test_telemetry_metric_names.py`
+- Test: `tests/unit/test_adapters_emby_adapter.py`, `tests/unit/test_adapters_factory.py`, `tests/unit/test_composition.py`, `tests/unit/test_config.py`, `tests/unit/test_telemetry_metric_names.py`, `tests/unit/test_dashboards.py`
 
 **Interfaces:**
 - Consumes: Phase 1's `_page` (with `LISTING_READ_SECONDS`), `PAGE_RETRY_WAITS`; Task 13's `LibraryUnit`, `list_unit`, and the test helpers `_library`, `_movie`, `_Waits`.
@@ -6608,7 +6678,7 @@ def _caps(reader: InMemoryMetricReader) -> list[tuple[float, dict[str, str]]]:
     return readings
 
 
-async def test_a_new_limit_lets_its_ceiling_in_at_once_and_holds_the_next_until_one_leaves() -> None:
+async def test_a_new_limit_lets_its_ceiling_in_and_holds_the_next_until_one_leaves() -> None:
     limit = ListingLimit(3, source=SOURCE_NAME)
     holders = _Holders(limit)
     for number in range(4):
@@ -6924,7 +6994,9 @@ async def test_a_retried_failure_lets_pages_in_one_at_a_time_until_ten_succeed()
     finally:
         await adapter.aclose()
     failure = crowd.index("out", (films, 0))
-    successes = [at for at, (event, _, _) in enumerate(crowd.log) if event == "out" and at > failure]
+    successes = [
+        at for at, (event, _, _) in enumerate(crowd.log) if event == "out" and at > failure
+    ]
     tenth = successes[RAISE_AFTER - 1]
     assert 2 in crowd.widths(end=failure), "the premise: both walkers were in flight together"
     assert set(crowd.widths(failure, tenth)) == {1}
@@ -6967,12 +7039,25 @@ Expected: FAIL — `TypeError: EmbyAdapter.__init__() got an unexpected keyword 
         self._listing_limit = ListingLimit(listing_concurrency, source=source.name)
 ```
 
-`_page`'s docstring gains, before its last sentence:
+`_page`'s docstring gains a paragraph of its own, between the one that ends `is shutting down.` and the sentence `Giving up raises …`, which becomes the closing paragraph. The docstring then reads:
 
-```
+```python
+        """One page of a walk, asked for again while its failure is one a wait can fix.
+
+        That is an outage -- a 5xx, a 408, a refused or dropped connection, a timeout -- or
+        a 429, whose wait is its `Retry-After` when that is longer, up to the longest
+        scheduled one. Nothing else is: a refused request and an answer that is not a
+        listing would be the same answer next time, a rejected credential needs an
+        operator, and a closed adapter -- which raises `PortUnavailable` too -- is shutting
+        down.
+
         Each attempt holds one of the listing limit's slots, and the wait between
         attempts holds none. A failure of the kind asked again drops the limit to
         one; a success counts towards raising it.
+
+        Giving up raises `PortUnavailable` naming the attempts, whatever the last
+        failure was.
+        """
 ```
 
 and its loop body becomes:
@@ -7033,7 +7118,9 @@ Expected: PASS — the new five, and every Phase 1 retry case unchanged: a walk 
 and after `test_sync_max_retract_fraction_is_a_fraction`:
 
 ```python
-@pytest.mark.parametrize(("value", "accepted"), [("0", False), ("1", True), ("16", True), ("17", False)])
+@pytest.mark.parametrize(
+    ("value", "accepted"), [("0", False), ("1", True), ("16", True), ("17", False)]
+)
 def test_sync_walkers_is_from_one_to_sixteen(
     monkeypatch: pytest.MonkeyPatch, value: str, accepted: bool
 ) -> None:
@@ -7074,8 +7161,15 @@ async def test_the_walker_setting_reaches_every_adapter_the_deployment_builds() 
 
 `tests/unit/test_telemetry_metric_names.py`: `len(catalogue) == 42` becomes `== 43`.
 
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_config.py tests/unit/test_adapters_factory.py tests/unit/test_composition.py tests/unit/test_telemetry_metric_names.py`
-Expected: FAIL — `AttributeError: 'Settings' object has no attribute 'sync_walkers'`; the factory's `TypeError` on `listing_concurrency`; the composition case's `ValidationError` (`sync_walkers`: extra inputs are not permitted); the catalogue's 42 rows and the declared-names mismatch on `usher.source.listing.concurrency`.
+`tests/unit/test_dashboards.py`, `test_the_catalogue_scan_reaches_the_row_that_carries_no_usher_prefix` — PRD 10's table has a second reader: `assert len(catalogue) == 42, (` becomes `== 43`, and `not the 42 its own header` in its message becomes `not the 43 its own header`.
+
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_config.py tests/unit/test_adapters_factory.py tests/unit/test_composition.py tests/unit/test_telemetry_metric_names.py tests/unit/test_dashboards.py`
+Expected: FAIL —
+- `AttributeError: 'Settings' object has no attribute 'sync_walkers'`, in the defaults case and in `test_sync_walkers_is_from_one_to_sixteen[1-True]` and `[16-True]`;
+- `test_sync_walkers_is_from_one_to_sixteen[0-False]` and `[17-False]` with `DID NOT RAISE`: an environment variable no field declares is ignored;
+- the factory's `TypeError` on `listing_concurrency`;
+- the composition case's `ValidationError` (`sync_walkers`: extra inputs are not permitted);
+- both catalogue counts on 42 rows: `the catalogue table parse found 42 rows`, which stops that case before its declared-names line, and the dashboards reader's `PRD 10's metric table parsed to 42 rows`.
 
 - [ ] **Step 10: The setting, wired through, and said everywhere a setting is**
 
@@ -7173,20 +7267,20 @@ series.
 
 - [ ] **Step 11: Run everything this task touched**
 
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_adapters_emby_limit.py tests/unit/test_adapters_emby_adapter.py tests/unit/test_adapters_factory.py tests/unit/test_composition.py tests/unit/test_config.py tests/unit/test_console_settings_catalogue.py tests/unit/test_telemetry_metric_names.py tests/unit/test_docs_pointers.py`
-Expected: PASS.
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_adapters_emby_limit.py tests/unit/test_adapters_emby_adapter.py tests/unit/test_adapters_factory.py tests/unit/test_composition.py tests/unit/test_config.py tests/unit/test_deployment_config.py tests/unit/test_console_settings_catalogue.py tests/unit/test_telemetry_metric_names.py tests/unit/test_dashboards.py tests/unit/test_docs_pointers.py`
+Expected: PASS. `test_deployment_config.py` holds `.env.example` to `Settings`, both of which this task changed.
 
 Run, from `web/`: `npm run verify && npm run e2e && npm run e2e:visual`
-Expected: PASS. If a Configuration-screen screenshot moved because the ingest group gained a row, read the diff; update the baseline only if the only change is that row.
+Expected: PASS.
 
 - [ ] **Step 12: Plant and verify**
 
-1. `while self._in_flight > self._limit:` in `slot()`. Expect `test_a_new_limit_lets_its_ceiling_in_at_once_and_holds_the_next_until_one_leaves` to fail on `{0, 1, 2, 3}` and every `cap` parametrisation of the adapter's cap case to fail on `cap + 1 == cap`.
+1. `while self._in_flight > self._limit:` in `slot()`. Expect `test_a_new_limit_lets_its_ceiling_in_and_holds_the_next_until_one_leaves` to fail on `{0, 1, 2, 3}` and every `cap` parametrisation of the adapter's cap case to fail on `cap + 1 == cap`.
 2. `failed()` without `self._streak = 0`. Expect `test_a_failure_starts_the_run_of_successes_again` to fail, its first reading 2.
 3. `succeeded()` with `if self._limit < self._ceiling:` removed (the raise unconditional). Expect `test_ten_successes_in_a_row_raise_the_limit_by_one_up_to_its_ceiling` to fail on its last reading, 4.
 4. `succeeded()` without `self._wake.set()`. Expect `test_a_raised_limit_lets_a_waiting_page_in_while_the_first_still_holds` to fail on `{0}`.
 5. `RAISE_AFTER = 9`. Expect the ten-successes case to fail on `[1] * 8 + …`. (The adapter's drop case imports the constant and moves with it; the literal tens in the limit's cases are the spec's number.)
-6. `_concurrency.set(...)` removed from `failed()`. Expect the gauge case to fail, its second reading 3.
+6. `_concurrency.set(...)` removed from `failed()`. Expect the gauge case to fail, its second reading `[]`: the last-value aggregation resets on every collect, so a gauge nobody set since reads nothing.
 7. `_concurrency.set(ceiling, self._labels)` added to `__init__`. Expect the gauge case to fail on `no page yet, so no reading`.
 8. `_page`'s request sent without `async with self._listing_limit.slot():`. Expect all three `cap` parametrisations to fail on `5 == cap`.
 9. `_page` without `self._listing_limit.failed()`. Expect `test_a_retried_failure_lets_pages_in_one_at_a_time_until_ten_succeed` to fail on `{1, 2} == {1}`.
@@ -7205,7 +7299,7 @@ git add src/usher/adapters/emby/limit.py src/usher/adapters/emby/adapter.py \
   docs/prd/03-sources-and-sync.md docs/prd/08-operations.md docs/prd/10-telemetry-and-dashboards.md \
   CHANGELOG.md tests/unit/test_adapters_emby_limit.py tests/unit/test_adapters_emby_adapter.py \
   tests/unit/test_adapters_factory.py tests/unit/test_composition.py tests/unit/test_config.py \
-  tests/unit/test_telemetry_metric_names.py
+  tests/unit/test_telemetry_metric_names.py tests/unit/test_dashboards.py
 git commit -m "emby: cap the listing requests in flight, and back off on a failure"
 ```
 
@@ -7213,7 +7307,7 @@ git commit -m "emby: cap the listing requests in flight, and back off on a failu
 
 ### Task 16: The planned walk — walkers, one writer, the stage barrier, the heartbeat
 
-Spec §2.3, §2.4, the heartbeat half of §2.5 and the failure half of §2.6. A whole-library walk — a full walk, or a delta with no cursor — asks the adapter for its plan, stores the units, and walks them a stage at a time. Up to `walkers` walker tasks fetch a stage's units, largest first, and put their pages on a bounded queue; the reconcile task is the only writer. A unit's pages are committed once they add up to `USHER_SYNC_BATCH_SIZE` items and when the unit ends, each commit carrying the unit's position and a new heartbeat, and a writer waiting on its walkers beats the heartbeat at least once a minute. A unit that fails stops the walk. Resume (Task 17), `after_seed` (Task 18) and the event's new fields (Task 19) are not here: every planned run in this task is a fresh one.
+Spec §2.3, §2.4, the heartbeat half of §2.5 and the failure half of §2.6. A whole-library walk — a full walk, or a delta with no cursor — asks the adapter for its plan, stores the units, and walks them a stage at a time. Up to `walkers` walker tasks fetch a stage's units, largest first, and put their pages on a bounded queue; the reconcile task is the only writer. A unit's pages are committed once they add up to `USHER_SYNC_BATCH_SIZE` items and when the unit ends, each commit carrying the unit's position and a new heartbeat, and the writer beats the heartbeat at least once a minute between commits, whether pages are arriving or not. A unit that fails stops the walk. Resume (Task 17), `after_seed` (Task 18) and the event's new fields (Task 19) are not here: every planned run in this task is a fresh one.
 
 Departures 3, 4 and 7 happen here. **3:** a unit's pages are committed once they add up to `USHER_SYNC_BATCH_SIZE` items, and when the unit ends — not after every page. **4:** the run and its first heartbeat are committed before `plan_walk` is called; the units ride the next commit. **7:** on a failure, pages fetched but not yet committed are dropped, and the failing unit is saved `failed` at its committed position.
 
@@ -7225,7 +7319,7 @@ The gap-closer keeps the single walk however it is configured (spec §2.3), so i
 - Modify: `src/usher/services/reconcile.py`
 - Modify: `src/usher/config.py`, `src/usher/adapters/factory.py`, `src/usher/composition.py` (`adapter_factory`, `build_pipeline`), `src/usher/api/deps.py` (`get_reconcile_service`), `src/usher/api/lanes.py` (the gap-closer's `reconcile` call)
 - Modify: `tests/fakes/source_adapter.py` (`stage`, `fail_unit_after`, `hold`, `journal`)
-- Modify: `.env.example`, `web/src/features/operator/Config.settings.ts`, `docs/guide/configuration.md`, `docs/prd/03-sources-and-sync.md`, `docs/prd/08-operations.md`, `CHANGELOG.md`, `.claude/rules/emby-push-and-ingest.md`
+- Modify: `.env.example`, `web/src/features/operator/Config.settings.ts`, `docs/guide/configuration.md`, `docs/prd/02-data-model.md`, `docs/prd/03-sources-and-sync.md`, `docs/prd/08-operations.md`, `CHANGELOG.md`, `.claude/rules/emby-push-and-ingest.md`
 - Test: `tests/unit/test_services_reconcile.py`, `tests/unit/test_api_lanes.py`, `tests/unit/test_services_handlers.py` (`_RecordingReconcile`'s override), `tests/unit/test_config.py`, `tests/unit/test_adapters_factory.py`, `tests/unit/test_composition.py`, `tests/integration/test_services_reconcile.py`, `tests/integration/test_pipeline_spans.py`, `tests/integration/test_pipeline_deps.py`, `tests/integration/test_ingest_end_to_end.py`
 
 **Interfaces:**
@@ -7559,13 +7653,49 @@ async def test_a_writer_waiting_on_its_walkers_still_heartbeats() -> None:
             while fixture.commits < 5:
                 await asyncio.sleep(0.01)
         assert fixture.journal == [], "the premise: nothing was fetched while the writer waited"
-        beats = [heartbeat for _, heartbeat in fixture.checkpoints[2:5]]
-        assert None not in beats
+        beats = [beat for _, beat in fixture.checkpoints[2:5] if beat is not None]
+        assert len(beats) == 3
         assert beats == sorted(set(beats)), "a beat that did not move the heartbeat"
     finally:
         release.set()
         run = await walk
     assert run.status is SyncRunStatus.COMPLETED
+
+
+async def test_pages_that_keep_arriving_below_a_batch_still_let_the_heartbeat_move() -> None:
+    """A beat falls due a fixed time after the last commit, not after a silence.
+
+    Forty pages of one item, a hundredth of a second apart, never fill a batch, so a
+    writer that beat only when nothing arrived would not beat once in the walk.
+    """
+    fixture = _Fixture(heartbeat_seconds=0.1)
+    _shelve(fixture, "Films", range(1))
+
+    async def _trickle(key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage]:
+        for index in range(40):
+            await asyncio.sleep(0.01)
+            yield UnitPage((_item(f"t{index}"),), resume_at=index + 1)
+
+    fixture.adapter.list_unit = _trickle  # type: ignore[method-assign]
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    carried = [seen for seen, _ in fixture.checkpoints if seen]
+    assert carried[0] == 40, "the premise: the unit's forty items rode one commit"
+    beats = [beat for seen, beat in fixture.checkpoints[2:] if seen == 0]
+    assert len(beats) >= 2, "no beat while pages kept arriving"
+
+
+async def test_a_unit_that_ends_on_a_batch_boundary_publishes_no_second_frame() -> None:
+    """Its end commits an empty batch to save the unit `completed`, and that is no frame.
+
+    PRD 07 publishes one `sync.progress` per committed batch, and an empty one moved
+    no counter: four items in batches of two are two frames, not three.
+    """
+    fixture = _Fixture(batch_size=2)
+    _shelve(fixture, "Films", range(4))
+    run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    assert _progress(fixture) == [2, 4]
+    [unit] = await fixture.runs.units_for(run.id)
+    assert unit.status is SyncRunUnitStatus.COMPLETED
 
 
 async def test_a_delta_with_no_cursor_walks_the_plan_and_never_sweeps() -> None:
@@ -7801,7 +7931,9 @@ and ends:
 
         A whole-library walk -- a full walk, or a delta with no cursor -- walks the
         adapter's plan, unless `max_items` bounds it or `plan` is false; every other
-        walk is one stream. Never raises a `UsherPortError`.
+        walk is one stream.
+
+        Never raises a `UsherPortError`.
         """
 ```
 
@@ -7917,19 +8049,26 @@ After `_walk`:
 
         A unit's pages are held until they reach `batch_size` items or the unit
         ends, then committed with its position, the run's counters and a new
-        heartbeat. A wait on the walkers longer than `heartbeat_seconds` beats the
-        heartbeat alone. Returns once every unit has committed complete. A unit
-        that failed is saved `failed` at its committed position and its error
-        raised; the pages held for it are dropped.
+        heartbeat. A beat of the heartbeat alone falls due `heartbeat_seconds`
+        after the last commit or beat, whether or not pages are arriving.
+        Returns once every unit has committed complete. A unit that failed is
+        saved `failed` at its committed position and its error raised; the pages
+        held for it are dropped.
         """
         current = {unit.unit_key: unit for unit in units}
         held: dict[str, list[UnitPage]] = {key: [] for key in current}
         open_units = len(units)
+        # A deadline, not a silence: pages that keep arriving below a batch would
+        # otherwise hold every beat off.
+        due = time.monotonic() + self._heartbeat_seconds
         while open_units:
-            try:
-                fetched = await asyncio.wait_for(queue.get(), self._heartbeat_seconds)
-            except TimeoutError:
+            if time.monotonic() >= due:
                 await self._beat(progress)
+                due = time.monotonic() + self._heartbeat_seconds
+                continue
+            try:
+                fetched = await asyncio.wait_for(queue.get(), max(0.0, due - time.monotonic()))
+            except TimeoutError:
                 continue
             unit = current[fetched.unit_key]
             if fetched.error is not None:
@@ -7941,7 +8080,10 @@ After `_walk`:
                 if sum(len(page.items) for page in pages) < self._batch_size:
                     continue
             done = fetched.page is None
-            current[unit.unit_key] = await self._commit_unit(source, progress, unit, pages, done=done)
+            current[unit.unit_key] = await self._commit_unit(
+                source, progress, unit, pages, done=done
+            )
+            due = time.monotonic() + self._heartbeat_seconds
             held[unit.unit_key] = []
             if done:
                 open_units -= 1
@@ -7991,7 +8133,7 @@ After `_walk`:
     ) -> SyncRun:
 ```
 
-and, between the `run = run.evolve(…)` and `await self._runs.save(run)`:
+and, in its body, after the `run = run.evolve(…)` whose last line is `items_unmatched=run.items_unmatched + result.unmatched,` and before the `await self._runs.save(run)` that follows it — `run = run.evolve(` and that save each occur twice in the module, and this pair is `_flush`'s:
 
 ```python
         if unit is not None:
@@ -7999,10 +8141,21 @@ and, between the `run = run.evolve(…)` and `await self._runs.save(run)`:
             await self._runs.save_unit(unit)
 ```
 
+and its `await self._publish_progress(source, run)`, the line before `return run`, becomes:
+
+```python
+        if batch:
+            # A unit's end can commit an empty batch, to save the unit `completed`;
+            # it moved no counter, so it is no frame (PRD 07: one per batch).
+            await self._publish_progress(source, run)
+```
+
+A single walk never flushes an empty batch, so the guard changes only a planned walk's frames.
+
 - [ ] **Step 5: Run them to see them pass**
 
 Run the Step 3 command, then `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/integration/test_services_reconcile.py tests/integration/test_pipeline_spans.py`.
-Expected: PASS — the new cases and every existing one. A `FakeSourceAdapter` with no libraries plans the port's one unit, so every full walk in the unit file now walks a one-unit plan in pages of two; at the batch sizes those cases set (two, three, four), the commits and `sync.progress` counts they assert are unchanged.
+Expected: PASS — the new cases and every existing one. A `FakeSourceAdapter` with no libraries plans the port's one unit, so every full walk in the unit file now walks a one-unit plan in pages of two; at the batch sizes those cases set (two, three, four), the commits and `sync.progress` counts they assert are unchanged. One comment's count does change: in `test_a_run_checkpoints_every_batch`, `# Four batches, plus the run's own insert and its final save.` becomes `# Four batches, plus the run's insert, the beat that stores its plan, and its final save.` — seven commits, which its `>= 6` still holds.
 
 - [ ] **Step 6: Keep the statement count's premise true**
 
@@ -8137,7 +8290,9 @@ async def test_the_walk_settings_reach_the_reconciler_and_the_adapter() -> None:
         assert pipeline.reconcile._walkers == 3
         adapter = pipeline.adapters.build(_GATED, _GATE_CREDENTIALS)
         try:
-            assert isinstance(adapter, EmbyAdapter), "the premise: the factory built an Emby adapter"
+            assert isinstance(adapter, EmbyAdapter), (
+                "the premise: the factory built an Emby adapter"
+            )
             assert adapter._unit_max_items == 5_000
         finally:
             await adapter.aclose()
@@ -8195,7 +8350,7 @@ Expected: FAIL — `AttributeError: 'Settings' object has no attribute 'sync_uni
 
 `src/usher/adapters/factory.py` — `__init__` takes `unit_max_items: int = 100_000` after `listing_concurrency` and stores `self._unit_max_items = unit_max_items`; `build` passes `unit_max_items=self._unit_max_items` to `EmbyAdapter`.
 
-`src/usher/composition.py` — `adapter_factory`: `unit_max_items=settings.sync_unit_max_items,` after `listing_concurrency=…`. `build_pipeline`'s `ReconcileService(…)`: `walkers=settings.sync_walkers,` after `batch_size=settings.sync_batch_size,`.
+`src/usher/composition.py` — `adapter_factory`: `unit_max_items=settings.sync_unit_max_items,` after `listing_concurrency=…`. `build_pipeline`'s `ReconcileService(…)`: `walkers=settings.sync_walkers,` after the `batch_size=settings.sync_batch_size,` that is followed by `max_retract_fraction=(` — the other one is the watch lane's.
 
 `src/usher/api/deps.py`, `get_reconcile_service`: `walkers=settings.sync_walkers,` after `max_retract_fraction=…`.
 
@@ -8247,6 +8402,28 @@ episodes, a library larger than `USHER_SYNC_UNIT_MAX_ITEMS` (default 100,000)
 in several pieces. Up to `USHER_SYNC_WALKERS` pieces are read at once.
 ```
 
+and after it, the bound the page size sets on a piece. The figures follow from `MAX_PAGES` (10,000 pages per `_pages` call) and `OffsetWindow.advance`, whose reach-back is `min(PAGE_OVERLAP, served // 2)`. At a page of p, a piece of N items that ends on a short page needs N < p + 9,999 × (p − reach-back); an episode chunk ends at its bound instead, and needs its span, `USHER_SYNC_UNIT_MAX_ITEMS` + `PAGE_OVERLAP` items, to be at most p + 9,999 × (p − reach-back).
+
+```markdown
+`USHER_SOURCE_PAGE_SIZE` (default 1,000, at most 1,000) also bounds how large a
+piece can be. A sync reads at most 10,000 pages of one piece, and each page
+after the first moves on by the page size less a reach-back of 50 items, or of
+half the page below 100. A piece those pages do not finish fails:
+
+| Page size | A piece fails once it holds |
+|---|---|
+| 1,000 | 9,500,050 items |
+| 100 | 500,050 items |
+| 21 | 110,010 items |
+| 20 | 100,010 items |
+
+A piece of episodes reads 50 items past its end, so at a page size of 20 or
+less every full piece of `USHER_SYNC_UNIT_MAX_ITEMS` (100,000) fails. A server
+that serves fewer items a page than it is asked for moves on by what it serves.
+```
+
+If Task 10 moved the unit size to 50,000, that last paragraph's "20 or less" becomes "10 or less": a 50,050-item chunk needs a page of 11.
+
 `docs/prd/03-sources-and-sync.md`, "Walking the library" — after Task 15's `USHER_SYNC_WALKERS` bullet:
 
 ```markdown
@@ -8270,7 +8447,7 @@ add up to `USHER_SYNC_BATCH_SIZE` items, and when the unit ends. No unit of a
 stage is fetched until every unit of the stages before it has committed, so an
 episode always finds its series. A walk's units are kept in `sync_run_units`
 with the position each has committed to, and the run's `heartbeat_at` moves on
-every commit and at least once a minute while the writer waits. A unit that
+every commit and at least once a minute between commits. A unit that
 fails stops the walk: it is marked `failed` at its committed position, and
 pages fetched but not yet committed are dropped. A delta with a cursor, a
 bounded walk and the gap-closer keep the single walk.
@@ -8288,7 +8465,9 @@ a time); the cap backs off by itself. **`USHER_SYNC_UNIT_MAX_ITEMS`** (default
 ([03](03-sources-and-sync.md#walking-the-library)).
 ```
 
-`CHANGELOG.md`, under `### Added`:
+`docs/prd/02-data-model.md`, "Supporting tables", the `sync_runs` row: `` `heartbeat_at` (🔶 nothing moves it yet) `` becomes `` `heartbeat_at`, which a whole-library walk's writer moves on every commit ([03](03-sources-and-sync.md)) ``.
+
+`CHANGELOG.md`, under `## [Unreleased]`'s `### Added`:
 
 ```markdown
 - A whole-library walk — a full sync, or a source's first delta — walks a plan:
@@ -8299,12 +8478,17 @@ a time); the cap backs off by itself. **`USHER_SYNC_UNIT_MAX_ITEMS`** (default
   `heartbeat_at` shows the writer is alive.
 ```
 
-`.claude/rules/emby-push-and-ingest.md` — the intro paragraph's last sentence (`Beside it … back out.`) is followed by:
+`.claude/rules/emby-push-and-ingest.md` — the intro paragraph's last sentence (`Beside it … back out.`) is followed by a paragraph of its own:
 
 ```markdown
 A whole-library walk's walkers only fetch; the reconcile task is the one writer,
 because `AsyncSession` is not safe to share between tasks.
 ```
+
+The file is past its 200-line target, so the same edit cuts the three lines it adds, all of them how a rule was found rather than the rule (`rules-file-maintenance.md`):
+- in the write-back route bullet, `never has — and `FakeEmbyServer` implemented the adapter's own guess, so the` and the line after it, `whole contract suite passed against a write-back that had never worked.`, become the one line `never has.`;
+- the `PushSupervisor` bullet loses its last line, `Seeing any of this needs a fake with an **unbounded** supply of connections.`;
+- the dropped-socket bullet's `is**; no real `429` has ever been seen. Do not let the queue fill during that` and `walk.` become the one line `is**. Do not let the queue fill during that walk.`
 
 - [ ] **Step 11: Run everything this task touched**
 
@@ -8312,7 +8496,7 @@ Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit tests/in
 Expected: PASS. Every full walk in the unit suite — the CLI's, the job handler's, the lanes' — now walks a plan; a case that goes red here pinned the single walk, and is read before anything is changed.
 
 Run, from `web/`: `npm run verify && npm run e2e && npm run e2e:visual`
-Expected: PASS. If a Configuration-screen screenshot moved, read the diff; update the baseline only if the only change is the ingest group's new row and reworded text.
+Expected: PASS.
 
 - [ ] **Step 12: Plant and verify**
 
@@ -8332,8 +8516,10 @@ Expected: PASS. If a Configuration-screen screenshot moved, read the diff; updat
 14. `_flush` without `save_unit`. Expect `test_a_whole_library_walk_stores_its_plan_and_completes_every_unit` to fail, both units `PENDING` at 0.
 15. `_commit_unit` saving `status=SyncRunUnitStatus.COMPLETED` always. Expect the batch case to fail on `(4, 4, …)`: a completed unit takes no further write.
 16. The `walkers < 1` check removed. Expect `test_a_service_with_no_walkers_is_refused` to fail with `DID NOT RAISE`.
-17. Each wiring dropped in turn — `build_pipeline`'s `walkers=`, `get_reconcile_service`'s `walkers=`, the factory's `unit_max_items=`, `adapter_factory`'s `unit_max_items=`. Expect `test_the_walk_settings_reach_the_reconciler_and_the_adapter` (`4 == 3`), the deps probe, `test_the_deployment_tuning_reaches_the_adapter` (`100000 == 5000`) and the composition case (`100000 == 5000`) to fail, one each.
+17. Each wiring dropped in turn. `build_pipeline`'s `walkers=`: expect `test_the_walk_settings_reach_the_reconciler_and_the_adapter` to fail on `4 == 3`. `get_reconcile_service`'s `walkers=`: the deps probe, on `'walkers': 4`. The factory's `unit_max_items=`: both `test_the_deployment_tuning_reaches_the_adapter` and the composition case on `100000 == 5000`, because the composition case builds its adapter through the factory. `adapter_factory`'s `unit_max_items=`: the composition case alone, on `100000 == 5000`.
 18. `sync_unit_max_items` with `ge=999`, then separately `le=1_000_001`. Expect the `999`, then the `1000001`, parametrisation to fail with `DID NOT RAISE`.
+19. In `_write`, `due = time.monotonic() + self._heartbeat_seconds` also directly after `unit = current[fetched.unit_key]`, so every page puts the beat off. Expect `test_pages_that_keep_arriving_below_a_batch_still_let_the_heartbeat_move` to fail on `no beat while pages kept arriving`.
+20. `_flush`'s `if batch:` removed, the publish unconditional. Expect `test_a_unit_that_ends_on_a_batch_boundary_publishes_no_second_frame` to fail on `[2, 4, 4] == [2, 4]`.
 
 - [ ] **Step 13: Commit**
 
@@ -8341,8 +8527,8 @@ Expected: PASS. If a Configuration-screen screenshot moved, read the diff; updat
 git add src/usher/services/reconcile.py src/usher/config.py src/usher/adapters/factory.py \
   src/usher/composition.py src/usher/api/deps.py src/usher/api/lanes.py \
   tests/fakes/source_adapter.py .env.example web/src/features/operator/Config.settings.ts \
-  docs/guide/configuration.md docs/prd/03-sources-and-sync.md docs/prd/08-operations.md \
-  CHANGELOG.md .claude/rules/emby-push-and-ingest.md \
+  docs/guide/configuration.md docs/prd/02-data-model.md docs/prd/03-sources-and-sync.md \
+  docs/prd/08-operations.md CHANGELOG.md .claude/rules/emby-push-and-ingest.md \
   tests/unit/test_services_reconcile.py tests/unit/test_api_lanes.py tests/unit/test_config.py \
   tests/unit/test_services_handlers.py tests/unit/test_adapters_factory.py tests/unit/test_composition.py \
   tests/integration/test_services_reconcile.py tests/integration/test_pipeline_spans.py \
@@ -8356,25 +8542,32 @@ git commit -m "sync: walk a whole library as its planned units, with walkers and
 
 Spec §2.5's table, the resume half of §2.6, and §2.7's `started_at`. A whole-library walk first reads `latest_incomplete_run` for its kind. A `running` row whose heartbeat is under 10 minutes old is a live walk, and the new one raises `WalkRefused`. A row with units is resumed in place: the same row, the same `started_at`, its completed units skipped and every other unit continued from its committed position. Every other unfinished row of a whole-library walk is superseded — closed `failed` with `superseded: a whole-library walk restarts` unless it is `failed` already — and a fresh run starts. A delta row with neither units nor a heartbeat is a single walk's, and is left alone.
 
-`usher sync` prints the refusal and exits non-zero. The worker's `sync_handler` re-raises it as `PortUnavailable`, so `JobWorker` fails the job as retryable instead of logging a crash, and the queue retries it: a walk whose process died with the job's lease is resumed once its heartbeat goes stale, rather than waiting for someone to ask again. The gap-closer passes `plan=False` (Task 16), so it never claims and is never refused.
+`usher sync` prints the refusal and exits non-zero. The worker's `sync_handler` re-raises it as `PortUnavailable`, so `JobWorker` fails the job as retryable instead of logging a crash, and the queue retries it: a walk whose process died with the job's lease is resumed once its heartbeat goes stale, rather than waiting for someone to ask again. The gap-closer passes `plan=False` (Task 16), so its item walk never claims and is never refused.
 
-Departures 2, 5, 6 and 12 happen here. **2:** a resumed unit's first page can re-read up to `PAGE_OVERLAP` items its last committed page already counted; the cases below run on the fake, which has no overlap, so they assert nothing counted twice. **5:** a `failed` run with units resumes whatever its heartbeat says. **6:** a superseded row that is `failed` already keeps its own error. **12:** a run whose sweep was refused is not resumed. Its walk is what the refusal doubts — a library unmounted mid-walk reads exactly like one emptied — so the next attempt reads the library again; a resume would re-run the sweep over the same rows and refuse again.
+**The watch lane gets the same liveness.** `WatchStateSyncService.sync` sets `heartbeat_at`, the column Task 12 added, when it inserts or reclaims its run and with every batch it commits. The save that ends a run moves no heartbeat, as for a whole-library walk: only a `running` row is ever read as live. A `running` newest watch run whose heartbeat is under `STALE_AFTER` old is another process's walk, alive, and `sync` neither supersedes nor resumes it: it raises `WalkRefused` before it writes anything. A `running` watch run with no heartbeat predates `m10g`, and is taken for dead as before. `WalkRefused` stays in `reconcile.py`, and `watch_sync.py` imports it with `STALE_AFTER`: the import contracts let one service import another, `api/lanes.py` sits above both, and nothing `reconcile.py` imports leads back to `watch_sync.py`.
+
+`watch.sync` has three callers in the tree: `usher sync`, `sync_handler` and `LaneSupervisor._close_gap`. Task 18 adds a fourth, the after-seed hook, at the first two. `usher sync` prints a watch-lane refusal and exits non-zero, as for an item walk. `sync_handler` fails the job for a retry, as for an item walk, though the retry walks the job's items again before its watch lane. `_close_gap` logs it and returns: a refusal escaping it would end the source's push lane until the next refresh, and the walk already running, or the one after it, reads what the gap missed. The hook prints or logs it and lets the walk go on, because the watch run after the walk covers it (Task 18).
+
+Neither check is atomic. `_claim` and `sync` each read the newest run and write later, with no lock between, so two walks that start together can both proceed.
+
+Departures 2, 5, 6, 12 and 13 happen here. **2:** a resumed unit's first page can re-read up to `PAGE_OVERLAP` items its last committed page already counted; the cases below run on the fake, which has no overlap, so they assert nothing counted twice. That overlap is all a resume reaches back, so a resume after more than `PAGE_OVERLAP` deletions ahead of a unit's position misses items, as an in-walk shift does, without the WARNING. **5:** a `failed` run with units resumes whatever its heartbeat says. **6:** a superseded row that is `failed` already keeps its own error. **12:** a run whose sweep was refused is not resumed. Its walk is what the refusal doubts — a library unmounted mid-walk reads exactly like one emptied — so the next attempt reads the library again; a resume would re-run the sweep over the same rows and refuse again. **13:** the watch lane's liveness, above.
 
 `tests/integration/test_ingest_end_to_end.py::test_a_walk_that_dies_mid_run_leaves_a_resumable_catalog` now resumes its failed run instead of starting another, and its assertions still hold: the failed attempt held its unit's pages below a batch of 1,000 and committed none, so the resume walks all six items once.
 
 **Files:**
-- Modify: `src/usher/services/reconcile.py` (`STALE_AFTER`, `SUPERSEDED_ERROR`, `WalkRefused`, `reconcile`, `_claim`, `_supersede`, `_walk_plan`)
+- Modify: `src/usher/services/reconcile.py` (`STALE_AFTER`, `WALK_SUPERSEDED_ERROR`, `WalkRefused`, `reconcile`, `_claim`, `_supersede`, `_walk_plan`)
+- Modify: `src/usher/services/watch_sync.py` (`_now`, `__init__`, `sync`, `_flush`)
 - Modify: `src/usher/ports/repository/sync.py` (two docstrings)
-- Modify: `src/usher/services/handlers.py` (`sync_handler`), `src/usher/cli.py` (`_sync`, `_sync_failed`)
+- Modify: `src/usher/services/handlers.py` (`sync_handler`), `src/usher/cli.py` (`_sync`, `_sync_failed`), `src/usher/api/lanes.py` (`_close_gap`)
 - Modify: `tests/fakes/source_adapter.py` (`unit_starts`)
-- Modify: `docs/prd/03-sources-and-sync.md`, `CHANGELOG.md`, `docs/guide/command-line.md`, `.claude/rules/emby-push-and-ingest.md`
-- Test: `tests/unit/test_services_reconcile.py`, `tests/unit/test_services_handlers.py`, `tests/unit/test_cli.py`, `tests/integration/test_services_reconcile.py`, `tests/integration/test_cli_pipeline.py`
+- Modify: `docs/prd/02-data-model.md`, `docs/prd/03-sources-and-sync.md`, `CHANGELOG.md`, `docs/guide/command-line.md`, `.claude/rules/emby-push-and-ingest.md`
+- Test: `tests/unit/test_services_reconcile.py`, `tests/unit/test_services_watch_sync.py`, `tests/unit/test_services_handlers.py`, `tests/unit/test_cli.py`, `tests/unit/test_api_lanes.py`, `tests/integration/test_services_reconcile.py`, `tests/integration/test_cli_pipeline.py`
 
 **Interfaces:**
-- Consumes: Task 16's `reconcile(…, plan=…)`, `_walk_plan`, `_walk_stage`, `_beat`, the `clock`; `_failed` and `RETRACTION_ERROR_CODE`; Task 12's `units_for`, `save` (it keeps the greater `position` and never rewrites a `completed` row) and `save_unit`; Task 11's `pages_of`, which reaches a unit's `start_index` by reading past the items before it; Task 16's test helpers `_Ticks`, `_Fixture`, `_shelve`.
+- Consumes: Task 16's `reconcile(…, plan=…)`, `_walk_plan`, `_walk_stage`, `_beat`, the `clock`; `_failed` and `RETRACTION_ERROR_CODE`; Task 12's `units_for`, `save` (it keeps the greater `position` and never rewrites a `completed` row) and `save_unit`; Task 11's `pages_of`, which reaches a unit's `start_index` by reading past the items before it; Task 16's test helpers `_Ticks`, `_Fixture`, `_shelve`; Task 12's `SyncRun.heartbeat_at`; `WatchStateSyncService.sync`'s resume and Task 7's supersede in it; Task 16's `test_the_gap_closer_walks_one_stream_even_unbounded_and_uncursored`, which the gap-closer case below follows.
 - Produces (tests): `FakeSourceAdapter.unit_starts: list[tuple[str, int]]`, every `(key, start_index)` `list_unit` was asked for. The journal cannot say where a unit resumed: `pages_of` reads past the items before `start_index`, and `_walk_library` journals each one it yields.
-- Produces: `usher.services.reconcile.STALE_AFTER = timedelta(minutes=10)`, `SUPERSEDED_ERROR = "superseded: a whole-library walk restarts"`, `class WalkRefused(Exception)`; `_claim(source, kind) -> SyncRun | None`; `_walk_plan(…, *, resumed: bool)`. Task 18 adds `after_seed` beside `resumed`.
-- Produces (tests): in `tests/unit/test_services_reconcile.py`, `_Fixture(…, clock=None)`, `NOW`, `_Clock(now)` with a settable `.now`, and `_given_walk(fixture, *, heartbeat_at, status=RUNNING, kind=FULL, units=(), error=None)`. Task 18 reuses `_given_walk`.
+- Produces: `usher.services.reconcile.STALE_AFTER = timedelta(minutes=10)`, `WALK_SUPERSEDED_ERROR = "superseded: a whole-library walk restarts"` (not `SUPERSEDED_ERROR`, which `watch_sync` already names), `class WalkRefused(Exception)`, which `WatchStateSyncService.sync` raises too; `_claim(source, kind) -> SyncRun | None`; `_walk_plan(…, *, resumed: bool)`; `WatchStateSyncService(…, clock: Callable[[], datetime] = _now)`. Task 18 adds `after_seed` beside `resumed`.
+- Produces (tests): in `tests/unit/test_services_reconcile.py`, `_Fixture(…, clock=None)`, `NOW`, `_Clock(now)` with a settable `.now`, and `_given_walk(fixture, *, heartbeat_at, status=RUNNING, kind=FULL, units=(), error=None)`. Task 19 reuses `_Clock` and `NOW`. In `tests/unit/test_services_watch_sync.py`, its own `NOW` and `_Clock(now, *, step=timedelta(0))`, `_Fixture(…, clock=None)`, and `_given_watch_run(fixture, *, heartbeat_at, status=RUNNING, cursor_at=T0)`.
 
 - [ ] **Step 1: Write the failing service tests**
 
@@ -8698,28 +8891,154 @@ async def test_a_failed_whole_library_walk_resumes_in_place_against_real_sql(
     assert (unit.status, unit.position, unit.items_seen) == (SyncRunUnitStatus.COMPLETED, 5, 5)
 ```
 
+`tests/unit/test_services_watch_sync.py` — imports: `from datetime import UTC, datetime, timedelta`; `from usher.services.reconcile import WalkRefused` after the `usher.services.push` import. After `LAST_PLAYED`:
+
+```python
+NOW = datetime(2026, 10, 1, 12, tzinfo=UTC)
+
+
+class _Clock:
+    """A clock that reads whatever the case last set, moved on `step` at every read."""
+
+    def __init__(self, now: datetime, *, step: timedelta = timedelta(0)) -> None:
+        self.now = now
+        self.step = step
+
+    def __call__(self) -> datetime:
+        read = self.now
+        self.now += self.step
+        return read
+```
+
+`_Fixture.__init__` takes `clock: _Clock | None = None` after `lossy`, sets `self.clock = clock if clock is not None else _Clock(NOW)` before it builds the service, and passes `clock=self.clock` after `batch_size=batch_size`. A fixed clock changes nothing the existing cases see: none leaves a run `running` and then syncs again. Append to the file:
+
+```python
+# -- a live watch walk is refused, and neither superseded nor resumed ---------
+
+
+async def _given_watch_run(
+    fixture: _Fixture,
+    *,
+    heartbeat_at: datetime | None,
+    status: SyncRunStatus = SyncRunStatus.RUNNING,
+    cursor_at: datetime | None = T0,
+) -> SyncRun:
+    """An unfinished watch run two states in, as another process left it, live or dead."""
+    run = SyncRun(
+        source_id=fixture.source.id,
+        kind=SyncRunKind.WATCH_STATE,
+        status=status,
+        cursor_at=cursor_at,
+        position=2,
+        items_seen=2,
+        heartbeat_at=heartbeat_at,
+        started_at=T0,
+    )
+    await fixture.runs.add(run)
+    return run
+
+
+@pytest.mark.parametrize("cursor_at", [None, T0], ids=["first-walk", "delta"])
+async def test_a_live_watch_walk_refuses_a_second_and_writes_nothing(
+    fixture: _Fixture, cursor_at: datetime | None
+) -> None:
+    """A first walk would be superseded and a delta resumed; a live one is neither."""
+    live = await _given_watch_run(fixture, heartbeat_at=NOW, cursor_at=cursor_at)
+
+    with pytest.raises(
+        WalkRefused, match="a watch-state walk of Living Room Emby is already running"
+    ):
+        await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
+
+    assert await fixture.runs.get(live.id) == live, "the refused walk wrote the live row"
+    assert len(await fixture.runs.list_for_source(fixture.source.id)) == 1
+    assert fixture.adapter.resumed_from == [], "the refused walk asked the source for states"
+    assert fixture.commits == 0
+
+
+@pytest.mark.parametrize(
+    ("age", "refused"),
+    [(timedelta(minutes=10) - timedelta(seconds=1), True), (timedelta(minutes=10), False)],
+)
+async def test_a_running_watch_walk_is_refused_until_its_heartbeat_is_ten_minutes_old(
+    fixture: _Fixture, age: timedelta, refused: bool
+) -> None:
+    """A killed walk's row still says `running`; only its heartbeat tells it from a live one."""
+    dead = await _given_watch_run(fixture, heartbeat_at=NOW - age)
+    if refused:
+        with pytest.raises(WalkRefused):
+            await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
+        return
+    run = await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
+    assert (run.id, run.status) == (dead.id, SyncRunStatus.COMPLETED)
+    assert fixture.adapter.resumed_from == [2]
+    assert fixture.saved[0].heartbeat_at == NOW, "the reclaim kept the dead walk's heartbeat"
+
+
+async def test_a_failed_watch_walk_resumes_however_fresh_its_heartbeat(fixture: _Fixture) -> None:
+    """A `failed` row recorded its own end, so its heartbeat says nothing about a live walk."""
+    failed = await _given_watch_run(fixture, heartbeat_at=NOW, status=SyncRunStatus.FAILED)
+    run = await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
+    assert (run.id, run.status) == (failed.id, SyncRunStatus.COMPLETED)
+
+
+async def test_a_watch_walk_that_fails_before_its_first_batch_still_leaves_its_heartbeat(
+    fixture: _Fixture,
+) -> None:
+    """The insert carries the first beat, so a walk that dies at once is still dated."""
+    await fixture.given_matched("movie-0")
+    fixture.adapter.seed_state(
+        SourceWatchState(external_id="movie-0", position_seconds=0, played=True)
+    )
+    fixture.adapter.fail_after(0)
+    run = await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
+    assert (run.status, run.items_seen) == (SyncRunStatus.FAILED, 0), "the premise: no batch"
+    assert run.heartbeat_at == NOW
+
+
+async def test_every_batch_of_a_watch_walk_moves_its_heartbeat() -> None:
+    """A clock a second on at every read: the insert reads `NOW`, and each batch the next."""
+    fixture = _Fixture(batch_size=2, clock=_Clock(NOW, step=timedelta(seconds=1)))
+    await fixture.given_completed_walk()
+    for index in range(5):
+        await fixture.given_matched(f"movie-{index}")
+
+    await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
+
+    assert fixture.positions == [2, 4, 5], "the premise: three batches committed"
+    beats = [
+        saved.heartbeat_at for saved in fixture.saved if saved.status is SyncRunStatus.RUNNING
+    ]
+    assert beats == [NOW + timedelta(seconds=seconds) for seconds in (1, 2, 3)]
+```
+
+A `running` watch run with no heartbeat is already covered: `test_a_running_run_left_by_a_killed_process_is_reclaimed_not_orphaned` resumes one, and `test_an_unfinished_first_walk_is_superseded_rather_than_resumed` closes one.
+
 - [ ] **Step 2: Run them to see them fail**
 
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_services_reconcile.py tests/integration/test_services_reconcile.py::test_a_failed_whole_library_walk_resumes_in_place_against_real_sql`
-Expected: FAIL — the unit module errors at collection with `ImportError: cannot import name 'WalkRefused'`; the integration case on `assert second.id == first.id`, the second walk having started a run of its own.
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_services_reconcile.py tests/unit/test_services_watch_sync.py`, then `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/integration/test_services_reconcile.py::test_a_failed_whole_library_walk_resumes_in_place_against_real_sql`
+Expected: FAIL. The first command stops at collection, both modules raising `ImportError: cannot import name 'WalkRefused'`, and runs nothing. The second fails on `assert second.id == first.id`, the second walk having started a run of its own.
 
-- [ ] **Step 3: Claim, resume and supersede**
+- [ ] **Step 3: Claim, resume and supersede, and refuse a live watch walk**
 
 `src/usher/services/reconcile.py` — `from datetime import UTC, datetime, timedelta`. After `RETRACTION_ERROR_CODE`:
 
 ```python
-#: How long a whole-library walk's heartbeat may stand still before the walk is taken for dead.
+#: How long a walk's heartbeat may stand still before the walk is taken for dead.
 STALE_AFTER = timedelta(minutes=10)
 
 #: What a superseded whole-library walk's row says.
-SUPERSEDED_ERROR = "superseded: a whole-library walk restarts"
+WALK_SUPERSEDED_ERROR = "superseded: a whole-library walk restarts"
 
 
 class WalkRefused(Exception):
-    """A whole-library walk of this source and kind is already running."""
+    """Another walk of this source and kind is alive.
+
+    A whole-library walk raises it from `_claim`, and the watch lane from its `sync`.
+    """
 ```
 
-In `reconcile`, the docstring gains a paragraph before `Never raises a `UsherPortError`.`:
+In `reconcile`, the docstring gains a paragraph after `walk is one stream.`, before its closing `Never raises a `UsherPortError`.`:
 
 ```python
         A whole-library walk resumes its kind's unfinished run in place and raises
@@ -8772,6 +9091,9 @@ After `cursor_for`:
         other unfinished row of a whole-library walk -- one that died before its plan
         was stored, or a full walk from before units existed -- is superseded. A delta
         with neither units nor a heartbeat is a single walk's, and is left alone.
+
+        Not atomic: the check is a read and the claim a later write, with nothing
+        locking between them, so two walks that start together can both proceed.
         """
         newest = await self._runs.latest_incomplete_run(source.id, kind)
         if newest is None:
@@ -8795,7 +9117,7 @@ After `cursor_for`:
         One already `failed` is closed already, and keeps its own error.
         """
         if run.status is SyncRunStatus.RUNNING:
-            await self._runs.save(self._failed(run, SUPERSEDED_ERROR, code=None))
+            await self._runs.save(self._failed(run, WALK_SUPERSEDED_ERROR, code=None))
 ```
 
 `_walk_plan` becomes:
@@ -8836,7 +9158,7 @@ After `cursor_for`:
                 await self._walk_stage(source, progress, adapter, staged)
 ```
 
-`src/usher/ports/repository/sync.py` — in `SyncRunRepository`'s docstring, `grain, and only for `WATCH_STATE`: it hands a walk back its own unfinished row so the next attempt continues it in place.` becomes `grain: it hands the watch lane, or a whole-library walk, back its own unfinished row so the next attempt continues it in place.` (rewrapped). In `latest_incomplete_run`'s docstring, the last paragraph becomes:
+`src/usher/ports/repository/sync.py` — in `SyncRunRepository`'s docstring, `grain, and only for `WATCH_STATE`: it hands a walk back its own unfinished row, which the next attempt continues in place when the walk is a delta.` becomes `grain: it hands the watch lane, or a whole-library walk, back its own unfinished row, which the next attempt continues in place -- the watch lane's only when its walk is a delta.` (rewrapped). In `latest_incomplete_run`'s docstring, the last paragraph becomes:
 
 ```python
         The watch lane's, and a whole-library walk's: a cursored delta restarts
@@ -8844,10 +9166,55 @@ After `cursor_for`:
         rather than the run when it fails.
 ```
 
+`src/usher/services/watch_sync.py` — the watch lane's liveness. `from usher.services.reconcile import STALE_AFTER, WalkRefused`. After `SUPERSEDED_ERROR`:
+
+```python
+def _now() -> datetime:
+    return datetime.now(UTC)
+```
+
+`__init__` takes `clock: Callable[[], datetime] = _now` after `batch_size`, and its body ends `self._clock = clock`. `sync`'s docstring becomes:
+
+```python
+        """Walk this source's watch state into the catalog.
+
+        Raises `WalkRefused`, having written nothing, while another walk of this
+        lane is alive. Never raises a `UsherPortError`.
+        """
+```
+
+After `incomplete = await self._runs.latest_incomplete_run(source.id, SyncRunKind.WATCH_STATE)`, before the supersede:
+
+```python
+            if (
+                incomplete is not None
+                and incomplete.status is SyncRunStatus.RUNNING
+                and incomplete.heartbeat_at is not None
+                and self._clock() - incomplete.heartbeat_at < STALE_AFTER
+            ):
+                # Another process's walk, alive: superseding it would close the row
+                # under it, and resuming it would put two walks on one row. A row
+                # with no heartbeat predates heartbeats, and is taken for dead.
+                raise WalkRefused(f"a watch-state walk of {source.name} is already running")
+```
+
+The fresh run's `SyncRun(…)` gains `heartbeat_at=self._clock(),` after `started_at=attempt_started,`. The reclaim, `run = incomplete.evolve(status=SyncRunStatus.RUNNING, error=None, finished_at=None)`, becomes:
+
+```python
+                run = incomplete.evolve(
+                    status=SyncRunStatus.RUNNING,
+                    error=None,
+                    finished_at=None,
+                    heartbeat_at=self._clock(),
+                )
+```
+
+`_flush`'s `run.evolve(…)` gains `heartbeat_at=self._clock(),` after `position=position,`. The save that ends the run moves no heartbeat: a `completed` or `failed` row is never live.
+
 - [ ] **Step 4: Run them to see them pass**
 
-Run the Step 2 command, then `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_services_reconcile.py tests/integration/test_services_reconcile.py tests/integration/test_ingest_end_to_end.py tests/contract`
-Expected: PASS, including every Task 16 case — each of those starts from an empty history, so each claim finds nothing.
+Run the Step 2 commands, then `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_services_reconcile.py tests/unit/test_services_watch_sync.py tests/integration/test_services_reconcile.py tests/integration/test_services_watch_sync.py tests/integration/test_ingest_end_to_end.py tests/contract`
+Expected: PASS, including every Task 16 case — each of those starts from an empty history, so each claim finds nothing — and every earlier watch case, none of which leaves a live row behind it.
 
 - [ ] **Step 5: Write the failing caller tests**
 
@@ -8877,6 +9244,26 @@ async def test_a_refused_walk_fails_the_job_so_the_queue_retries_it(
     assert events == ["reconcile"], "the watch lane ran after the walk was refused"
     with pytest.raises(PortUnavailable):
         await adapter.get_item("anything")
+
+
+async def test_a_refused_watch_lane_fails_the_job_so_the_queue_retries_it(
+    source: Source, adapter: FakeSourceAdapter
+) -> None:
+    """Failed for a retry like a refused item walk, though the retry walks the items again."""
+    sources = FakeSourceRepository()
+    await sources.add(source)
+    events: list[str] = []
+    refusal = WalkRefused(f"a watch-state walk of {source.name} is already running")
+    reconcile = _RecordingReconcile(events)
+    watch = _RecordingWatch(events, raises=refusal)
+
+    with pytest.raises(PortUnavailable, match="is already running") as caught:
+        await sync_handler(sources, reconcile, watch, _Opener(adapter), user_id=_USER)(
+            Job(kind=JobKind.SYNC, key=f"{source.id}:full")
+        )
+
+    assert caught.value.__cause__ is refusal
+    assert events == ["reconcile", "watch"]
 ```
 
 `tests/unit/test_cli.py` — `_sync_failed` joins the `usher.cli` import. Append:
@@ -8885,7 +9272,7 @@ async def test_a_refused_walk_fails_the_job_so_the_queue_retries_it(
 def test_the_exit_line_names_each_source_whose_walk_was_refused() -> None:
     """No run failed, and the command still must not claim success."""
     assert _sync_failed([], ["cli-a", "cli-b"]) == (
-        "refused for cli-a, cli-b: a whole-library walk of each is already running"
+        "refused for cli-a, cli-b: another walk of each is still running"
     )
 ```
 
@@ -8938,14 +9325,98 @@ async def test_usher_sync_exits_non_zero_when_a_live_walk_refuses_it(
     assert "cli-walking: refused: a whole-library walk of cli-walking is already running" in out
     assert "watch_state" not in out, "the watch lane ran after the walk was refused"
     assert exited.value.code == (
-        "refused for cli-walking: a whole-library walk of each is already running"
+        "refused for cli-walking: another walk of each is still running"
     )
+
+
+async def test_usher_sync_exits_non_zero_when_a_live_watch_walk_refuses_its_watch_lane(
+    cli_settings: Settings,
+    clean_slate: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The item walk is printed and kept, though the watch lane after it is refused."""
+    source = Source(
+        kind=SourceKind.EMBY,
+        name="cli-watching",
+        base_url="https://emby.invalid",
+        credentials_ref=f"ref-{new_id()}",
+        device_id=str(new_id()),
+    )
+    live = SyncRun(
+        source_id=source.id, kind=SyncRunKind.WATCH_STATE, heartbeat_at=datetime.now(UTC)
+    )
+    async with _session_for(cli_settings) as session:
+        await PostgresSourceRepository(session).add(source)
+        await PostgresSyncRunRepository(session).add(live)
+        await session.commit()
+    adapter = FakeSourceAdapter(source)
+    adapter.go_offline()
+
+    async def _opened(pipeline: object, chosen: Source) -> FakeSourceAdapter:
+        return adapter
+
+    monkeypatch.setattr("usher.cli._open_adapter", _opened)
+
+    with pytest.raises(SystemExit) as exited:
+        await _sync(
+            cli_settings, source_name="cli-watching", kind="full", allow_full_retraction=False
+        )
+
+    out = capsys.readouterr().out
+    assert "cli-watching: full failed" in out, "the premise: the item walk ran, and failed"
+    assert "cli-watching: refused: a watch-state walk of cli-watching is already running" in out
+    assert exited.value.code == (
+        "1 sync run(s) failed: full; see the lines above and `usher sync-status`\n"
+        "refused for cli-watching: another walk of each is still running"
+    )
+```
+
+`tests/unit/test_api_lanes.py`, after Task 16's `test_the_gap_closer_walks_one_stream_even_unbounded_and_uncursored`:
+
+```python
+async def test_a_gap_close_whose_watch_lane_is_refused_leaves_the_push_lane_running(
+    fakes: _Fakes,
+) -> None:
+    """Another process's watch walk is alive, so the gap-closer says so and goes on.
+
+    A refusal escaping `_close_gap` would end this source's push lane until the next
+    refresh, which `crashed_sources()` names.
+    """
+    source = _source("A")
+    await _seed(fakes, source)
+    await _completed_walk(fakes, source)
+    await fakes.runs.add(
+        SyncRun(
+            source_id=source.id,
+            kind=SyncRunKind.WATCH_STATE,
+            cursor_at=_SYNCED_AT,
+            heartbeat_at=datetime.now(UTC),
+        )
+    )
+    fakes.adapters.stock(_item("emby-1"), _CHANGED_AT)
+    sink = io.StringIO()
+    supervisor = _supervisor(fakes, worker_enabled=False)
+    logger.remove()
+    try:
+        logger.add(sink, level="INFO")
+        await supervisor.start()
+        await _drain(
+            lambda: "watch-state gap" in sink.getvalue() or bool(supervisor.crashed_sources())
+        )
+        crashed = supervisor.crashed_sources()
+    finally:
+        logger.remove()
+        await supervisor.stop()
+    assert crashed == [], sink.getvalue()
+    assert fakes.watch_synced == ["A"], "the premise: the watch lane was asked"
+    assert _stored(fakes.media_items) == ["emby-1"], "the item lane's delta did not run first"
 ```
 
 - [ ] **Step 6: Run them to see them fail**
 
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_services_handlers.py tests/unit/test_cli.py tests/integration/test_cli_pipeline.py -k "refused"`
-Expected: FAIL — the handler case with `WalkRefused` raised where `PortUnavailable` was expected; the exit-line case with `TypeError: _sync_failed() takes 1 positional argument but 2 were given`; the CLI case with `WalkRefused` propagating out of `_sync`.
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_services_handlers.py tests/unit/test_cli.py tests/unit/test_api_lanes.py tests/integration/test_cli_pipeline.py -k "refused or refuses"`
+Expected: FAIL — both handler cases with `WalkRefused` raised where `PortUnavailable` was expected; the exit-line case with `TypeError: _sync_failed() takes 1 positional argument but 2 were given`; both CLI cases with `WalkRefused` propagating out of `_sync`; the gap-closer case on `crashed == []`, which reads `['A']`. The other cases the filter selects are older refusals, and pass.
 
 - [ ] **Step 7: Handle the refusal at both callers**
 
@@ -8969,11 +9440,21 @@ and the walk becomes:
             await adapter.aclose()
 ```
 
-`src/usher/cli.py` — `from usher.services.reconcile import RETRACTION_ERROR_CODE, WalkRefused`. In `_sync`, `failed: list[SyncRun] = []` gains `refused: list[str] = []` below it; the `try:` around the two lanes gains, before its `finally:`:
+The `try` holds the watch lane's call too, so a refused watch lane fails the job the same way.
+
+`src/usher/cli.py` — `from usher.services.reconcile import RETRACTION_ERROR_CODE, WalkRefused`. In `_sync`, `failed: list[SyncRun] = []` gains `refused: list[str] = []` below it. Each run is kept as soon as it is printed, so a failed item walk is kept even when its watch lane is refused: `failed.extend(one for one in (run, watch) if one.status is SyncRunStatus.FAILED)` goes, and the item walk's `print(…)` is followed by
+
+```python
+                if run.status is SyncRunStatus.FAILED:
+                    failed.append(run)
+```
+
+and the watch lane's `print(…)` by the same two lines with `watch` for `run`. The `try:` around the two lanes gains, before its `finally:`:
 
 ```python
             except WalkRefused as exc:
-                # Another process is walking this source, and runs its watch lane after.
+                # Another process's walk of this source is alive: an item walk, which
+                # runs its watch lane after, or the watch lane's own.
                 print(f"{source.name}: refused: {exc}")
                 refused.append(source.name)
 ```
@@ -9012,7 +9493,7 @@ def _sync_failed(runs: Sequence[SyncRun], refused: Sequence[str] = ()) -> str:
         )
     if refused:
         lines.append(
-            f"refused for {', '.join(refused)}: a whole-library walk of each is already running"
+            f"refused for {', '.join(refused)}: another walk of each is still running"
         )
     if any(one.error_code == RETRACTION_ERROR_CODE for one in runs):
         lines.append(
@@ -9020,6 +9501,22 @@ def _sync_failed(runs: Sequence[SyncRun], refused: Sequence[str] = ()) -> str:
             "re-run with `usher sync --allow-full-retraction`"
         )
     return "\n".join(lines)
+```
+
+`src/usher/api/lanes.py` — `from usher.services.reconcile import WalkRefused`. In `_close_gap`, `await pipeline.watch.sync(source, adapter, user_id=await self._user_id())` becomes:
+
+```python
+            try:
+                await pipeline.watch.sync(source, adapter, user_id=await self._user_id())
+            except WalkRefused as exc:
+                # Another process's watch walk is alive. Escaping, this would end the push
+                # lane until the next refresh; that walk, or the next, reads the gap.
+                logger.info(
+                    "not closing {source}'s watch-state gap: {error}, and that walk or the "
+                    "next reads what changed meanwhile",
+                    source=source.name,
+                    error=str(exc),
+                )
 ```
 
 Run the Step 6 command. Expected: PASS.
@@ -9041,13 +9538,25 @@ starts, and such a run left `running` is closed `failed` with `superseded: a
 whole-library walk restarts`.
 ```
 
-`CHANGELOG.md`, under `### Added`:
+The same file's paragraph beginning `**A watch-lane delta is resumable.**` gains, after its last sentence, `Nothing schedules it.`:
+
+```markdown
+A watch run moves its heartbeat when it starts and with every batch it
+commits, and one still `running` whose heartbeat is under 10 minutes old is
+alive: a second watch run neither resumes nor closes it, but is refused —
+`usher sync` exits non-zero, a worker job fails and is retried, and the push
+lane's gap-closer leaves the watch lane to the walk already running.
+```
+
+`docs/prd/02-data-model.md`, "Supporting tables", the `sync_runs` row: Task 16's `` `heartbeat_at`, which a whole-library walk's writer moves on every commit ([03](03-sources-and-sync.md)) `` becomes `` `heartbeat_at`, which a whole-library walk's writer moves on every commit and the watch lane when it starts a run and with every batch ([03](03-sources-and-sync.md)) ``.
+
+`CHANGELOG.md`, under `## [Unreleased]`'s `### Added`:
 
 ```markdown
 - A whole-library walk that fails or is killed resumes where it stopped: the
   same run, each unit from the position it committed. While one is alive — its
   heartbeat under 10 minutes old — a second is refused, and `usher sync` exits
-  non-zero.
+  non-zero. A watch-state walk is refused the same way while another is alive.
 ```
 
 `docs/guide/command-line.md`, "Syncing a media server". The bullet beginning `` **`usher sync` exits non-zero if any walk failed** `` becomes these two bullets:
@@ -9055,7 +9564,8 @@ whole-library walk restarts`.
 ```markdown
 - **`usher sync` exits non-zero if any walk failed or was refused**, after it
   has tried every source, so cron can notice. A walk of a whole library is
-  refused while another of the same kind is still running for that source.
+  refused while another of the same kind is still running for that source,
+  and a watch-state walk while another watch-state walk is.
 - **A walk of a whole library that stops part-way resumes.** The next walk of
   the same kind continues where each piece stopped, rather than starting again.
 ```
@@ -9063,14 +9573,19 @@ whole-library walk restarts`.
 `.claude/rules/emby-push-and-ingest.md`, "Rules the pipeline enforces", after the `observed_at` bullet:
 
 ```markdown
-- **A resumed whole-library walk keeps its run's `started_at`.** Every item an
-  earlier attempt saw carries that instant, so a fresh one makes the sweep
-  retract them all.
+- **A resumed whole-library walk keeps its run's `started_at`**: every item an
+  earlier attempt saw carries that instant, and a fresh one retracts them all.
 ```
+
+The file is past its 200-line target, so the same edit cuts the two lines it adds, both of them how a rule was found rather than the rule (`rules-file-maintenance.md`):
+- the write-back body bullet loses its last line, `` (`PlayCount` and `LastPlayedDate` survive the same omission.) ``;
+- in the Tier 4 bullet, `` `tmdb_id`. A probe with **no** year resolves nothing at all: the year `` and the line after it, `` `BETWEEN` propagates `NULL`, so "0.0%" there is not a bug. ``, become the one line `` `tmdb_id`. ``
+
+In "Gap-closing walks are unasked-for work", `` (`SUPERSEDED_ERROR`) `` becomes `` (`watch_sync.SUPERSEDED_ERROR`) ``: `WALK_SUPERSEDED_ERROR` is the other one.
 
 - [ ] **Step 9: Run everything this task touched**
 
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit tests/contract tests/integration/test_services_reconcile.py tests/integration/test_ingest_end_to_end.py tests/integration/test_cli_pipeline.py`
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit tests/contract tests/integration/test_services_reconcile.py tests/integration/test_services_watch_sync.py tests/integration/test_ingest_end_to_end.py tests/integration/test_push_lane_end_to_end.py tests/integration/test_cli_pipeline.py`
 Expected: PASS.
 
 - [ ] **Step 10: Plant and verify**
@@ -9091,15 +9606,27 @@ Expected: PASS.
 14. `sync_handler` without its `except WalkRefused`. Expect the handler case to fail with `WalkRefused` where `PortUnavailable` was expected.
 15. `_sync` without its `except WalkRefused`. Expect the CLI case to fail with `WalkRefused` out of `_sync`.
 16. `_sync_failed` without the refused line. Expect the exit-line case to fail.
+17. The watch lane's live check with `<=` for `<`. Expect the `10:00` parametrisation of `test_a_running_watch_walk_is_refused_until_its_heartbeat_is_ten_minutes_old` to fail with `WalkRefused`.
+18. The watch lane's live check without `incomplete.status is SyncRunStatus.RUNNING`. Expect `test_a_failed_watch_walk_resumes_however_fresh_its_heartbeat` to fail with `WalkRefused`.
+19. Its last two conjuncts spelled `self._clock() - (incomplete.heartbeat_at or self._clock()) < STALE_AFTER`, a row with no heartbeat counting as live. Expect `test_a_running_run_left_by_a_killed_process_is_reclaimed_not_orphaned` and `test_an_unfinished_first_walk_is_superseded_rather_than_resumed` to fail with `WalkRefused`.
+20. The refusal moved below the supersede. Expect the `first-walk` parametrisation of `test_a_live_watch_walk_refuses_a_second_and_writes_nothing` to fail with `DID NOT RAISE`: the live first walk was closed instead.
+21. The watch lane's insert without `heartbeat_at=…`. Expect `test_a_watch_walk_that_fails_before_its_first_batch_still_leaves_its_heartbeat` to fail on `None == NOW`, and `test_every_batch_of_a_watch_walk_moves_its_heartbeat` on its beats, each a second early.
+22. The watch lane's `_flush` without `heartbeat_at=…`. Expect `test_every_batch_of_a_watch_walk_moves_its_heartbeat` to fail, every beat reading `NOW`.
+23. The watch lane's reclaim without `heartbeat_at=…`. Expect the `10:00` parametrisation of `test_a_running_watch_walk_is_refused_until_its_heartbeat_is_ten_minutes_old` to fail on `fixture.saved[0].heartbeat_at == NOW`.
+24. `sync_handler`'s watch call moved below its `try` statement. Expect `test_a_refused_watch_lane_fails_the_job_so_the_queue_retries_it` to fail with `WalkRefused` where `PortUnavailable` was expected.
+25. `_close_gap` without its `except WalkRefused`. Expect `test_a_gap_close_whose_watch_lane_is_refused_leaves_the_push_lane_running` to fail on `crashed == []`, which reads `['A']`.
+26. `_sync` keeping its runs after the watch lane, as before: `failed.extend(one for one in (run, watch) if one.status is SyncRunStatus.FAILED)` in place of the two `if`s. Expect `test_usher_sync_exits_non_zero_when_a_live_watch_walk_refuses_its_watch_lane` to fail on its exit line, which no longer names the failed item walk.
 
 - [ ] **Step 11: Commit**
 
 ```bash
-git add src/usher/services/reconcile.py src/usher/ports/repository/sync.py \
-  src/usher/services/handlers.py src/usher/cli.py tests/fakes/source_adapter.py \
+git add src/usher/services/reconcile.py src/usher/services/watch_sync.py \
+  src/usher/ports/repository/sync.py src/usher/services/handlers.py src/usher/cli.py \
+  src/usher/api/lanes.py tests/fakes/source_adapter.py docs/prd/02-data-model.md \
   docs/prd/03-sources-and-sync.md CHANGELOG.md docs/guide/command-line.md \
   .claude/rules/emby-push-and-ingest.md tests/unit/test_services_reconcile.py \
-  tests/unit/test_services_handlers.py tests/unit/test_cli.py \
+  tests/unit/test_services_watch_sync.py tests/unit/test_services_handlers.py \
+  tests/unit/test_cli.py tests/unit/test_api_lanes.py \
   tests/integration/test_services_reconcile.py tests/integration/test_cli_pipeline.py
 git commit -m "sync: resume an unfinished whole-library walk in place, and refuse a second live one"
 ```
@@ -9108,20 +9635,20 @@ git commit -m "sync: resume an unfinished whole-library walk in place, and refus
 
 ### Task 18: The watch lane runs as soon as the seed has committed
 
-Spec §2.4, "The watch lane runs after the seed". `reconcile` takes an optional `after_seed` hook and awaits it once every `SEED` unit has committed complete, before any `TITLES` unit is claimed. A resumed walk whose seed completed in an earlier attempt awaits it too, because that attempt may have died before its watch run did. A plan with no `SEED` unit, and every single walk, never calls it. `usher sync` and the worker's `sync_handler` pass a hook that runs `WatchStateSyncService.sync`, and still run the watch lane after the walk.
+Spec §2.4, "The watch lane runs after the seed". `reconcile` takes an optional `after_seed` hook and awaits it once every `SEED` unit has committed complete, before any `TITLES` unit is claimed. A resumed walk whose seed completed in an earlier attempt awaits it too, because that attempt may have died before its watch run did. A plan with no `SEED` unit, and every single walk, never calls it. `usher sync` and the worker's `sync_handler` pass a hook that runs `WatchStateSyncService.sync`, and still run the watch lane after the walk. The hook never stops the walk. A watch run it starts that is refused (Task 17) is reported — `usher sync` prints it and exits non-zero once every source is done, and a worker job logs it — and the walk goes on, the watch run after the walk covering what the refused one would have read. `usher sync` keeps a failed watch run from the hook for its exit line, like any other failed run.
 
 Departure 11 happens here. **The watch lane after the walk reads back to the instant the walk began.** `WatchStateSyncService.sync` takes `since_at_most`, and a fresh delta's cursor becomes the earlier of its own and that instant; both callers pass the walk's `started_at`. The run after the seed moved the cursor past the walk's start, so a state saved meanwhile for an item the walk had not yet stored would otherwise be skipped for good. A first walk, which has no cursor, and a resumed delta, whose position counts into the stream its own cursor selects, keep theirs.
 
 **Files:**
 - Modify: `src/usher/services/reconcile.py` (`reconcile`, `_walk_plan`)
 - Modify: `src/usher/services/watch_sync.py` (`sync`)
-- Modify: `src/usher/services/handlers.py` (`sync_handler`), `src/usher/cli.py` (`_sync`, `_watch_line`, `_watch_lane`)
+- Modify: `src/usher/services/handlers.py` (`sync_handler`), `src/usher/cli.py` (`_sync`, `_sync_failed`, `_watch_line`, `_watch_lane`)
 - Modify: `docs/prd/03-sources-and-sync.md`, `CHANGELOG.md`, `docs/guide/command-line.md`
-- Test: `tests/unit/test_services_reconcile.py`, `tests/unit/test_services_watch_sync.py`, `tests/unit/test_services_handlers.py`, `tests/unit/test_api_lanes.py` (the two recorders' overrides), `tests/integration/test_cli_pipeline.py`
+- Test: `tests/unit/test_services_reconcile.py`, `tests/unit/test_services_watch_sync.py`, `tests/unit/test_services_handlers.py`, `tests/unit/test_cli.py`, `tests/unit/test_cli_errors.py`, `tests/unit/test_api_lanes.py` (the two recorders' overrides), `tests/integration/test_cli_pipeline.py`
 
 **Interfaces:**
-- Consumes: Task 17's `_walk_plan(…, *, resumed)`, `unit_starts`, and the CLI case's `_opened` shape; Task 16's `_Fixture`, `_shelve`, `FakeSourceAdapter.stage` and `.fail_unit_after`; Task 14's `SEED` stage; Task 6's `given_completed_walk`; Task 7's supersede in `sync`.
-- Produces: `reconcile(…, after_seed: Callable[[], Awaitable[object]] | None = None)`; `WatchStateSyncService.sync(…, since_at_most: AwareDatetime | None = None)`; `usher.cli._watch_line(source, watch) -> str`.
+- Consumes: Task 17's `_walk_plan(…, *, resumed)`, `unit_starts`, `WalkRefused`, `_sync`'s `failed` and `refused`, `_RecordingWatch(…, raises=…)`, and the CLI case's `_opened` shape; Task 16's `_Fixture`, `_shelve`, `FakeSourceAdapter.stage` and `.fail_unit_after`; Task 14's `SEED` stage; Task 6's `given_completed_walk`; Task 7's supersede in `sync`.
+- Produces: `reconcile(…, after_seed: Callable[[], Awaitable[object]] | None = None)`; `WatchStateSyncService.sync(…, since_at_most: AwareDatetime | None = None)`; `usher.cli._watch_line(source, watch) -> str`; `usher.cli._watch_lane(watch, source, adapter, user_id, failed, refused)`, the after-seed hook, which prints its run, keeps a failed one in `failed` and a refused one in `refused`, and never raises `WalkRefused`.
 
 - [ ] **Step 1: Write the failing service tests**
 
@@ -9195,7 +9722,7 @@ async def test_a_resume_whose_seed_had_completed_still_runs_the_hook() -> None:
     assert calls == [1, 0]
 ```
 
-`tests/unit/test_services_watch_sync.py` — `from datetime import UTC, datetime, timedelta`. Append to the resume section:
+`tests/unit/test_services_watch_sync.py` (Task 17 imported `timedelta`) — append to the file:
 
 ```python
 # -- since_at_most: the run after a walk reads back to the walk's start ------
@@ -9320,7 +9847,8 @@ and its loop becomes:
 
         A fresh delta reads from `since_at_most` when that is earlier than its own
         cursor, so a caller can cover what its item walk stored after this lane's
-        last run began. Never raises a `UsherPortError`.
+        last run began. Raises `WalkRefused`, having written nothing, while another
+        walk of this lane is alive. Never raises a `UsherPortError`.
         """
 ```
 
@@ -9350,7 +9878,7 @@ Expected: PASS.
         return run
 ```
 
-`_RecordingWatch.__init__` stores `self.since_at_most: list[datetime | None] = []`; its `sync` takes `since_at_most: datetime | None = None` after `user_id` and first appends it to `self.since_at_most`. After Task 17's `test_a_refused_walk_fails_the_job_so_the_queue_retries_it`:
+`_RecordingWatch.__init__` takes `refuse_first: bool = False` after `raises`, and stores it and `self.since_at_most: list[datetime | None] = []`. Its `sync` takes `since_at_most: datetime | None = None` after `user_id` and first appends it to `self.since_at_most`; once it has recorded the call, it raises `WalkRefused(f"a watch-state walk of {source.name} is already running")` if `refuse_first` is set and this is its first call. After Task 17's `test_a_refused_watch_lane_fails_the_job_so_the_queue_retries_it`:
 
 ```python
 async def test_the_sync_handler_runs_the_watch_lane_after_the_seed_and_again_after_the_walk(
@@ -9370,9 +9898,112 @@ async def test_the_sync_handler_runs_the_watch_lane_after_the_seed_and_again_aft
     assert events == ["reconcile", "watch", "watch"]
     [walk] = reconcile.runs
     assert watch.since_at_most == [None, walk.started_at]
+
+
+async def test_a_watch_run_refused_after_the_seed_lets_the_walk_go_on(
+    source: Source, adapter: FakeSourceAdapter
+) -> None:
+    """Logged, and the walk and the watch run after it still happen: the job completes."""
+    sources = FakeSourceRepository()
+    await sources.add(source)
+    events: list[str] = []
+    reconcile = _RecordingReconcile(events, seeded=True)
+    watch = _RecordingWatch(events, refuse_first=True)
+
+    await sync_handler(sources, reconcile, watch, _Opener(adapter), user_id=_USER)(
+        Job(kind=JobKind.SYNC, key=f"{source.id}:full")
+    )
+
+    assert events == ["reconcile", "watch", "watch"]
+    assert len(reconcile.runs) == 1, "the walk did not get past its seed"
 ```
 
 `tests/unit/test_api_lanes.py` — `_RecordingReconcile.reconcile` takes `after_seed: Callable[[], Awaitable[object]] | None = None` after `plan` and passes `after_seed=after_seed` on to `super().reconcile`; `_RecordingWatchSync.sync` takes `since_at_most: datetime | None = None` after `user_id` and passes it on. Neither is exercised here: the gap-closer passes neither.
+
+`tests/unit/test_cli.py`, after Task 17's `test_the_exit_line_names_each_source_whose_walk_was_refused`:
+
+```python
+def test_a_source_refused_after_the_seed_and_after_the_walk_is_named_once() -> None:
+    """Both watch runs of one source can be refused, and the exit line names it once."""
+    assert _sync_failed([], ["cli-a", "cli-a"]) == (
+        "refused for cli-a: another walk of each is still running"
+    )
+```
+
+`tests/unit/test_cli_errors.py` — imports: `Awaitable` beside `AsyncIterator`; `from tests.fakes.source_adapter import FakeSourceAdapter`; `SourceAdapter` beside `SourceNotSupported`; `WalkRefused` beside `RETRACTION_ERROR_CODE`; `from usher.services.watch_sync import WatchStateSyncService`. In `_sync_against`, `_Reconcile.reconcile` takes the hook and ignores it, or every `_sync_against` case raises `TypeError` once `_sync` passes `after_seed=`:
+
+```python
+        async def reconcile(
+            self, _source: Source, _kind: object, adapter: object, **kwargs: object
+        ) -> SyncRun:
+```
+
+After `test_a_failed_watch_lane_is_a_non_zero_exit_without_the_retraction_hint`:
+
+```python
+class _AnsweringWatch(WatchStateSyncService):
+    """A watch lane that gives one answer, and needs none of a real one's collaborators."""
+
+    def __init__(self, answer: SyncRun | WalkRefused) -> None:
+        self._answer = answer
+
+    async def sync(
+        self,
+        source: Source,
+        adapter: SourceAdapter,
+        *,
+        user_id: uuid.UUID,
+        since_at_most: datetime | None = None,
+    ) -> SyncRun:
+        if isinstance(self._answer, WalkRefused):
+            raise self._answer
+        return self._answer
+
+
+def _seed_hook(
+    answer: SyncRun | WalkRefused, failed: list[SyncRun], refused: list[str]
+) -> Callable[[], Awaitable[None]]:
+    """`_sync`'s after-seed hook for a source called Shared Emby, over that watch lane."""
+    source = Source(
+        kind=SourceKind.EMBY,
+        name="Shared Emby",
+        base_url="https://emby.invalid",
+        credentials_ref="ref-0",
+        device_id="device-0",
+    )
+    return usher_cli._watch_lane(
+        _AnsweringWatch(answer), source, FakeSourceAdapter(source), new_id(), failed, refused
+    )
+
+
+async def test_a_failed_watch_run_after_the_seed_is_kept_for_the_exit_line(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Printed, and kept, so the command exits non-zero however the runs after it end."""
+    run = _run(SyncRunKind.WATCH_STATE, SyncRunStatus.FAILED, error="source is unreachable")
+    failed: list[SyncRun] = []
+    refused: list[str] = []
+
+    await _seed_hook(run, failed, refused)()
+
+    assert (failed, refused) == ([run], [])
+    assert "Shared Emby: watch_state failed" in capsys.readouterr().out
+
+
+async def test_a_refused_watch_run_after_the_seed_is_kept_and_the_walk_goes_on(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The hook returns rather than raising, so the walk that awaited it carries on."""
+    refusal = WalkRefused("a watch-state walk of Shared Emby is already running")
+    failed: list[SyncRun] = []
+    refused: list[str] = []
+
+    await _seed_hook(refusal, failed, refused)()
+
+    assert (failed, refused) == ([], ["Shared Emby"])
+    out = capsys.readouterr().out
+    assert "Shared Emby: refused: a watch-state walk of Shared Emby is already running" in out
+```
 
 `tests/integration/test_cli_pipeline.py` — `from usher.ports.source import DEFAULT_UNIT_KEY, SourceItem, SourceItemKind`. After Task 17's `test_usher_sync_exits_non_zero_when_a_live_walk_refuses_it`:
 
@@ -9430,28 +10061,36 @@ async def test_usher_sync_runs_the_watch_lane_as_soon_as_the_seed_has_committed(
 
 - [ ] **Step 6: Run them to see them fail**
 
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_services_handlers.py tests/integration/test_cli_pipeline.py -k "after_the_seed or as_soon_as_the_seed"`
-Expected: FAIL — the handler case on `events == ["reconcile", "watch", "watch"]` (it reads `["reconcile", "watch"]`); the CLI case on `printed`, which reads `["full", "watch_state"]`.
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_services_handlers.py tests/unit/test_cli.py tests/unit/test_cli_errors.py tests/integration/test_cli_pipeline.py -k "after_the_seed or as_soon_as_the_seed"`
+Expected: FAIL — the seeded handler case on `events == ["reconcile", "watch", "watch"]` (it reads `["reconcile", "watch"]`); the refused-hook handler case with `PortUnavailable`, the walk's own watch run being the first call and the one refused; both hook cases in `test_cli_errors.py` with `AttributeError: module 'usher.cli' has no attribute '_watch_lane'`; the twice-refused case on its exit line, `refused for cli-a, cli-a: …`; the CLI case on `printed`, which reads `["full", "watch_state"]`.
 
 - [ ] **Step 7: Pass the hook, and the instant, at both callers**
 
 `src/usher/services/handlers.py`, `sync_handler`'s walk:
 
 ```python
+        async def after_seed() -> None:
+            try:
+                await watch.sync(source, adapter, user_id=user_id)
+            except WalkRefused as exc:
+                # The walk goes on: its own watch run after the walk reads what this
+                # one would have.
+                logger.info(
+                    "not running {source}'s watch lane after its seed: {error}; it runs "
+                    "again after the walk",
+                    source=source.name,
+                    error=str(exc),
+                )
+
         try:
-            run = await reconcile.reconcile(
-                source,
-                lane,
-                adapter,
-                after_seed=lambda: watch.sync(source, adapter, user_id=user_id),
-            )
+            run = await reconcile.reconcile(source, lane, adapter, after_seed=after_seed)
             await watch.sync(source, adapter, user_id=user_id, since_at_most=run.started_at)
         except WalkRefused as exc:
 ```
 
-(the `except` and `finally` arms unchanged), and its docstring gains `The watch lane also runs as soon as a whole-library walk's seed has committed.`
+(the `except` and `finally` arms unchanged), and its docstring gains `The watch lane also runs as soon as a whole-library walk's seed has committed; refused there, it is logged and the walk goes on.`
 
-`src/usher/cli.py` — `from collections.abc import AsyncIterator, Awaitable, Callable, Sequence`. After `_sync_failed`:
+`src/usher/cli.py` — `from collections.abc import AsyncIterator, Awaitable, Callable, Sequence`; `from usher.services.watch_sync import WatchStateSyncService`. After `_sync_failed`:
 
 ```python
 def _watch_line(source: Source, watch: SyncRun) -> str:
@@ -9464,12 +10103,28 @@ def _watch_line(source: Source, watch: SyncRun) -> str:
 
 
 def _watch_lane(
-    pipeline: Pipeline, source: Source, adapter: SourceAdapter, user_id: uuid.UUID
+    watch: WatchStateSyncService,
+    source: Source,
+    adapter: SourceAdapter,
+    user_id: uuid.UUID,
+    failed: list[SyncRun],
+    refused: list[str],
 ) -> Callable[[], Awaitable[None]]:
-    """The watch lane as a walk's `after_seed`, printed like the run after the walk."""
+    """The watch lane as a walk's `after_seed`, printed and kept like the run after the walk.
+
+    A refused run is kept for the exit line, and the walk that awaited it goes on.
+    """
 
     async def run() -> None:
-        print(_watch_line(source, await pipeline.watch.sync(source, adapter, user_id=user_id)))
+        try:
+            watched = await watch.sync(source, adapter, user_id=user_id)
+        except WalkRefused as exc:
+            print(f"{source.name}: refused: {exc}")
+            refused.append(source.name)
+            return
+        print(_watch_line(source, watched))
+        if watched.status is SyncRunStatus.FAILED:
+            failed.append(watched)
 
     return run
 ```
@@ -9477,11 +10132,9 @@ def _watch_lane(
 In `_sync`, the docstring becomes `"""Walk each selected source: items, then watch state, which also runs once a seed lands."""`, the item call becomes:
 
 ```python
+                hook = _watch_lane(pipeline.watch, source, adapter, user_id, failed, refused)
                 run = await pipeline.reconcile.reconcile(
-                    source,
-                    SyncRunKind(kind),
-                    adapter,
-                    after_seed=_watch_lane(pipeline, source, adapter, user_id),
+                    source, SyncRunKind(kind), adapter, after_seed=hook
                 )
 ```
 
@@ -9493,6 +10146,8 @@ and the watch call and its `print` become:
                 )
                 print(_watch_line(source, watch))
 ```
+
+and in `_sync_failed`, `', '.join(refused)` becomes `', '.join(dict.fromkeys(refused))`: the watch runs after the seed and after the walk can both be refused.
 
 Run the Step 6 command. Expected: PASS.
 
@@ -9509,7 +10164,7 @@ reads back to the instant the walk began, so a state saved meanwhile for an
 item the walk had not yet stored is not skipped.
 ```
 
-`CHANGELOG.md`, under `### Added`:
+`CHANGELOG.md`, under `## [Unreleased]`'s `### Added`:
 
 ```markdown
 - The watch lane runs as soon as a whole-library walk has stored what the
@@ -9541,10 +10196,14 @@ Expected: PASS.
 6. `max` for `min` in the clamp. Expect the same case to fail, and `test_since_at_most_never_moves_a_cursor_forward` with it.
 7. The clamp spelled `cursor = since_at_most if cursor is None else min(cursor, since_at_most)` (with `since_at_most is not None` kept). Expect `test_since_at_most_leaves_a_first_walk_without_a_cursor` to fail.
 8. The resumed branch's `cursor = incomplete.cursor_at` clamped the same way. Expect `test_since_at_most_leaves_a_resumed_deltas_cursor_alone` to fail on `items_seen`, `movie-1` read: the row's own `cursor_at` is unchanged under this plant, so its premise still holds.
-9. `sync_handler` without `after_seed=`. Expect the handler case to fail on `events`.
-10. `sync_handler`'s second watch call without `since_at_most=`. Expect the handler case to fail on `watch.since_at_most`.
-11. `_sync` without `after_seed=`. Expect the CLI case to fail on `printed`.
-12. `_sync`'s watch call without `since_at_most=`. Expect the CLI case to fail on the cursors: the second watch run's is the first's `started_at`.
+9. `sync_handler` without `after_seed=`. Expect `test_the_sync_handler_runs_the_watch_lane_after_the_seed_and_again_after_the_walk` to fail on `events`, and `test_a_watch_run_refused_after_the_seed_lets_the_walk_go_on` with `PortUnavailable`.
+10. `sync_handler`'s second watch call without `since_at_most=`. Expect `test_the_sync_handler_runs_the_watch_lane_after_the_seed_and_again_after_the_walk` to fail on `watch.since_at_most`.
+11. `_sync` without `after_seed=`. Expect `test_usher_sync_runs_the_watch_lane_as_soon_as_the_seed_has_committed` to fail on `printed`.
+12. `_sync`'s watch call without `since_at_most=`. Expect `test_usher_sync_runs_the_watch_lane_as_soon_as_the_seed_has_committed` to fail on the cursors: the second watch run's is the first's `started_at`.
+13. `sync_handler`'s `after_seed` without its `except WalkRefused`. Expect `test_a_watch_run_refused_after_the_seed_lets_the_walk_go_on` to fail with `PortUnavailable`, the hook's refusal having escaped the walk.
+14. `_watch_lane` without its `except WalkRefused`. Expect `test_a_refused_watch_run_after_the_seed_is_kept_and_the_walk_goes_on` to fail with `WalkRefused`.
+15. `_watch_lane` without `failed.append(watched)`. Expect `test_a_failed_watch_run_after_the_seed_is_kept_for_the_exit_line` to fail on `([], []) == ([run], [])`.
+16. `_sync_failed` joining `refused` rather than `dict.fromkeys(refused)`. Expect `test_a_source_refused_after_the_seed_and_after_the_walk_is_named_once` to fail.
 
 - [ ] **Step 11: Commit**
 
@@ -9553,7 +10212,8 @@ git add src/usher/services/reconcile.py src/usher/services/watch_sync.py \
   src/usher/services/handlers.py src/usher/cli.py docs/prd/03-sources-and-sync.md CHANGELOG.md \
   docs/guide/command-line.md tests/unit/test_services_reconcile.py \
   tests/unit/test_services_watch_sync.py tests/unit/test_services_handlers.py \
-  tests/unit/test_api_lanes.py tests/integration/test_cli_pipeline.py
+  tests/unit/test_cli.py tests/unit/test_cli_errors.py tests/unit/test_api_lanes.py \
+  tests/integration/test_cli_pipeline.py
 git commit -m "sync: run the watch lane as soon as a whole-library walk's seed has committed"
 ```
 
@@ -9848,7 +10508,7 @@ after `hold`:
 
 and in `plan_walk`, the unit's `len(placed)` becomes `None if name in self._uncounted else len(placed)`.
 
-`tests/unit/test_services_reconcile.py` — imports: `from opentelemetry import metrics`; `from opentelemetry.sdk.metrics import MeterProvider`; `from opentelemetry.sdk.metrics.export import HistogramDataPoint, InMemoryMetricReader`. Append:
+`tests/unit/test_services_reconcile.py` — imports: `metrics` joins the existing `from opentelemetry import trace`, which becomes `from opentelemetry import metrics, trace`; `from opentelemetry.sdk.metrics import MeterProvider` and `from opentelemetry.sdk.metrics.export import HistogramDataPoint, InMemoryMetricReader` join the `opentelemetry.sdk` imports below it. Append:
 
 ```python
 # -- where a planned walk stands: its frames, and each unit's duration -------
@@ -9971,13 +10631,15 @@ async def test_a_unit_is_timed_from_its_walkers_claim_to_its_last_commit(
 
 `tests/unit/test_telemetry_metric_names.py`: `len(catalogue) == 43` becomes `== 44`.
 
+`tests/unit/test_dashboards.py`, `test_the_catalogue_scan_reaches_the_row_that_carries_no_usher_prefix` — PRD 10's table has a second reader: `assert len(catalogue) == 43, (` becomes `== 44`, and `not the 43 its own header` in its message becomes `not the 44 its own header`.
+
 - [ ] **Step 6: Run them to see them fail**
 
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_services_reconcile.py tests/unit/test_telemetry_metric_names.py -k "plan_stands or carry_no_plan or timed_from or catalogue"`
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_services_reconcile.py tests/unit/test_telemetry_metric_names.py tests/unit/test_dashboards.py -k "plan_stands or carry_no_plan or timed_from or catalogue"`
 Expected: FAIL:
 - both frame cases with `KeyError: 'stage'`;
 - the duration case on `{} == {…}`;
-- the catalogue case on `the catalogue table parse found 43 rows`.
+- both catalogue counts on 43 rows: `the catalogue table parse found 43 rows`, and the dashboards reader's `PRD 10's metric table parsed to 43 rows`. The filter's four other `catalogue` cases in `test_dashboards.py` pass.
 
 - [ ] **Step 7: The walk says where it stands, and times each unit**
 
@@ -10065,7 +10727,7 @@ and the call becomes:
         )
 ```
 
-`_flush` takes `walk: WalkProgress | None = None` after `unit`, and its last line becomes `await self._publish_progress(source, run, walk)`. `_publish_progress` takes `walk: WalkProgress | None = None` after `run`, and its `data` gains, after `"items_unmatched"`:
+`_flush` takes `walk: WalkProgress | None = None` after `unit`, and its `await self._publish_progress(source, run)`, under Task 16's `if batch:`, becomes `await self._publish_progress(source, run, walk)`; `return run` stays. `_publish_progress` takes `walk: WalkProgress | None = None` after `run`, and its `data` gains, after `"items_unmatched"`:
 
 ```python
                     # Where a planned walk's plan stands; a single walk's frame says `None`.
@@ -10485,7 +11147,7 @@ EOF
 git diff --stat web/src/api/schema.d.ts
 ```
 
-Expected: `git diff web/src/api/schema.d.ts` adds the `SyncRunResponse` schema and `last_sync` on `SourceStatusResponse`, and changes nothing else. A diff that also touches other schemas means the committed file was already stale against `main`. In that case stop and report it; don't commit someone else's drift under this task.
+Expected: `git diff web/src/api/schema.d.ts` adds the `SyncRunResponse` schema; the `SyncRunKind`, `SyncRunStatus` and `WalkStage` schemas it names, each a `StrEnum` and so a component of its own, as `SourceKind` is; and `last_sync` on `SourceStatusResponse`, whose `@description` gains the docstring's new `last_sync` paragraph. It changes nothing else. A diff that touches anything beyond those means the committed file was already stale against `main`. In that case stop and report it; don't commit someone else's drift under this task.
 
 `web/src/test/fixtures/admin.ts`:
 - `sourceStatusHealthy`'s comment gains the sentence `` `last_sync` is a whole-library walk part-way through its episodes. ``, and the object gains, after `detail: null,`:
@@ -10731,7 +11393,7 @@ a real source.** ⚠️ A panel that drains the whole unmatched queue should pag
 with the keyset cursor; the `OFFSET` form is quadratic in queue depth.
 ```
 
-`CHANGELOG.md`, under `### Added`:
+`CHANGELOG.md`, under `## [Unreleased]`'s `### Added`:
 
 ```markdown
 - `GET /admin/sources/{id}/status` carries `last_sync`, the source's newest
@@ -10768,7 +11430,7 @@ Expected: PASS.
 4. `items_expected=sum(counts) or None`. Expect the `(None, 0)` parametrisation to fail on `None == 0`.
 5. `items_expected=None if any(unit.expected_items is None for unit in stored) else sum(counts)`. Expect the `(None, 4, 6)` parametrisation to fail.
 6. The fake's `latest_run` with `min` for `max`. Expect the fake arm of `test_the_latest_run_is_the_newest_of_its_kind_whatever_its_status` to fail.
-7. `_NEWEST` without `AND kind = :kind`. Expect the Postgres arm of `test_the_latest_run_is_scoped_by_kind_and_by_source` to fail on its `is None`.
+7. `_NEWEST` without `AND kind = :kind`, anchored on `WHERE source_id = :source_id AND kind = :kind` with the `ORDER BY started_at DESC, id DESC` line after it: the clause alone occurs three times in the file. Expect the Postgres arm of `test_the_latest_run_is_scoped_by_kind_and_by_source` to fail on its `is None`.
 8. `latest_incomplete_run` without `or newest.status is SyncRunStatus.COMPLETED`. Expect `test_a_completed_newest_run_offers_nothing_to_resume` to fail on both arms.
 9. `_commit_unit` without `progress.units[unit.unit_key] = unit`. Expect the frames case to fail: every frame reads `seed`, `0`.
 10. `_walk_plan` without `progress.units = {…}`. Expect the frames case to fail on `units_total`.
@@ -10776,7 +11438,7 @@ Expected: PASS.
 12. The duration recorded at every commit, outside `if done:`. Expect the duration case to fail on the counts `(2, …)` and `(4, …)`.
 13. The claim instant taken for every unit when the stage starts: `claimed = {unit.unit_key: self._clock() for unit in units}`, with `claim()` no longer writing it. Expect the duration case to fail on `(2, 180.0)`.
 14. `_last_sync` reading only `SyncRunKind.FULL`. Expect `test_status_of_a_single_walk_carries_no_plan` to fail on `('full', …)`.
-15. `_last_sync` taking `(await runs.list_for_source(source_id, limit=1))[0]`. Expect the plan case to fail on `kind`, the watch run reported.
+15. `_last_sync`'s comprehension spelled `found = await runs.list_for_source(source_id, limit=1)`, the newest run of any kind, so a source with no runs still gets `None`. Expect the plan case to fail on `kind`, the watch run reported.
 16. `_sync_status` without the plan line. Expect the CLI case to fail on its first assertion.
 17. `_plan_line` printing `expected={walk.items_expected}`. Expect the `unknown` case to fail on `expected=None`.
 18. Panel 11's target B grouped `by (source)`. Expect the walk-panel case to fail on its aggregations.
@@ -10815,7 +11477,7 @@ Expected: every command exits 0, and `lint-imports` reports its contracts kept a
 - [ ] **Step 2: The console gate**
 
 Run, from `web/`: `npm run verify && npm run e2e && npm run e2e:visual`
-Expected: PASS. Two Phase 2 tasks touched `web/`: Task 15 the settings catalogue, and Task 19 the generated types and the admin fixtures.
+Expected: PASS. Three Phase 2 tasks touched `web/`: Tasks 15 and 16 the settings catalogue, and Task 19 the generated types and the admin fixtures. Each ran this gate before its own commit; this run is the whole branch's.
 
 - [ ] **Step 3: The network guard**
 
@@ -10830,7 +11492,11 @@ Expected: the probe raises `RuntimeError: NETWORK BLOCKED`, and the suite's firs
 
 - [ ] **Step 4: Status cells**
 
-In `docs/plans/progress.md`, this plan's table: the Tasks 10–20 row → `🔨 in review (PR #<n>)` until the PR merges. Task 21 flips it to `✅ landed (PR #<n>)`. `docs/prd/README.md`'s row for this plan says the same thing in the same words.
+Task 9's row first. Its item walk on production, Task 9 Step 4, has to have run by now. If it has not, it runs now, with the owner's go-ahead as that step says, and this step waits for its number. If the walk missed Task 9 Step 4's pass line, stop: post its numbers on PR 1 and open no PR, because Task 9 Step 5 says Phase 2's targets assume Phase 1's. Otherwise, in `docs/plans/progress.md`, this plan's table, the Task 9 row becomes `✅ passed: the first watch walk in <s> s, the item walk on production in <h> h`, with `<s>` the time its cell already carries and `<h>` the hours Task 9 Step 4's query printed.
+
+The Tasks 10–20 row → `🔨 in review (PR #<n>)` until the PR merges. Task 21 flips it to `✅ landed (PR #<n>)`.
+
+`docs/prd/README.md` holds one row for this plan, and its cell says both in one sentence: `🔨 Phase 1 landed (PR #<p1>) and passed: its first watch walk in <s> s, its item walk on production in <h> h. Phase 2 in review (PR #<n>)`, with `<p1>` the number the cell already carries.
 
 - [ ] **Step 5: Push and open the PR**
 
@@ -10842,7 +11508,7 @@ Open the PR against `main` titled `A whole-library walk in resumable units, seve
 - what Phase 2 changes for an operator: the 2-, 10- and 75-minute targets it is built for, resume in place, the refusal, and `last_sync`;
 - the two new settings and their defaults, as Task 10 fixed them;
 - the gate results, with counts;
-- the twelve departures from the spec's letter;
+- the thirteen departures from the spec's letter;
 - the migration. `m10g` is purely additive. The previous image refuses the newer schema, so a rollback goes through the pre-deploy backup;
 - the deploy rule: never merge while an old-image full walk is running, and `docker ps --filter name=usher-prod-sync` is the check.
 
@@ -10859,10 +11525,10 @@ Both files were written before any Phase 2 code existed. Check them again before
 ```bash
 grep -c -E '[0-9a-f]{32}' /var/tmp/sync-speed/facts2.out /var/tmp/sync-speed/measure_ingest.out
 grep -n -E 'https?://|([0-9]{1,3}\.){3}[0-9]{1,3}' /var/tmp/sync-speed/facts2.out /var/tmp/sync-speed/measure_ingest.out
-sha256sum -c /var/tmp/sync-speed/facts2.out.sha256
+sha256sum -c /var/tmp/sync-speed/facts2.out.sha256 /var/tmp/sync-speed/measure_ingest.out.sha256
 ```
 
-Expected: both counts are `0`, the second command prints nothing, and the checksum reads `OK`. If any of these fails, post nothing: fix the output (or the script) and say why on the PR.
+Expected: both counts are `0`, the second command prints nothing, and both checksums read `OK`: Task 10 saved each when it wrote the file, and a checksum taken now would attest nothing. If any of these fails, post nothing: fix the output (or the script) and say why on the PR.
 
 Then post one comment, each file raw in its own fence followed by its `sha256sum` line:
 
@@ -10876,7 +11542,7 @@ where `/var/tmp/sync-speed/pr2-facts-comment.md` holds the two fences and two sh
 
 ```bash
 git add docs/plans/progress.md docs/prd/README.md
-git commit -m "docs(plan): fast first sync phase 2 is in review"
+git commit -m "docs(plan): fast first sync phase 1 passed, and phase 2 is in review"
 git push
 ```
 
@@ -10987,8 +11653,8 @@ A full walk loads a server the operator may not administer, so ask first. Then s
 
 ```bash
 SINCE=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)
-(cd ~/code/usher-deploy && docker compose cp -q /var/tmp/sync-speed/timeline.py usher:/tmp/timeline.py \
-  && docker compose exec -T usher python /tmp/timeline.py "$SINCE" 2>&1 | grep -v '^{"text"') \
+(cd ~/code/usher-deploy && docker compose cp /var/tmp/sync-speed/timeline.py usher:/tmp/timeline.py >/dev/null 2>&1 \
+  && docker compose exec -T usher python /tmp/timeline.py "$SINCE" 2>&1 | grep --line-buffered -v '^{"text"') \
   | tee /var/tmp/sync-speed/timeline-1.out
 ```
 
@@ -11035,12 +11701,30 @@ Record what you found. Either way, the panel stays unbacked until it has drawn a
 
 - [ ] **Step 5: A resume after a kill mid-EPISODES — with the owner's go-ahead**
 
-This is a second full walk, so ask again. Start a second timeline (`timeline-2.out`, a fresh `SINCE`) and the walk, both as in Step 3.
-
-Kill the walk once an episodes unit has completed and others have not. That is the second line reading `status=running stage=episodes`, because past the seed the timeline prints only when a unit completes. Wait for it in the background, not with a polling loop in the foreground:
+This is a second full walk, so ask again. Start a second timeline, with a fresh `SINCE`, in the background:
 
 ```bash
-timeout 7200 sh -c 'until [ "$(grep -c "status=running stage=episodes" /var/tmp/sync-speed/timeline-2.out)" -ge 2 ]; do sleep 5; done'
+SINCE=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)
+(cd ~/code/usher-deploy && docker compose cp /var/tmp/sync-speed/timeline.py usher:/tmp/timeline.py >/dev/null 2>&1 \
+  && docker compose exec -T usher python /tmp/timeline.py "$SINCE" 2>&1 | grep --line-buffered -v '^{"text"') \
+  | tee /var/tmp/sync-speed/timeline-2.out
+```
+
+Its grep is `--line-buffered`, as Step 3's is. GNU grep, the one bash and fish reach, holds what it writes into a pipe until its buffer fills. Without the flag, the wait below fires only when the buffer fills or the walk ends, and the kill misses EPISODES. Then start the walk detached, as in Step 3.
+
+Kill the walk once an episodes unit has completed and others have not: once a `status=running stage=episodes` line shows `units=` past the count on the first such line, which is the count when EPISODES began. Counting `stage=episodes` lines is not that test: the timeline also prints when `first_watch_done_at` changes, so a second such line can come with no unit completed. Wait for it in the background, not with a polling loop in the foreground:
+
+```bash
+timeout 7200 sh -c '
+  f=/var/tmp/sync-speed/timeline-2.out
+  until grep -q "status=running stage=episodes" "$f"; do sleep 5; done
+  begun=$(grep -m1 "status=running stage=episodes" "$f" | grep -o "units=[0-9]*" | cut -d= -f2)
+  now=$begun
+  until [ "$now" -gt "$begun" ]; do
+    sleep 5
+    now=$(grep "status=running stage=episodes" "$f" | tail -1 | grep -o "units=[0-9]*" | cut -d= -f2)
+  done
+'
 docker kill usher-prod-sync
 ```
 
@@ -11087,7 +11771,7 @@ the whole unmatched queue should page with the keyset cursor; the `OFFSET` form
 is quadratic in queue depth.
 ```
 
-- `docs/plans/progress.md` and `docs/prd/README.md`: the Tasks 10–20 row → `✅ landed (PR #<n>)` and the Task 21 row → `✅ passed`, each carrying the three times Step 3 measured. The README's row says the same in the same words.
+- `docs/plans/progress.md`: the Tasks 10–20 row → `✅ landed (PR #<n>)` and the Task 21 row → `✅ passed`, each carrying the three times Step 3 measured. `docs/prd/README.md` holds one row for this plan, and its cell becomes one sentence carrying the same three times: `✅ landed (PR #<p1>, PR #<n>), and its acceptance walk passed: the watch state in <w> s, every movie and series in <m> s, the whole library in <l> s`, with `<p1>` Phase 1's PR number, already in the cell.
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_prd_10_panel_backing.py tests/unit/test_dashboards.py tests/unit/test_docs_pointers.py tests/unit/test_docs_currency.py`
 Expected: PASS.
