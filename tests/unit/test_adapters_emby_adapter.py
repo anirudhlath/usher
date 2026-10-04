@@ -1171,6 +1171,11 @@ async def test_a_read_ahead_that_failed_is_retrieved_when_the_walk_stops() -> No
         await asyncio.wait_for(refused.wait(), timeout=2.0)
         # Long enough for the refused request's task to finish raising.
         await asyncio.sleep(0.05)
+        t = ahead()
+        assert t is not None and t.done() and not t.cancelled(), (
+            "the premise: the refused read had finished failing before the walk stopped"
+        )
+        del t
         await items.aclose()
         del items
         gc.collect()
