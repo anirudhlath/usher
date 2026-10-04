@@ -3911,6 +3911,8 @@ def test_the_default_unit_refuses_a_key_it_never_planned() -> None:
         SourceAdapter.list_unit(_fake(), "library:Films")
 ```
 
+The task review added five more cases to `tests/unit/test_ports_source.py`, each planted: `test_a_walk_that_fails_on_a_page_boundary_yields_no_empty_page` (the `if held:` guard), `test_the_fake_plans_one_whole_walk_while_an_item_sits_in_no_library`, `test_the_fake_forgets_an_item_out_of_every_library_it_was_placed_in`, `test_the_fake_s_own_whole_library_unit_resumes_from_its_start_index` (four items, so its two pages tell the fake's page size from the default) and `test_the_fake_refuses_a_library_it_was_never_given`, with a `_seed(adapter, *ids, libraries=())` helper.
+
 The `"FakeSourceAdapter"` return annotation is a string; below the imports, add `if TYPE_CHECKING: from tests.fakes.source_adapter import FakeSourceAdapter`, using the `TYPE_CHECKING` import from the list above, the way the module already imports the fake lazily inside its cases.
 
 - [ ] **Step 2: Write the failing contract cases**
@@ -3962,7 +3964,7 @@ The `"FakeSourceAdapter"` return annotation is a string; below the imports, add 
         assert walked == whole
 
     async def test_a_unit_the_plan_never_named_is_refused(self, harness: SourceHarness) -> None:
-        """A key this adapter never planned raises rather than walking nothing.
+        """A key no plan of this adapter's could name raises rather than walking nothing.
 
         An empty unit reads to the writer as a unit that completed, and a full walk
         would then sweep everything that unit should have held.
@@ -3992,8 +3994,9 @@ class WalkStage(StrEnum):
     """Which part of a whole-library walk a unit belongs to.
 
     `SEED` is what the account is watching, so the watch lane can run early;
-    `TITLES` is movies and series; `EPISODES` waits until every title has
-    committed, so each episode finds its series.
+    `TITLES` is movies and series, or everything, for an adapter that does not
+    split by kind; `EPISODES` waits until every title has committed, so each
+    episode finds its series.
     """
 
     SEED = "seed"
@@ -4102,7 +4105,8 @@ In `SourceAdapter`, between `push_messages_received` and `probe_push`:
 
         Each page's `resume_at` is the `start_index` that resumes after it. Never
         yields an empty page, and raises rather than truncating, as `list_items`
-        does. A key this adapter never planned raises `PortDataMalformed`.
+        does. A key outside this adapter's key space, one no plan of its could name,
+        raises `PortDataMalformed`; a key from an earlier plan stays walkable.
         """
         if key != DEFAULT_UNIT_KEY:
             raise PortDataMalformed(f"no walk unit {key!r} in this adapter's plan")
@@ -4139,6 +4143,11 @@ After `_walk_items`:
         await self._ready()
         if not self._libraries:
             return WHOLE_LIBRARY
+        in_a_library = {one for placed in self._libraries.values() for one in placed}
+        if not in_a_library.issuperset(self._items):
+            # An item in no library would be in no unit, and a plan must cover every
+            # item, so a partly placed source walks as one unit.
+            return WalkPlan(WHOLE_LIBRARY.units, expected_total=len(self._items))
         units = tuple(
             WalkUnit(f"library:{name}", WalkStage.TITLES, f"library {name}", len(placed))
             for name, placed in self._libraries.items()
@@ -4159,6 +4168,15 @@ After `_walk_items`:
             item = self._items.get(external_id)
             if item is not None:
                 yield item
+```
+
+`forget` also takes the id out of every library, after its two `pop`s:
+
+```python
+        # Out of every library too, or seeding the id again would silently re-place it.
+        for placed in self._libraries.values():
+            if external_id in placed:
+                placed.remove(external_id)
 ```
 
 `FakeSourceHarness`, after `given_item` (add `from collections.abc import Sequence` to the module's imports):
