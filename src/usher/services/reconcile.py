@@ -133,7 +133,8 @@ class ReconcileService:
     ) -> None:
         if walkers < 1:
             raise ValueError(f"a whole-library walk needs at least one walker, not {walkers}")
-        if heartbeat_seconds <= 0:
+        # `not … > 0` rather than `<= 0`, which a NaN would pass.
+        if not heartbeat_seconds > 0:
             raise ValueError(
                 f"a heartbeat needs a positive period, not {heartbeat_seconds} seconds"
             )

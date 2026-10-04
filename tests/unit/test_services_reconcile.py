@@ -1186,12 +1186,13 @@ async def test_the_heartbeat_beats_while_the_plan_is_made() -> None:
     try:
         with contextlib.suppress(TimeoutError):
             async with asyncio.timeout(5):
-                while fixture.commits < 3:
+                while fixture.commits < 4:
                     await asyncio.sleep(0.01)
         assert asked.is_set(), "the premise: the plan was asked for"
-        assert fixture.commits >= 3, "no beat while the plan was made"
-        assert fixture.unit_states[:3] == [{}, {}, {}], "the premise: no plan was stored yet"
-        beats = [beat for _, beat in fixture.checkpoints[:3] if beat is not None]
+        assert fixture.commits >= 4, "fewer than three beats while the plan was made"
+        assert fixture.unit_states[:4] == [{}] * 4, "the premise: no plan was stored yet"
+        # The first commit is the run's insert; the three after it are beats.
+        beats = [beat for _, beat in fixture.checkpoints[1:4] if beat is not None]
         assert len(beats) == 3
         assert beats == sorted(set(beats)), "a beat that did not move the heartbeat"
     finally:
@@ -1425,7 +1426,7 @@ def test_a_service_with_no_walkers_is_refused() -> None:
         _Fixture(walkers=0)
 
 
-@pytest.mark.parametrize("heartbeat_seconds", [0, -0.5])
+@pytest.mark.parametrize("heartbeat_seconds", [0, -0.5, float("nan")])
 def test_a_service_whose_heartbeat_is_not_positive_is_refused(heartbeat_seconds: float) -> None:
     """Its beat would always be due, so the writer would beat and never read its queue."""
     with pytest.raises(ValueError, match=f"a positive period, not {heartbeat_seconds} seconds"):
