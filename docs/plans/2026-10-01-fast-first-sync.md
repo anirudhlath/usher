@@ -4239,13 +4239,14 @@ Spec §2.5, "The migration". A table `sync_run_units` keyed on `(run_id, unit_ke
 - Modify: `src/usher/db/repositories/sync.py`, `tests/fakes/sync_run_repository.py`
 - Modify: `src/usher/db/backup_manifest.py`, `docs/runbooks/disaster-recovery.md`, `scripts/audit_bounded_columns.py`
 - Modify: `tests/unit/test_db_migration_status.py`, `tests/unit/test_backup_manifest.py`, `.claude/rules/db-and-sql.md`, `tests/integration/test_migrations.py`
+- Modify: `tests/unit/test_db_repositories_errors.py` (`WIDENED_SITES` gains the two new sites)
 - Test: `tests/contract/sync_run_repository_contract.py`, `tests/integration/test_sync_run_repository.py`, `tests/unit/test_db_models_ingest.py`, `tests/unit/test_domain_sync.py`, `tests/integration/test_bulk_repository.py`
 - Modify: `docs/prd/02-data-model.md`
 
 **Interfaces:**
 - Consumes: Task 11's `WalkStage`.
 - Produces: `SyncRunUnitStatus` (`PENDING`, `RUNNING`, `COMPLETED`, `FAILED`); `SyncRunUnit(run_id, unit_key, stage, label, position=0, expected_items=None, items_seen=0, status=PENDING)`; `SyncRun.heartbeat_at: AwareDatetime | None = None`.
-- Produces: `SyncRunRepository.add_units(units: Sequence[SyncRunUnit]) -> None` (all or nothing), `.save_unit(unit: SyncRunUnit) -> None`, `.units_for(run_id: uuid.UUID) -> list[SyncRunUnit]` (in `unit_key` order).
+- Produces: `SyncRunRepository.add_units(units: Sequence[SyncRunUnit]) -> None` (all or nothing), `.save_unit(unit: SyncRunUnit) -> None`, `.units_for(run_id: uuid.UUID) -> list[SyncRunUnit]` (in `unit_key` byte order).
 - Produces: the contract helper `unit(run_id, key, **changes) -> SyncRunUnit` in `tests/contract/sync_run_repository_contract.py`.
 - Produces: alembic head `m10g`.
 
@@ -4278,7 +4279,15 @@ def test_a_run_has_no_heartbeat_until_a_writer_gives_it_one() -> None:
     assert SyncRun(source_id=SOURCE_ID, kind=SyncRunKind.FULL).heartbeat_at is None
 ```
 
-In `tests/contract/sync_run_repository_contract.py`, import `SyncRunUnit, SyncRunUnitStatus, WalkStage` from `usher.domain.sync`, and add below `run`:
+In `tests/contract/sync_run_repository_contract.py`, import `SyncRunUnit, SyncRunUnitStatus, WalkStage` from `usher.domain.sync`. Below `LATER`:
+
+```python
+# A library walk's own unit-key shapes, in byte order. A locale that skips punctuation,
+# as the test database's does, orders the two `episodes:` keys the other way round.
+UNIT_KEYS_IN_BYTE_ORDER = ("episodes:30:0:", "episodes:3:0:", "seed", "titles:3")
+```
+
+And below `run`:
 
 ```python
 def unit(run_id: uuid.UUID, key: str, **changes: object) -> SyncRunUnit:
@@ -4295,18 +4304,31 @@ Append to `SyncRunRepositoryContract`:
     async def test_a_runs_units_come_back_in_key_order(
         self, repository: SyncRunRepository, source_id: uuid.UUID
     ) -> None:
+        """Byte order, which is Python's `sorted`, and never the database's locale.
+
+        The keys are a library walk's own shapes, and the plan is added last key
+        first, so its order cannot come off the heap.
+        """
         one = run(source_id)
         await repository.add(one)
-        await repository.add_units(
-            [
-                unit(one.id, "charlie"),
-                unit(one.id, "alpha", expected_items=40),
-                unit(one.id, "bravo"),
-            ]
+        plan = [
+            unit(one.id, "titles:3"),
+            unit(one.id, "episodes:3:0:"),
+            unit(one.id, "seed"),
+            unit(one.id, "episodes:30:0:", expected_items=40),
+        ]
+        in_byte_order = list(UNIT_KEYS_IN_BYTE_ORDER)
+        assert [each.unit_key for each in plan] != in_byte_order, "the premise: added out of order"
+        # The premise that lets this case see the collation: a locale such as the
+        # test database's `en_US.utf8` compares letters and digits before punctuation,
+        # so it puts `episodes:3:0:` first, where bytes put `0` before `:`.
+        assert sorted(in_byte_order, key=lambda key: key.replace(":", "")) != in_byte_order, (
+            "the premise: a locale that skips punctuation orders these keys as bytes do"
         )
+        await repository.add_units(plan)
         stored = await repository.units_for(one.id)
-        assert [each.unit_key for each in stored] == ["alpha", "bravo", "charlie"]
-        assert stored[0] == unit(one.id, "alpha", expected_items=40)
+        assert [each.unit_key for each in stored] == in_byte_order
+        assert stored[0] == unit(one.id, "episodes:30:0:", expected_items=40)
 
     async def test_a_units_position_rises_and_never_falls(
         self, repository: SyncRunRepository, source_id: uuid.UUID
@@ -4375,6 +4397,26 @@ Append to `SyncRunRepositoryContract`:
         assert caught.value.constraint == "pk_sync_run_units"
         assert [each.unit_key for each in await repository.units_for(one.id)] == ["alpha"]
 
+    async def test_a_plan_that_repeats_a_key_is_refused_whole(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        """A key twice in one plan is refused as a stored one is, on a run that exists.
+
+        Only the one fault: a plan that also names a missing run may be refused on
+        either constraint, and the port leaves that open.
+        """
+        one = run(source_id)
+        await repository.add(one)
+        await repository.add_units([unit(one.id, "alpha")])
+
+        with pytest.raises(RepositoryConflict) as caught:
+            await repository.add_units(
+                [unit(one.id, "bravo"), unit(one.id, "charlie"), unit(one.id, "bravo")]
+            )
+
+        assert caught.value.constraint == "pk_sync_run_units"
+        assert [each.unit_key for each in await repository.units_for(one.id)] == ["alpha"]
+
     async def test_a_unit_of_a_run_that_does_not_exist_is_refused(
         self, repository: SyncRunRepository
     ) -> None:
@@ -4420,7 +4462,7 @@ Append to `SyncRunRepositoryContract`:
         )
 ```
 
-Append to `tests/integration/test_sync_run_repository.py` (import `unit` from the contract module beside `run`, and `SyncRunUnit` beside `SyncRunKind`):
+Append to `tests/integration/test_sync_run_repository.py` (import `UNIT_KEYS_IN_BYTE_ORDER` and `unit` from the contract module, and `SyncRunUnit` beside `SyncRunKind`; the module docstring's list becomes "A foreign key, a CHECK constraint, a collation, and a poisoned session."):
 
 ```python
 async def test_a_negative_unit_position_is_a_port_error(
@@ -4460,6 +4502,28 @@ async def test_a_caught_unit_conflict_leaves_the_session_usable(
     await repository.add(one)
     await repository.add_units([unit(one.id, "alpha")])
     assert [each.unit_key for each in await repository.units_for(one.id)] == ["alpha"]
+
+
+async def test_the_unit_key_column_alone_orders_its_keys_unlike_bytes(
+    session: AsyncSession, repository: PostgresSyncRunRepository, source_id: uuid.UUID
+) -> None:
+    """The premise of the contract's key-order case on this arm, asked of the database.
+
+    That case sees a dropped `COLLATE "C"` only while the column's own collation orders
+    its keys unlike bytes; a database created under the C locale would hide the plant.
+    """
+    one = run(source_id)
+    await repository.add(one)
+    await repository.add_units([unit(one.id, key) for key in UNIT_KEYS_IN_BYTE_ORDER])
+    in_column_order = (
+        await session.execute(
+            text("SELECT unit_key FROM sync_run_units WHERE run_id = :id ORDER BY unit_key"),
+            {"id": one.id},
+        )
+    ).scalars()
+    assert list(in_column_order) != list(UNIT_KEYS_IN_BYTE_ORDER), (
+        "the premise: the column's own collation orders these keys as bytes do"
+    )
 ```
 
 In `tests/unit/test_db_models_ingest.py` (import `SyncRunUnitRow`, `SyncRunUnit`, `SyncRunUnitStatus`, `WalkStage`):
@@ -4557,8 +4621,9 @@ class SyncRunUnit(DomainModel):
     async def add_units(self, units: Sequence[SyncRunUnit]) -> None:
         """Insert a whole-library walk's plan, all of it or none of it.
 
-        A unit already stored, or one whose run does not exist, raises
-        `RepositoryConflict` and adds nothing.
+        A unit whose key is already stored or repeats in the plan, or whose run does
+        not exist, raises `RepositoryConflict` and adds nothing. A plan that both names
+        a missing run and holds a stored or repeated key may raise on either constraint.
         """
 
     @abstractmethod
@@ -4793,7 +4858,7 @@ def _unit_to_domain(row: SyncRunUnitRow) -> SyncRunUnit:
         keys = [(unit.run_id, unit.unit_key) for unit in units]
         if len(set(keys)) != len(keys) or any(key in self._units for key in keys):
             raise RepositoryConflict(
-                "a walk unit is already stored", constraint="pk_sync_run_units"
+                "a walk unit repeats a stored or planned key", constraint="pk_sync_run_units"
             )
         if any(unit.run_id not in self._runs for unit in units):
             raise RepositoryConflict(
@@ -4817,6 +4882,8 @@ def _unit_to_domain(row: SyncRunUnitRow) -> SyncRunUnit:
         owned = [unit for (owner, _), unit in self._units.items() if owner == run_id]
         return sorted(owned, key=lambda unit: unit.unit_key)
 ```
+
+`tests/unit/test_db_repositories_errors.py` — `WIDENED_SITES` is a census of every `except DBAPIError` site, and a widened site it does not list fails the suite, so it gains `("sync.py", "add_units")` and `("sync.py", "save_unit")`, in sorted order. Its section header becomes `# The re-raise, at every site that widened -- one property, not a case per site`: a count there goes stale with every widened site.
 
 - [ ] **Step 7: The ledgers that every new table joins**
 
@@ -4927,8 +4994,11 @@ Expected: PASS, with Docker up. Then `uv run python scripts/audit_bounded_column
 1. In `PostgresSyncRunRepository.save_unit`, drop the `status != COMPLETED` clause. Expect `TestPostgresSyncRunRepository::test_a_completed_unit_takes_no_further_write` to fail.
 2. In the fake's `save_unit`, store `unit` as given. Expect `TestFakeSyncRunRepository::test_a_units_position_rises_and_never_falls` to fail on its second position assertion, and not on the positive control.
 3. In `add_units` (Postgres), give each unit its own SAVEPOINT. Expect `test_a_plan_holding_a_stored_unit_is_refused_whole` to fail on `['alpha', 'bravo'] == ['alpha']`.
-4. In `units_for` (Postgres), drop the `order_by`. Expect `test_a_runs_units_come_back_in_key_order` to fail on `['charlie', 'alpha', 'bravo']`: the case adds `charlie` first so that heap order is not key order.
+4. In `units_for` (Postgres), drop the `order_by`. Expect `test_a_runs_units_come_back_in_key_order` to fail on heap order, `'titles:3' != 'episodes:30:0:'`: the case adds the last key first so that heap order is not key order.
 5. In `m10g.downgrade()`, drop the `drop_table` line. Expect `test_a_full_down_and_up_cycle_restores_every_index` to fail on `sync_run_units should not exist below m10g`.
+6. In `units_for` (Postgres), drop `.collate("C")`. Expect only `TestPostgresSyncRunRepository::test_a_runs_units_come_back_in_key_order` to fail, on `'episodes:3:0:' != 'episodes:30:0:'`: the test database's locale compares letters and digits before punctuation.
+7. In the fake's `add_units`, drop `len(set(keys)) != len(keys) or`. Expect only `TestFakeSyncRunRepository::test_a_plan_that_repeats_a_key_is_refused_whole` to fail, on `DID NOT RAISE`.
+8. In `test_the_unit_key_column_alone_orders_its_keys_unlike_bytes`, give the query's `ORDER BY unit_key` a `COLLATE "C"`. Expect that case to fail on its own premise line, `the premise: the column's own collation orders these keys as bytes do`.
 
 - [ ] **Step 11: Commit**
 
@@ -4940,6 +5010,7 @@ git add src/usher/domain/sync.py src/usher/ports/repository/sync.py src/usher/db
   tests/integration/test_sync_run_repository.py tests/integration/test_migrations.py \
   tests/integration/test_bulk_repository.py tests/unit/test_db_models_ingest.py \
   tests/unit/test_domain_sync.py tests/unit/test_db_migration_status.py tests/unit/test_backup_manifest.py \
+  tests/unit/test_db_repositories_errors.py \
   .claude/rules/db-and-sql.md docs/runbooks/disaster-recovery.md docs/prd/02-data-model.md
 git commit -m "sync: persist a whole-library walk's units and its writer's heartbeat (m10g)"
 ```
@@ -10704,14 +10775,13 @@ and the call becomes:
         )
 ```
 
-`_flush` takes `walk: WalkProgress | None = None` after `unit`, and Task 16's `if batch:` block, before `return run`, becomes the lines below; `return run` stays. A unit's end that commits an empty batch now moves `units_done`, and can move `stage`, so it is a frame.
+`_flush` takes `walk: WalkProgress | None = None` after `unit`, and Task 16's `if batch:` block, before `return run`, becomes the unguarded publish below; `return run` stays. A unit's end that commits an empty batch now moves `units_done`, and can move `stage`, so it is a frame; and a single walk never flushes an empty batch, so no guard is left that could be false.
 
 ```python
-        if batch or (unit is not None and unit.status is SyncRunUnitStatus.COMPLETED):
-            # A batch with items is a frame (PRD 07: one per batch), and so is the empty
-            # one a unit's end commits to save the unit `completed`: that moves no item
-            # counter, but it moves `units_done`, and can move `stage`.
-            await self._publish_progress(source, run, walk)
+        # Every flush is a frame: a single walk flushes only batches with items (PRD 07:
+        # one per batch), and a planned walk's only empty flush is a unit's end, which
+        # moves no item counter but moves `units_done`, and can move `stage`.
+        await self._publish_progress(source, run, walk)
 ```
 
 `_publish_progress` takes `walk: WalkProgress | None = None` after `run`, and its `data` gains, after `"items_unmatched"`:
@@ -11430,7 +11500,7 @@ Expected: PASS.
 17. `_plan_line` printing `expected={walk.items_expected}`. Expect the `unknown` case to fail on `expected=None`.
 18. Panel 11's target B grouped `by (source)`. Expect the walk-panel case to fail on its aggregations.
 19. `sourceStatusHealthy` without `last_sync`. Expect `npm run verify` to fail in typecheck naming `last_sync`.
-20. `_flush`'s guard back to Task 16's `if batch:`. Expect `test_a_unit_that_ends_on_a_batch_boundary_still_says_where_its_plan_stands` to fail on `[(2, 0), (4, 0)] == [(2, 0), (4, 0), (4, 1)]`.
+20. `_flush`'s publish put back under Task 16's `if batch:`. Expect `test_a_unit_that_ends_on_a_batch_boundary_still_says_where_its_plan_stands` to fail on `[(2, 0), (4, 0)] == [(2, 0), (4, 0), (4, 1)]`.
 
 - [ ] **Step 19: Commit**
 
