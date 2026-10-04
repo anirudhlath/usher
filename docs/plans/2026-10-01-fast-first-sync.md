@@ -5036,7 +5036,7 @@ A library is counted once, over every type a walk lists, so its count rides on i
 - Consumes: Task 11's `DEFAULT_UNIT_KEY`, `WalkUnit`, `WalkPlan`, `UnitPage`, `WalkStage`; Task 10's `view_item.json`; Phase 1's `OffsetWindow`, `PAGE_OVERLAP`, `_page`, `_settle`, `_listing_query`, `LIBRARY_SINCE_PARAM`.
 - Produces, in `usher.adapters.emby.planning`: `LibraryUnit(stage: WalkStage, view_id: str, lower: int = 0, upper: int | None = None)` with `.key`, `.item_types` and `.label(library: str) -> str`; `episode_chunks(view_id: str, held: int, unit_max_items: int) -> list[LibraryUnit]`; `parse_unit_key(key: str) -> LibraryUnit | None`. Keys read `titles:<view>` and `episodes:<view>:<lower>:<upper, or empty for none>`.
 - Produces: `OffsetWindow(*, limit, start, stop: int | None = None)`, `.cursor: int`, `.request_limit: int`.
-- Produces: `EmbyAdapter(…, unit_max_items: int = 100_000)`; `EmbyAdapter._pages(query, *, start_index, stop=None, path=None) -> AsyncGenerator[tuple[list[dict[str, Any]], int]]`, each page's new entries with the `StartIndex` that resumes after it; `EmbyAdapter._unit_pages(query, *, start_index, stop=None) -> AsyncGenerator[UnitPage]`; `EmbyAdapter._read(path, query, start, limit, *, count)`. Task 14's seed reads through `_pages(path=…)`; Task 15's limiter wraps `_page`.
+- Produces: `EmbyAdapter(…, unit_max_items: int = 100_000)`; `EmbyAdapter._pages(query, *, start_index, stop=None, path=None) -> AsyncGenerator[tuple[list[dict[str, Any]], int]]`, each page's new entries with the `StartIndex` that resumes after it; `EmbyAdapter._unit_pages(query, *, start_index, stop=None) -> AsyncGenerator[UnitPage]`; `EmbyAdapter._read(path, query, start, limit, *, count)`; `EmbyAdapter._page(path, params, start, *, op="list")`. Task 14's seed reads through `_pages(path=…)`; Task 15's limiter wraps `_page`.
 - Produces: `FakeEmbyServer.add_view(view_id, name, *, collection_type: str | None = "movies")`, `.remove_view(view_id)`, `.place(external_id, *view_ids)`.
 
 - [ ] **Step 1: Write the failing tests for unit keys and chunks**
@@ -5663,6 +5663,32 @@ async def test_a_chunk_resumed_at_its_stop_asks_for_nothing() -> None:
     assert _listings(seen) == []
 
 
+async def test_a_chunk_above_zero_starts_its_walk_at_its_lower_bound() -> None:
+    """Chunk 3 to 6 asks first at `StartIndex=3`, so it re-reads no chunk before it.
+
+    The library's seven episodes end inside the chunk's reach past 6, so it reads to the end.
+    """
+    server = FakeEmbyServer()
+    shows = _library(
+        server,
+        2,
+        "Shows",
+        [_series(0), *(_episode(index) for index in range(7))],
+        collection_type="tvshows",
+    )
+    adapter, seen = _recorded(server)
+    try:
+        read = {
+            item.external_id
+            async for page in adapter.list_unit(f"episodes:{shows}:3:6")
+            for item in page.items
+        }
+    finally:
+        await adapter.aclose()
+    assert int(_listings(seen)[0].url.params["StartIndex"]) == 3
+    assert read == {f"episode-{index:03d}" for index in range(3, 7)}
+
+
 async def test_a_page_s_resume_point_is_the_next_request_s_start_reach_back_included() -> None:
     """Resuming there re-reads the page's tail, so a deletion between attempts skips nothing."""
     server = FakeEmbyServer()
@@ -5782,6 +5808,38 @@ async def test_a_library_removed_between_attempts_ends_its_unit_empty() -> None:
     assert {request.url.params.get("ParentId") for request in _listings(seen)} == {films}
 
 
+async def test_a_unit_whose_library_is_gone_ends_with_a_warning_naming_it() -> None:
+    """The full walk's sweep retracts what an empty unit never listed, so the log says why.
+
+    The control: a library still listed walks without a word.
+    """
+    server = FakeEmbyServer()
+    films = _library(server, 1, "Films", [_movie(0)])
+    shows = _library(server, 2, "Shows", [_series(0)], collection_type="tvshows")
+    server.remove_view(shows)
+    lines: list[str] = []
+    handle = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        adapter = _adapter(server)
+        try:
+            gone = [page async for page in adapter.list_unit(f"episodes:{shows}:0:")]
+            kept = [
+                item.external_id
+                async for page in adapter.list_unit(f"titles:{films}")
+                for item in page.items
+            ]
+        finally:
+            await adapter.aclose()
+    finally:
+        logger.remove(handle)
+    assert gone == []
+    assert kept == ["movie-0"]
+    assert [line.rstrip("\n") for line in lines] == [
+        f"Living Room Emby no longer lists the library behind walk unit 'episodes:{shows}:0:'; "
+        "ending the unit empty"
+    ]
+
+
 async def test_walkers_resuming_together_read_the_libraries_once() -> None:
     server = FakeEmbyServer()
     films = _library(server, 1, "Films", [_movie(0)])
@@ -5842,6 +5900,44 @@ async def test_a_count_without_a_total_fails_the_plan() -> None:
             await adapter.plan_walk()
     finally:
         await adapter.aclose()
+
+
+async def test_a_plan_s_views_read_and_counts_carry_their_own_operation_labels() -> None:
+    """The request metric buckets by `op`, and neither is a listing page; the pages keep `list`.
+
+    A count asks for `Limit=0` and a total, and timed as `list` it would sit in the
+    same bucket as pages of a thousand items.
+    """
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    trace.set_tracer_provider(provider)
+
+    def labels() -> list[object]:
+        return [
+            span.attributes["usher.op"]
+            for span in exporter.get_finished_spans()
+            if span.name == "source.request" and span.attributes is not None
+        ]
+
+    server = FakeEmbyServer()
+    films = _library(server, 1, "Films", [_movie(0)])
+    adapter = _adapter(server)
+    try:
+        await adapter.plan_walk()
+        planning = labels()
+        walked = [
+            item.external_id
+            async for page in adapter.list_unit(f"titles:{films}")
+            for item in page.items
+        ]
+        listing = labels()[len(planning) :]
+    finally:
+        await adapter.aclose()
+    assert walked == ["movie-0"], "the premise: the unit listed a page"
+    assert planning == ["views", "count", "count"]
+    assert listing
+    assert set(listing) == {"list"}
 ```
 
 In `test_every_path_this_adapter_issues_redacts_to_a_route_with_no_identifier`, after `server.set_watch_state(...)`:
@@ -6045,13 +6141,18 @@ After `_list_items`:
             raise PortDataMalformed(f"no plan of this adapter's could name walk unit {key!r}")
         return self._library_unit(unit, start_index)
 
-    async def _library_unit(
-        self, unit: LibraryUnit, start_index: int
-    ) -> AsyncGenerator[UnitPage]:
-        # A library gone since the plan was made has nothing left to walk, and its
-        # id is never sent: a server can answer a `ParentId` it does not know with
-        # the whole library.
+    async def _library_unit(self, unit: LibraryUnit, start_index: int) -> AsyncGenerator[UnitPage]:
+        # A library gone before this adapter first read the views has nothing left to
+        # walk, and its id is not sent: a server can answer a `ParentId` it does not
+        # know with the whole library. A unit never reads the views again, so one
+        # removed after that read is still asked for.
         if unit.view_id not in await self._known_libraries():
+            logger.warning(
+                "{source} no longer lists the library behind walk unit {key!r}; "
+                "ending the unit empty",
+                source=self._source.name,
+                key=unit.key,
+            )
             return
         query = {
             **_listing_query(LIBRARY_SINCE_PARAM, None),
@@ -6069,7 +6170,7 @@ After `_list_items`:
     async def _views(self) -> list[tuple[str, str]]:
         """The account's libraries, as `(id, name)`."""
         user_id = await self._session.user_id()
-        body = await self._page(f"/Users/{_segment(user_id)}/Views", {}, 0)
+        body = await self._page(f"/Users/{_segment(user_id)}/Views", {}, 0, op="views")
         entries = body.get("Items")
         if not isinstance(entries, list):
             raise PortDataMalformed("Emby's view listing carried no Items array")
@@ -6099,7 +6200,7 @@ After `_list_items`:
         }
         if view_id is not None:
             params["ParentId"] = view_id
-        body = await self._page(await self._items_path(), params, 0)
+        body = await self._page(await self._items_path(), params, 0, op="count")
         total = body.get("TotalRecordCount")
         # A count the server left out is not a count of nothing: a source total
         # read as zero would pass every coverage check.
@@ -6107,6 +6208,8 @@ After `_list_items`:
             raise PortDataMalformed("Emby's count carried no TotalRecordCount")
         return total
 ```
+
+`_page` takes the request's label as a keyword, `op: str = "list"`, and sends it to `json_body` in place of its literal `op="list"`; its docstring's last sentence is followed by `` `op` labels the request's span and duration, so a count or a views read is not timed as a listing page. `` `_views` sends `op="views"` and `_count` `op="count"`, as above. `_listing_query`'s docstring names `_pages`, where the paging now is, in place of `_walk`.
 
 Run the Step 7 command. Expected: PASS.
 
@@ -6155,6 +6258,7 @@ and replace Task 11's `given_item_in_libraries`:
         ) as pages:
             async for page in pages:
                 rest.update(item.external_id for item in page.items)
+        assert first.items[0].external_id not in rest, "the resume started over"
         seen = {item.external_id for item in first.items} | rest
         assert seen == {f"filler-{index}" for index in range(7)}
 ```
@@ -6173,7 +6277,7 @@ Expected: PASS. On the Emby arm the plan case now walks three real libraries; th
 3. `request_limit` returning `self.limit` always. Expect four cases to fail: `test_a_bounded_window_asks_for_no_more_than_its_stop_allows` (at `== 3`), `test_a_bounded_window_already_at_its_stop_asks_for_nothing` (`4 == 0`), `test_a_bounded_chunk_reads_past_its_end_by_the_overlap_and_no_further` (`160 == 150`: the requests start at 0, 20, …, 120, and the one at 120 now ends at 160), and `test_a_chunk_resumed_at_its_stop_asks_for_nothing` (a listing goes out at `StartIndex=53`).
 4. `stopped = False`. Expect `test_a_bounded_window_asks_for_no_more_than_its_stop_allows` to fail on its last line.
 5. `stop = unit.upper` (no reach past the end). Expect the bounded-chunk case to fail on `100 == 150`.
-6. `resume_at = window.cursor` with the `advance()` result unassigned, so each request starts at the cursor while the window steps back. Expect eight cases to fail: `test_a_page_s_resume_point_is_the_next_request_s_start_reach_back_included` on `4 == 2`; `test_a_bounded_chunk_reads_past_its_end_by_the_overlap_and_no_further` on `170 == 150`; and, in `tests/unit/test_adapters_emby_adapter.py`, Phase 1's `test_the_walk_pages_until_the_library_is_exhausted`, `test_only_the_first_page_asks_for_the_total`, `test_the_page_that_ends_the_walk_is_the_last_one_asked_for`, `test_a_deletion_behind_the_cursor_skips_nothing`, `test_the_last_item_of_a_page_leaving_the_listing_is_not_a_shift` and `test_a_walk_that_deletions_left_short_of_its_total_ends_on_its_tail`.
+6. `resume_at = window.cursor` with the `advance()` result unassigned, so each request starts at the cursor while the window steps back. Expect nine cases to fail: `test_a_page_s_resume_point_is_the_next_request_s_start_reach_back_included` on `4 == 2`; `test_a_bounded_chunk_reads_past_its_end_by_the_overlap_and_no_further` on `170 == 150`; and, in `tests/unit/test_adapters_emby_adapter.py`, Phase 1's `test_the_walk_pages_until_the_library_is_exhausted`, `test_only_the_first_page_asks_for_the_total`, `test_the_page_that_ends_the_walk_is_the_last_one_asked_for`, `test_a_deletion_behind_the_cursor_skips_nothing`, `test_the_last_item_of_a_page_leaving_the_listing_is_not_a_shift`, `test_a_walk_that_deletions_left_short_of_its_total_ends_on_its_tail` and `test_libraries_that_hold_less_than_the_total_fall_back_to_one_walk`, whose exact WARNING lines catch a false "listing shifted".
 7. Drop `_library_unit`'s known-library check. Expect `test_a_library_removed_between_attempts_ends_its_unit_empty` to fail on `gone == []`, and `test_walkers_resuming_together_read_the_libraries_once` on `0 == 1`: no walker reads the views at all.
 8. Drop the `NOT_LIBRARIES` test in `_views`. Expect `test_collection_and_playlist_views_are_not_libraries` to fail on the `ParentId` set.
 9. The fallback condition reduced to `if not libraries:`. Expect `test_libraries_that_hold_less_than_the_total_fall_back_to_one_walk` and the collection case's last assertion to fail.
@@ -6184,6 +6288,12 @@ Expected: PASS. On the Emby arm the plan case now walks three real libraries; th
 14. Drop `_unit_pages`' `if items:`. Expect `test_a_movie_library_s_episodes_unit_ends_on_one_empty_page` to fail on `pages == []`.
 15. Remove `"Views"` from `_ROUTE_WORDS`. Expect the redaction case to fail on `/Users/{user_id}/{id}`.
 16. In the fake, an unknown `ParentId` filters everything out: `placed = set(self._placed[parent]) if parent in self._placed else (set() if parent is not None else None)`, so a listing with no `ParentId` still lists everything. Expect `test_a_parent_id_no_view_carries_lists_the_whole_library` to fail.
+17. In `list_unit`'s `DEFAULT_UNIT_KEY` branch, `start_index=0`. Expect only `TestEmbyAdapter::test_a_unit_resumes_after_a_page_from_its_resume_at` to fail, on `the resume started over`.
+18. In the fake source's `list_unit`, `start_index=0` in both returns. Expect `TestFakeSourceAdapter::test_a_unit_resumes_after_a_page_from_its_resume_at` to fail on `the resume started over`, and `tests/unit/test_ports_source.py::test_the_fake_s_own_whole_library_unit_resumes_from_its_start_index` beside it.
+19. In `_library_unit`, `start_index=start_index` in place of `max(start_index, unit.lower)`. Expect `test_a_chunk_above_zero_starts_its_walk_at_its_lower_bound` to fail on `0 == 3`.
+20. Drop the vanished library's `logger.warning`. Expect `test_a_unit_whose_library_is_gone_ends_with_a_warning_naming_it` to fail on its WARNING list.
+21. `_count` with `op="list"`. Expect `test_a_plan_s_views_read_and_counts_carry_their_own_operation_labels` to fail on `['views', 'list', 'list'] == ['views', 'count', 'count']`.
+22. `_views` with `op="list"`. Expect the same case to fail on `['list', 'count', 'count'] == ['views', 'count', 'count']`.
 
 - [ ] **Step 12: Commit**
 
@@ -6677,7 +6787,7 @@ After `_library_unit`:
         return series
 ```
 
-If Task 10 recorded that only `Recursive=true` finds items by `Ids`, add `"Recursive": "true", "IncludeItemTypes": "Series"` to `params` there. NextUp needs nothing of the kind: it is small, so its first page is short and at its total and ends the walk whatever Task 10 found about its paging.
+Task 10 found `Ids` answering with and without `Recursive=true`, so `params` carries neither `Recursive` nor `IncludeItemTypes`. The series and NextUp reads keep `_page`'s default label, `"list"`: each reads a page of items. NextUp needs nothing of the kind: it is small, so its first page is short and at its total and ends the walk whatever Task 10 found about its paging.
 
 `_count` takes the filter:
 
@@ -6694,7 +6804,7 @@ If Task 10 recorded that only `Recursive=true` finds items by `Ids`, add `"Recur
             params["ParentId"] = view_id
         if filters is not None:
             params["Filters"] = filters
-        body = await self._page(await self._items_path(), params, 0)
+        body = await self._page(await self._items_path(), params, 0, op="count")
         total = body.get("TotalRecordCount")
         # A count the server left out is not a count of nothing: a source total
         # read as zero would pass every coverage check.
@@ -6751,7 +6861,7 @@ Spec §2.6 and the `usher.source.listing.concurrency` half of §2.8. One `Listin
 - Test: `tests/unit/test_adapters_emby_adapter.py`, `tests/unit/test_adapters_factory.py`, `tests/unit/test_composition.py`, `tests/unit/test_config.py`, `tests/unit/test_telemetry_metric_names.py`, `tests/unit/test_dashboards.py`
 
 **Interfaces:**
-- Consumes: Phase 1's `_page` (with `LISTING_READ_SECONDS`), `PAGE_RETRY_WAITS`; Task 13's `LibraryUnit`, `list_unit`, and the test helpers `_library`, `_movie`, `_Waits`.
+- Consumes: Phase 1's `_page` (with `LISTING_READ_SECONDS`, and Task 13's `op`), `PAGE_RETRY_WAITS`; Task 13's `LibraryUnit`, `list_unit`, and the test helpers `_library`, `_movie`, `_Waits`.
 - Produces: `usher.adapters.emby.limit.ListingLimit(ceiling: int, *, source: str)` with `.limit: int`, `.slot()` (an async context manager), `.failed()`, `.succeeded()`; `RAISE_AFTER = 10`.
 - Produces: `EmbyAdapter(…, listing_concurrency: int = 4)`; `ConfiguredSourceAdapterFactory(…, listing_concurrency: int = 4)`; `Settings.sync_walkers: int` (default 4, from 1 to 16). Task 16 passes `settings.sync_walkers` to `ReconcileService(walkers=…)` and extends the setting's description to the walkers.
 
@@ -7210,7 +7320,8 @@ Expected: FAIL — `TypeError: EmbyAdapter.__init__() got an unexpected keyword 
         one; a success counts towards raising it.
 
         Giving up raises `PortUnavailable` naming the attempts, whatever the last
-        failure was.
+        failure was. `op` labels the request's span and duration, so a count or a views
+        read is not timed as a listing page.
         """
 ```
 
@@ -7222,7 +7333,7 @@ and its loop body becomes:
             try:
                 async with self._listing_limit.slot():
                     body = await self._session.json_body(
-                        "GET", path, params=params, op="list", read_timeout=LISTING_READ_SECONDS
+                        "GET", path, params=params, op=op, read_timeout=LISTING_READ_SECONDS
                     )
             except RequestRefused:
                 raise
