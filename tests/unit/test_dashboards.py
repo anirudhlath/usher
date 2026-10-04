@@ -502,8 +502,8 @@ def test_the_catalogue_scan_reaches_the_row_that_carries_no_usher_prefix() -> No
         "the catalogue scan is still anchored on `usher.`, so an API-latency panel would "
         "fail invariant 2 for naming the one metric PRD 10 says it should"
     )
-    assert len(catalogue) == 42, (
-        f"PRD 10's metric table parsed to {len(catalogue)} rows, not the 42 its own header "
+    assert len(catalogue) == 43, (
+        f"PRD 10's metric table parsed to {len(catalogue)} rows, not the 43 its own header "
         "counts out — the table's shape has moved and both readers need checking"
     )
 

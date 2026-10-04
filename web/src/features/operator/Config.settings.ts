@@ -219,6 +219,15 @@ export const CONFIG: readonly SettingRow[] = [
     secret: false,
     measured: false,
   },
+  {
+    key: 'USHER_SYNC_WALKERS',
+    group: 'ingest',
+    def: '4',
+    about:
+      'The most listing requests one walk has in flight to a source. A failure that is asked again drops it to one, and each ten pages that succeed raise it a step, back to this. 1 is one request at a time. Against a real Emby at the default gate, four walkers read 0.37 pages/s and two read 0.34.',
+    secret: false,
+    measured: true,
+  },
 
   /* ----------------------------------------------------------------- jobs */
   {

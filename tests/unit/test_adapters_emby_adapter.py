@@ -28,8 +28,9 @@ from tests.fakes.emby_server import SERVER_VERSION, USER_ID, FakeEmbyServer
 from tests.fakes.push_connection import FakePushConnection, FakePushConnector
 from tests.fakes.slow_transport import SlowTransport
 from usher.adapters.emby.adapter import IDS_PER_REQUEST, MAX_PAGES, SEED_UNIT, EmbyAdapter
+from usher.adapters.emby.limit import RAISE_AFTER
 from usher.adapters.emby.paging import PAGE_OVERLAP
-from usher.adapters.emby.planning import SEED_KEY
+from usher.adapters.emby.planning import SEED_KEY, LibraryUnit
 from usher.adapters.emby.push import SUBSCRIBE_FRAME
 from usher.adapters.emby.session import RequestRefused, redact_path
 from usher.domain.enums import SourceKind
@@ -3839,6 +3840,158 @@ async def test_a_seed_s_reads_by_ids_and_next_up_keep_the_list_label() -> None:
         if span.name == "source.request" and span.attributes is not None
     ]
     assert labels == ["list"] * len(reads)
+
+
+# --- the listing limit -----------------------------------------------
+
+# Turns of the event loop a listing page waits for company before it is answered.
+COMPANY = 20
+
+
+class _Crowd:
+    """An async handler logging each listing page's arrival and departure.
+
+    Each page waits `COMPANY` turns of the loop before it is answered, so requests
+    that may overlap do. A page is `(ParentId, StartIndex)`; those in `fail` are
+    answered 503, once each. Everything else goes straight to the server.
+    """
+
+    def __init__(self, server: FakeEmbyServer, *, fail: Sequence[tuple[str, int]] = ()) -> None:
+        self._server = server
+        self._fail = set(fail)
+        self._in_flight = 0
+        self.log: list[tuple[str, tuple[str, int], int]] = []
+
+    async def __call__(self, request: httpx.Request) -> httpx.Response:
+        params = request.url.params
+        if not request.url.path.endswith("/Items") or params.get("Limit") == "0":
+            return self._server.handle(request)
+        page = (params.get("ParentId", ""), int(params["StartIndex"]))
+        self._in_flight += 1
+        self.log.append(("in", page, self._in_flight))
+        try:
+            for _ in range(COMPANY):
+                await asyncio.sleep(0)
+            if page in self._fail:
+                self._fail.remove(page)
+                return httpx.Response(503)
+            return self._server.handle(request)
+        finally:
+            self._in_flight -= 1
+            self.log.append(("out", page, self._in_flight))
+
+    def widths(self, start: int = 0, end: int | None = None) -> list[int]:
+        """How many pages were in flight as each in `log[start:end]` arrived, itself included."""
+        return [width for event, _, width in self.log[start:end] if event == "in"]
+
+    def index(self, event: str, page: tuple[str, int], *, after: int = -1) -> int:
+        """Where `event` for `page` is first logged after position `after`."""
+        return next(
+            at
+            for at, (logged, which, _) in enumerate(self.log)
+            if at > after and (logged, which) == (event, page)
+        )
+
+
+class _TurningWaits(_Waits):
+    """`_Waits` whose wait also lets the event loop turn, as a real one would."""
+
+    async def sleep(self, seconds: float) -> None:
+        await super().sleep(seconds)
+        for _ in range(COMPANY):
+            await asyncio.sleep(0)
+
+
+def _crowded(
+    crowd: _Crowd, *, listing_concurrency: int, waits: _Waits | None = None
+) -> EmbyAdapter:
+    waits = waits if waits is not None else _Waits()
+    return EmbyAdapter(
+        SOURCE,
+        CREDENTIALS,
+        client=httpx.AsyncClient(transport=httpx.MockTransport(crowd), base_url=SOURCE.base_url),
+        page_size=2,
+        listing_concurrency=listing_concurrency,
+        sleep=waits.sleep,
+        clock=waits.clock,
+    )
+
+
+async def _walk_together(adapter: EmbyAdapter, view_ids: Sequence[str]) -> None:
+    """Each library's TITLES unit walked by a task of its own, all at once."""
+
+    async def walk(view_id: str) -> None:
+        async with aclosing(adapter.list_unit(LibraryUnit(WalkStage.TITLES, view_id).key)) as pages:
+            _ = [page async for page in pages]
+
+    await asyncio.gather(*(walk(view_id) for view_id in view_ids))
+
+
+@pytest.mark.parametrize("cap", [1, 2, 4])
+async def test_listing_pages_in_flight_never_pass_the_listing_concurrency(cap: int) -> None:
+    """Five walkers share one limit; at every cap they fill it and go no further.
+
+    Five, one more than the largest cap, so a walk with no limit reaches five.
+    """
+    server = FakeEmbyServer()
+    view_ids = [
+        _library(server, n, f"Library {n}", [_movie(n * 10 + i) for i in range(4)])
+        for n in range(5)
+    ]
+    crowd = _Crowd(server)
+    adapter = _crowded(crowd, listing_concurrency=cap)
+    try:
+        await _walk_together(adapter, view_ids)
+    finally:
+        await adapter.aclose()
+    assert max(crowd.widths()) == cap
+
+
+async def test_a_retried_failure_lets_pages_in_one_at_a_time_until_ten_succeed() -> None:
+    """A 503 drops the limit to one, and the tenth success after it raises it to two.
+
+    Two walkers share a limit of two, and one walker's first page is answered 503.
+    Before the failure both are in flight. Between the failure and the tenth page that
+    succeeds after it, every page arrives alone, and after the tenth, two fly again.
+    """
+    server = FakeEmbyServer()
+    films = _library(server, 1, "Films", [_movie(index) for index in range(16)])
+    more = _library(server, 2, "More Films", [_movie(index) for index in range(20, 36)])
+    crowd = _Crowd(server, fail=[(films, 0)])
+    adapter = _crowded(crowd, listing_concurrency=2)
+    try:
+        await _walk_together(adapter, [films, more])
+    finally:
+        await adapter.aclose()
+    failure = crowd.index("out", (films, 0))
+    successes = [
+        at for at, (event, _, _) in enumerate(crowd.log) if event == "out" and at > failure
+    ]
+    tenth = successes[RAISE_AFTER - 1]
+    assert 2 in crowd.widths(end=failure), "the premise: both walkers were in flight together"
+    assert set(crowd.widths(failure, tenth)) == {1}
+    assert 2 in crowd.widths(tenth)
+
+
+async def test_a_page_waiting_to_ask_again_holds_no_slot() -> None:
+    """The wait before a retry is spent outside the limit, so the other walker's page goes.
+
+    One slot, two walkers, and one walker's first page answered 503. A page of the
+    other library arrives between that answer and the retry.
+    """
+    server = FakeEmbyServer()
+    films = _library(server, 1, "Films", [_movie(index) for index in range(4)])
+    more = _library(server, 2, "More Films", [_movie(index) for index in range(20, 24)])
+    crowd = _Crowd(server, fail=[(films, 0)])
+    adapter = _crowded(crowd, listing_concurrency=1, waits=_TurningWaits())
+    try:
+        await _walk_together(adapter, [films, more])
+    finally:
+        await adapter.aclose()
+    failure = crowd.index("out", (films, 0))
+    retry = crowd.index("in", (films, 0), after=failure)
+    between = [page for event, page, _ in crowd.log[failure:retry] if event == "in"]
+    assert {view for view, _ in between} == {more}
 
 
 # --- the redacted request path ---------------------------------------------

@@ -106,6 +106,17 @@ the first.
   can silently read and write the other's database.
 - **The port** is the one the second API is published on.
 
+## Walking a large library
+
+A sync reads the media server's library a page at a time. `USHER_SYNC_WALKERS`
+(default 4) caps how many of those requests are in flight at once. When the
+server fails one, the cap drops to one by itself and climbs back a step for
+every ten pages that succeed.
+
+Every request is work for the media server. If you don't administer it, or a
+sync slows down somebody's playback, set `USHER_SYNC_WALKERS=1` for one request
+at a time.
+
 ## Semantic search
 
 Full-text search and type-ahead cover the whole catalog without a model.

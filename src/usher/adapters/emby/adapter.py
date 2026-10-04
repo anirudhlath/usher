@@ -14,6 +14,7 @@ from loguru import logger
 from opentelemetry import trace
 from pydantic import AwareDatetime
 
+from usher.adapters.emby.limit import ListingLimit
 from usher.adapters.emby.mapping import (
     TICKS_PER_SECOND,
     emby_datetime,
@@ -194,6 +195,7 @@ class EmbyAdapter(SourceAdapter):
         page_size: int = 1000,
         max_pages: int = MAX_PAGES,
         unit_max_items: int = 100_000,
+        listing_concurrency: int = 4,
         timeout_seconds: float = 30.0,
         reauth_cooldown_seconds: float = 60.0,
         limiter: SourceGate | None = None,
@@ -211,6 +213,9 @@ class EmbyAdapter(SourceAdapter):
         # The library ids, read by the plan or by the first unit a resumed walk asks for.
         self._library_ids: frozenset[str] | None = None
         self._library_lock = asyncio.Lock()
+        # Every listing request this adapter sends, each walker's and each
+        # read-ahead's, takes its turn from this one limit.
+        self._listing_limit = ListingLimit(listing_concurrency, source=source.name)
         # Ownership is tracked, not assumed: `aclose()` closes a client this
         # adapter created and leaves an injected one alone. Closing someone
         # else's client is what the bulk adapters' no-op `aclose` avoids.
@@ -443,7 +448,13 @@ class EmbyAdapter(SourceAdapter):
         scheduled one. Nothing else is: a refused request and an answer that is not a
         listing would be the same answer next time, a rejected credential needs an
         operator, and a closed adapter -- which raises `PortUnavailable` too -- is shutting
-        down. Giving up raises `PortUnavailable` naming the attempts, whatever the last
+        down.
+
+        Each attempt holds one of the listing limit's slots, and the wait between
+        attempts holds none. A failure of the kind asked again drops the limit to
+        one; a success counts towards raising it.
+
+        Giving up raises `PortUnavailable` naming the attempts, whatever the last
         failure was. `op` labels the request's span and duration, so a count or a views
         read is not timed as a listing page.
         """
@@ -453,14 +464,16 @@ class EmbyAdapter(SourceAdapter):
         while True:
             attempt += 1
             try:
-                return await self._session.json_body(
-                    "GET", path, params=params, op=op, read_timeout=LISTING_READ_SECONDS
-                )
+                async with self._listing_limit.slot():
+                    body = await self._session.json_body(
+                        "GET", path, params=params, op=op, read_timeout=LISTING_READ_SECONDS
+                    )
             except RequestRefused:
                 raise
             except (PortUnavailable, PortRateLimited) as exc:
                 if self._closed:
                     raise
+                self._listing_limit.failed()
                 if first_failure is None:
                     first_failure = self._clock()
                 if attempt == attempts:
@@ -482,6 +495,9 @@ class EmbyAdapter(SourceAdapter):
                     wait=wait,
                 )
                 await self._sleep(wait)
+            else:
+                self._listing_limit.succeeded()
+                return body
 
     def list_items(self, since: AwareDatetime | None = None) -> AsyncIterator[SourceItem]:
         return self._list_items(since)

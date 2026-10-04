@@ -8,6 +8,13 @@ Versioning is `0.x` while the wire contract may still move —
 
 ## [Unreleased]
 
+### Added
+
+- Listing requests to a source are capped at `USHER_SYNC_WALKERS` (default 4)
+  and back off on their own: a failure that is asked again drops the cap to one,
+  and every ten pages that succeed raise it by one. The gauge
+  `usher.source.listing.concurrency` shows the cap.
+
 ### Changed
 
 - **`USHER_SOURCE_PAGE_SIZE` defaults to 1,000, up from 200.** A page of 1,000

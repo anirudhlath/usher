@@ -32,6 +32,10 @@ couples the two.** The endpoint requires `prompt_tokens + llm_max_output_tokens
 the failure arrives as a parked job rather than as a startup refusal: no setting
 knows `max_model_len`.
 
+**`USHER_SYNC_WALKERS` caps the listing requests in flight to a source** (default
+4; 1 is one at a time), and the cap backs off by itself
+([03](03-sources-and-sync.md#walking-the-library)).
+
 Two things are **not** settings:
 
 - **Concurrency per lane.** `USHER_JOB_CONCURRENCY` is the worker's global

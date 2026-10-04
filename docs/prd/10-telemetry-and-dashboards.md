@@ -106,7 +106,7 @@ control that does nothing.
 
 ### Metrics — OpenTelemetry → Prometheus
 
-**Every row is emitted today. 42 rows: 41 instruments Usher declares, plus one
+**Every row is emitted today. 43 rows: 42 instruments Usher declares, plus one
 `FastAPIInstrumentor` supplies.**
 
 | Metric | Type | Labels | Emitted |
@@ -133,6 +133,7 @@ control that does nothing.
 | `usher.watch_state.backfilled` | counter | source | ✅ M4 |
 | `usher.source.request.duration` | histogram | source, op | ✅ M3 |
 | `usher.source.throttle.wait` | histogram | source | ✅ M10 |
+| `usher.source.listing.concurrency` | gauge | source | ✅ fast first sync |
 | `usher.source.push.connected` | gauge | source | ✅ M5 |
 | `usher.source.push.reconnects` | counter | source | ✅ M5 |
 | `usher.source.push.events` | counter | source, kind | ✅ M5 |
@@ -153,6 +154,12 @@ control that does nothing.
 | `usher.scheduler.job.duration` | histogram | job | ✅ M10 |
 | `usher.scheduler.job.failures` | counter | job | ✅ M10 |
 | `usher.scheduler.job.due` | gauge | job | ✅ M10 |
+
+**`usher.source.listing.concurrency` is written after every listing page**, by
+the adapter that sent it, so an adapter that never lists leaves no reading. It
+reads `USHER_SYNC_WALKERS` while a walk is healthy, 1 straight after a failure,
+and climbs back a step per ten pages. Two walks of one source at once write one
+series.
 
 **The three scheduler rows.** `job` is the scheduled job's name, which is
 stable.

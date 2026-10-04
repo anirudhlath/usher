@@ -142,6 +142,8 @@ class Settings(BaseSettings):
     # The fraction of a source's items one reconcile may mark unavailable
     # before it refuses and changes nothing.
     sync_max_retract_fraction: float = Field(default=0.25, ge=0.0, le=1.0)
+    # The most listing requests one walk has in flight to a source; 1 is one at a time.
+    sync_walkers: int = Field(default=4, ge=1, le=16)
     job_batch_size: int = Field(default=20, ge=1, le=500)
     # How many jobs one worker process may have in flight at once, and the per-kind
     # ceiling for the network-bound kinds.

@@ -293,6 +293,7 @@ def adapter_factory(settings: Settings, gates: SourceGateRegistry) -> SourceAdap
         gates=gates,
         push_stale_after_seconds=settings.push_stale_after_seconds,
         push_poll_seconds=settings.push_poll_seconds,
+        listing_concurrency=settings.sync_walkers,
     )
 
 

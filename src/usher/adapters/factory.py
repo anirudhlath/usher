@@ -35,6 +35,7 @@ class ConfiguredSourceAdapterFactory(SourceAdapterFactory):
         gates: SourceGateRegistry | None = None,
         push_stale_after_seconds: float = DEFAULT_STALE_AFTER_SECONDS,
         push_poll_seconds: float = DEFAULT_POLL_SECONDS,
+        listing_concurrency: int = 4,
     ) -> None:
         self._page_size = page_size
         self._timeout_seconds = timeout_seconds
@@ -44,6 +45,7 @@ class ConfiguredSourceAdapterFactory(SourceAdapterFactory):
         self._gates = gates if gates is not None else SourceGateRegistry()
         self._push_stale_after_seconds = push_stale_after_seconds
         self._push_poll_seconds = push_poll_seconds
+        self._listing_concurrency = listing_concurrency
 
     def build(self, source: Source, credentials: SourceCredentials) -> SourceAdapter:
         """Construct the adapter for `source.kind`; the caller owns it.
@@ -64,5 +66,6 @@ class ConfiguredSourceAdapterFactory(SourceAdapterFactory):
                 limiter=self._gates.gate(source.id, source.name),
                 push_stale_after_seconds=self._push_stale_after_seconds,
                 push_poll_seconds=self._push_poll_seconds,
+                listing_concurrency=self._listing_concurrency,
             )
         raise SourceNotSupported(f"no adapter is registered for source kind {source.kind}")

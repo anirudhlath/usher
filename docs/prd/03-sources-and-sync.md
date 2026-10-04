@@ -113,6 +113,11 @@ when the walk stops:
   sixth failure ends the walk, and its error says how many attempts it made over
   how long; each page gets its own six. Any other 4xx, an answer that is not a
   listing, a rejected credential and a closed adapter fail at once.
+- **At most `USHER_SYNC_WALKERS` listing requests are in flight** (default
+  **4**), the read-ahead included. A failure that is asked again drops that to
+  one, and each run of ten pages that succeed raises it by one, back up to the
+  setting. A page waiting for its turn, or waiting to ask again, holds no
+  request.
 
 The item lane filters on the library edit time, the watch lane on the user-data
 change time.
