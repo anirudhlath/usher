@@ -54,6 +54,7 @@ from usher.ports.source import (
     SourceAdapter,
     SourceEvent,
     SourceItem,
+    SourceItemKind,
     SourceStatus,
     SourceWatchState,
     StreamTarget,
@@ -590,11 +591,13 @@ class EmbyAdapter(SourceAdapter):
     async def _seed(self) -> AsyncGenerator[UnitPage]:
         """What the account is watching: played, then in progress, then up next.
 
-        Each page is led by the series its episodes need that neither it nor an
-        earlier page holds, fetched by `Ids`, so every episode lands with its
-        series or after it, and only one page is ever held. Every page resumes at
-        0, so a resumed seed starts again: a count into listings that may have
-        changed since could skip an item the watch lane is about to look for.
+        Each page leads with its series: first those its episodes need that neither
+        it nor an earlier page holds, fetched by `Ids`, then its own, in the server's
+        order. So every episode comes after its series, save one whose series `Ids`
+        did not return, which `_series_for` warns of. Only one page is ever held.
+        Every page resumes at 0, so a resumed seed starts again: a count into
+        listings that may have changed since could skip an item the watch lane is
+        about to look for.
         """
         user_id = await self._session.user_id()
         listings: list[tuple[str | None, dict[str, str]]] = [
@@ -612,26 +615,49 @@ class EmbyAdapter(SourceAdapter):
                         if item is not None and item.external_id not in yielded
                     ]
                     series = await self._series_for(fresh, yielded)
-                    page = (*series, *fresh)
+                    own = [item for item in fresh if item.kind is SourceItemKind.SERIES]
+                    rest = [item for item in fresh if item.kind is not SourceItemKind.SERIES]
+                    page = (*series, *own, *rest)
                     if page:
                         yielded.update(item.external_id for item in page)
                         yield UnitPage(page, resume_at=0)
 
     async def _series_for(self, items: Sequence[SourceItem], yielded: set[str]) -> list[SourceItem]:
-        """The series of `items`' episodes that neither they nor an earlier page hold."""
+        """The series of `items`' episodes that neither they nor an earlier page hold.
+
+        Only a series asked for is kept, whatever else comes back, and one WARNING
+        counts those asked for that did not come back.
+        """
         held = yielded | {item.external_id for item in items}
         missing = sorted(
             {item.series_external_id for item in items if item.series_external_id} - held
         )
         series: list[SourceItem] = []
+        absent = 0
         for chunk in batched(missing, IDS_PER_REQUEST, strict=False):
-            # `Limit` is the chunk's length: every id asked for comes back, and no more.
+            # `Limit` is the chunk's length, so a server that ignores `Ids` sends no
+            # more items than were asked for.
             params = {"Ids": ",".join(chunk), "Fields": ITEM_FIELDS, "Limit": str(len(chunk))}
             body = await self._page(await self._items_path(), params, 0)
             entries = body.get("Items")
             if not isinstance(entries, list):
                 raise PortDataMalformed("Emby's series listing carried no Items array")
-            series.extend(item for item in map(to_source_item, entries) if item is not None)
+            # Each series asked for is kept once; `asked` ends holding those that did not
+            # come back.
+            asked = set(chunk)
+            for item in map(to_source_item, entries):
+                if item is not None and item.external_id in asked:
+                    asked.discard(item.external_id)
+                    series.append(item)
+            absent += len(asked)
+        if absent:
+            logger.warning(
+                "{source} did not return {absent} of the {count} series the seed asked for "
+                "by Ids; their episodes are seeded without them",
+                source=self._source.name,
+                absent=absent,
+                count=len(missing),
+            )
         return series
 
     async def _views(self) -> list[tuple[str, str]]:

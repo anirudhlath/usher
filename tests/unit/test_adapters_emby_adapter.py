@@ -3549,17 +3549,19 @@ async def test_a_plan_s_views_read_and_counts_carry_their_own_operation_labels()
 
 
 def _watching(server: FakeEmbyServer) -> None:
-    """Three movies and two episodes watched, one of each untouched, one episode up next.
+    """Three movies, three episodes and a series watched, two items untouched, one up next.
 
     `movie-3` is both played and part-way through, so two listings carry it.
-    `next-0` belongs to `series-1`, which no watched item does.
+    `next-0` belongs to `series-1`, which no watched item does. `series-2` is played,
+    and the played listing's page carries it after its own `episode-003`.
     """
     for index in range(4):
         server.add_item(_movie(index), T0)
-    server.add_item(_series(0), T0)
-    server.add_item(_series(1), T0)
+    for index in range(3):
+        server.add_item(_series(index), T0)
     for index in range(3):
         server.add_item(_episode(index), T0)
+    server.add_item(replace(_episode(3), series_external_id="series-2"), T0)
     server.add_item(
         replace(_episode(9), external_id="next-0", name="Next 0", series_external_id="series-1"),
         T0,
@@ -3571,6 +3573,8 @@ def _watching(server: FakeEmbyServer) -> None:
         ("movie-3", True, 320),
         ("episode-000", True, 0),
         ("episode-001", False, 640),
+        ("series-2", True, 0),
+        ("episode-003", True, 0),
     ]:
         server.set_watch_state(
             SourceWatchState(external_id=external_id, position_seconds=position, played=played)
@@ -3592,26 +3596,33 @@ async def test_a_plan_starts_with_the_seed_and_so_does_its_fallback() -> None:
         fallback = await falling_back.plan_walk()
     finally:
         await falling_back.aclose()
-    assert [unit.key for unit in fallback.units] == [SEED_KEY, DEFAULT_UNIT_KEY], (
-        "the premise: the second plan fell back"
-    )
+    # Both premises leave the seed out, so a seed gone missing fails the loop instead.
+    assert [unit.stage for unit in covered.units if unit.stage is not WalkStage.SEED] == [
+        WalkStage.TITLES,
+        WalkStage.EPISODES,
+    ], "the premise: the first plan walked the library"
+    assert [unit.key for unit in fallback.units if unit.stage is not WalkStage.SEED] == [
+        DEFAULT_UNIT_KEY
+    ], "the premise: the second plan fell back"
     for plan in (covered, fallback):
         assert plan.units[0] == SEED_UNIT
         assert [unit.stage for unit in plan.units].count(WalkStage.SEED) == 1
 
 
-@pytest.mark.parametrize("ignored", ["IsPlayed", "IsResumable"])
-async def test_a_filter_the_server_ignores_leaves_the_plan_without_a_seed(ignored: str) -> None:
+@pytest.mark.parametrize("ignored", [None, "IsPlayed", "IsResumable"])
+async def test_a_filter_the_server_ignores_leaves_the_plan_without_a_seed(
+    ignored: str | None,
+) -> None:
     """A seed its filter did not narrow would walk the whole library ahead of the walk.
 
-    Each filter is ignored on its own, so neither half of the check can go missing;
-    the library is the one the case above planned a seed for.
+    Each filter is ignored on its own, so neither half of the check can go missing,
+    and the control ignores neither, so this library is one a seed is planned for.
     """
     server = FakeEmbyServer()
     _library(server, 1, "Films", [_movie(0), _movie(1)])
 
     def ignoring(request: httpx.Request) -> httpx.Response:
-        if request.url.params.get("Filters") != ignored:
+        if ignored is None or request.url.params.get("Filters") != ignored:
             return server.handle(request)
         unfiltered = request.url.copy_remove_param("Filters")
         return server.handle(httpx.Request(request.method, unfiltered, headers=request.headers))
@@ -3621,32 +3632,54 @@ async def test_a_filter_the_server_ignores_leaves_the_plan_without_a_seed(ignore
         plan = await adapter.plan_walk()
     finally:
         await adapter.aclose()
-    assert [unit.stage for unit in plan.units] == [WalkStage.TITLES, WalkStage.EPISODES]
+    stages = [unit.stage for unit in plan.units]
+    if ignored is None:
+        # Membership only: where the seed goes is the case above's to pin.
+        assert WalkStage.SEED in stages, "the premise: a server honouring both filters gets a seed"
+    else:
+        assert stages == [WalkStage.TITLES, WalkStage.EPISODES]
 
 
 async def test_the_seed_holds_what_the_account_watched_and_watches_next_each_series_first() -> None:
     """Each item once, every episode after its series, and no untouched item.
 
+    The server lists `series-2` after its own episode, so the seed has to move it.
     The fake refuses a NextUp that names no user, so this case also holds the
     adapter to sending one.
     """
     server = FakeEmbyServer()
     _watching(server)
-    adapter = _adapter(server, page_size=100)
+    carried: dict[str, set[str]] = {}
+
+    def carrying(request: httpx.Request) -> httpx.Response:
+        response = server.handle(request)
+        filters = request.url.params.get("Filters")
+        if filters is not None:
+            entries = json.loads(response.content)["Items"]
+            carried.setdefault(filters, set()).update(entry["Id"] for entry in entries)
+        return response
+
+    adapter = _on(carrying, page_size=100)
     try:
         pages = [page async for page in adapter.list_unit(SEED_KEY)]
     finally:
         await adapter.aclose()
     walked = [item for page in pages for item in page.items]
+    assert {filters for filters, ids in carried.items() if "movie-3" in ids} == {
+        "IsPlayed",
+        "IsResumable",
+    }, "the premise: both listings carry movie-3"
     assert sorted(item.external_id for item in walked) == [
         "episode-000",
         "episode-001",
+        "episode-003",
         "movie-0",
         "movie-2",
         "movie-3",
         "next-0",
         "series-0",
         "series-1",
+        "series-2",
     ]
     before: set[str] = set()
     for item in walked:
@@ -3704,6 +3737,61 @@ async def test_the_seed_asks_only_for_series_no_page_held_a_hundred_at_a_time() 
     assert {"series-done", *(f"series-{index}" for index in range(count))} <= walked
 
 
+async def test_a_server_ignoring_ids_seeds_only_the_series_asked_for_and_warns() -> None:
+    """Whatever else it sends is dropped, `Limit` caps it, and a WARNING counts the rest.
+
+    Sorted by name, the unfiltered answer leads with `movie-0`, which was not asked
+    for, then `series-0`, which was; `series-1` never comes.
+    """
+    server = FakeEmbyServer()
+    server.add_item(_movie(0), T0)
+    for index in range(2):
+        server.add_item(_series(index), T0)
+        # Named to sort after every series, so the two that lead are a movie and a series.
+        episode = replace(
+            _episode(index), name=f"Zed {index}", series_external_id=f"series-{index}"
+        )
+        server.add_item(episode, T0)
+        server.set_watch_state(
+            SourceWatchState(external_id=episode.external_id, position_seconds=0, played=True)
+        )
+    asked: list[httpx.Request] = []
+    served: list[str] = []
+
+    def ignoring(request: httpx.Request) -> httpx.Response:
+        if "Ids" not in request.url.params:
+            return server.handle(request)
+        asked.append(request)
+        unfiltered = request.url.copy_remove_param("Ids").copy_set_param("SortBy", "SortName")
+        response = server.handle(httpx.Request(request.method, unfiltered, headers=request.headers))
+        served.extend(entry["Id"] for entry in json.loads(response.content)["Items"])
+        return response
+
+    lines: list[str] = []
+    handle = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        adapter = _on(ignoring)
+        try:
+            walked = [
+                item.external_id
+                async for page in adapter.list_unit(SEED_KEY)
+                for item in page.items
+            ]
+        finally:
+            await adapter.aclose()
+    finally:
+        logger.remove(handle)
+    assert [(request.url.params["Ids"], request.url.params["Limit"]) for request in asked] == [
+        ("series-0,series-1", "2")
+    ]
+    assert served == ["movie-0", "series-0"], "the premise: the server sent what was not asked for"
+    assert walked == ["series-0", "episode-000", "episode-001"]
+    assert [line.rstrip("\n") for line in lines] == [
+        "Living Room Emby did not return 1 of the 2 series the seed asked for by Ids; "
+        "their episodes are seeded without them"
+    ]
+
+
 async def test_a_resumed_seed_starts_again() -> None:
     """A count into listings that changed since could skip an item the watch lane needs."""
     server = FakeEmbyServer()
@@ -3718,6 +3806,32 @@ async def test_a_resumed_seed_starts_again() -> None:
     assert [[item.external_id for item in page.items] for page in resumed] == [
         [item.external_id for item in page.items] for page in first
     ]
+
+
+async def test_a_seed_s_reads_by_ids_and_next_up_keep_the_list_label() -> None:
+    """Both are listing pages, so the request metric times them with the other pages."""
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    trace.set_tracer_provider(provider)
+    server = FakeEmbyServer()
+    _watching(server)
+    adapter, seen = _recorded(server, page_size=100)
+    try:
+        _ = [page async for page in adapter.list_unit(SEED_KEY)]
+    finally:
+        await adapter.aclose()
+    reads = [request for request in seen if request.url.path != "/Users/AuthenticateByName"]
+    assert any("Ids" in request.url.params for request in reads), "the premise: a read by Ids"
+    assert any(request.url.path == "/Shows/NextUp" for request in reads), (
+        "the premise: a NextUp read"
+    )
+    labels = [
+        span.attributes["usher.op"]
+        for span in exporter.get_finished_spans()
+        if span.name == "source.request" and span.attributes is not None
+    ]
+    assert labels == ["list"] * len(reads)
 
 
 # --- the redacted request path ---------------------------------------------
