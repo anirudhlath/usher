@@ -32,7 +32,7 @@ The five inputs most likely to hurt a person running this, none of which the spe
 
 1. **Items deleted from the source mid-walk shrink the library below the first page's total.** The walk ends a page or two later instead of paging out `MAX_PAGES` (~7 h of requests) and failing. Task 3: `test_a_walk_that_deletions_left_short_of_its_total_ends_on_its_tail`.
 2. **A server that caps `Limit` at or below `PAGE_OVERLAP`.** The walk still advances and reads everything, rather than re-reading one page until `MAX_PAGES`. Task 3: `test_a_limit_capped_below_the_overlap_still_advances`.
-3. **A server that ignores `Filters`.** The first watch walk still yields only played or in-progress states, each once, and walks the library once rather than twice. Task 6: `test_a_server_that_ignores_the_filter_still_yields_only_watched_states_once`.
+3. **A server that ignores `Filters`.** The first watch walk still yields only played or in-progress states, each once, and walks the library once rather than twice, saying so in a WARNING; a played listing holding a few entries that read unwatched is not taken for one. Task 6: `test_a_server_that_ignores_the_filter_still_yields_only_watched_states_once`, `test_a_played_listing_is_judged_unfiltered_only_when_mostly_unwatched` and `test_a_series_reading_unwatched_in_the_played_listing_keeps_the_in_progress_one`.
 4. **The consumer stops after a read-ahead has already failed.** Stopping raises nothing, and asyncio never reports the failure as "never retrieved". Task 4: `test_a_read_ahead_that_failed_is_retrieved_when_the_walk_stops`.
 5. **The consumer is cancelled while a read-ahead is in flight.** The cancellation propagates out of the walk, and the request is cancelled with it. Task 4: `test_cancelling_the_consumer_cancels_the_walk_rather_than_being_swallowed`.
 
@@ -1542,7 +1542,7 @@ Expected: PASS. `test_a_walk_whose_adapter_is_closed_under_it_is_not_retried` st
 
 - [ ] **Step 4: Plant and verify**
 
-1. `_settle` reduced to `pass`. Expect `test_stopping_the_walk_cancels_the_request_it_read_ahead` and `test_a_read_ahead_that_failed_is_retrieved_when_the_walk_stops` ("nobody retrieved") to fail. If the second does not, its premise (the read-ahead finished failing before `aclose`) is false: lengthen the settle sleep and re-run the plant before trusting the case.
+1. `_settle` reduced to `pass`. Expect `test_stopping_the_walk_cancels_the_request_it_read_ahead` and `test_a_read_ahead_that_failed_is_retrieved_when_the_walk_stops` ("nobody retrieved") to fail. If the second does not, its premise (the read-ahead finished failing before `aclose`) is false: lengthen the settle sleep and re-run the plant before trusting the case. The case asserts that premise itself before `aclose` (`t.done() and not t.cancelled()` on the read-ahead task); hold the refused read open with `await asyncio.sleep(1)` in the handler to see that guard fail on its own line. A shorter settle sleep is not that plant: the refused read finishes failing in the event-loop step that sets `refused`.
 2. `_settle` with `task.exception()` removed. Expect only `test_a_read_ahead_that_failed_is_retrieved_when_the_walk_stops` to fail.
 3. In `_walk`, `body = await pending` wrapped as `try: body = await pending` / `except BaseException as exc: raise PortUnavailable("page failed") from exc`. Expect `test_cancelling_the_consumer_cancels_the_walk_rather_than_being_swallowed` to fail with `PortUnavailable` where `CancelledError` was expected.
 4. The request for the next page moved to after the `for payload in page.fresh` loop (no read-ahead). Expect `test_the_next_page_is_requested_while_the_current_one_is_handled` to fail on its interval message.
@@ -1925,16 +1925,16 @@ Spec §1.6. With `since=None`, `watch_state` makes two walks — `Filters=IsPlay
 
 Live facts, recorded 2026-10-01 on the account behind Shared Emby: `IsPlayed` listed 765 items, all played, 21 of them also holding a position; `IsResumable` listed 208, all holding a position, 21 of them played. The two overlap by exactly those 21. A filtered listing pages normally: the page at `StartIndex` 700 of the 765 held 65.
 
-**Review Focus 3** lives here: a server that ignores `Filters` lists the whole library on the first walk. The adapter still yields only non-default states, and skips the second walk, because the first has already seen every resume position.
+**Review Focus 3** lives here: a server that ignores `Filters` lists the whole library on the first walk. The adapter still yields only non-default states, and skips the second walk, because the first has already seen every resume position. It judges the played listing unfiltered only when its unwatched entries strictly outnumber its watched ones, and logs a WARNING when it does. One entry reading unwatched is not enough: a Series marked played that has since gained an episode may match `IsPlayed` and still read unwatched, and taking it for an unfiltered server would cost the walk every resume position. A tie or an empty listing goes on to the second listing, whose repeats the `yielded` set drops.
 
 The fake adapter changes shape with the port, which is what breaks eight watch-sync cases and one integration case below: each walked a first walk over items with no state and expected zeros. They become deltas — a completed run first — which is the shape whose behaviour they were written about.
 
 **Files:**
 - Modify: `src/usher/adapters/emby/adapter.py` (`FIRST_WALK_FILTERS`, `_listing_query`'s `filters`, `_watch_state`, `_listed_state`)
 - Modify: `src/usher/ports/source.py` (`watch_state`'s docstring)
-- Modify: `tests/fakes/emby_server.py` (`_ordered`, a new `_passes`)
+- Modify: `tests/fakes/emby_server.py` (`_ordered`, a new `_passes`, a new `set_unplayed_episodes`)
 - Modify: `tests/fakes/source_adapter.py` (`_walk_states`, a new `_watched`)
-- Modify: `tests/fixtures/emby/README.md` (three rows)
+- Modify: `tests/fixtures/emby/README.md` (three rows, and a paragraph on `set_unplayed_episodes`)
 - Modify: `tests/contract/source_adapter_contract.py`
 - Modify: `tests/unit/test_adapters_emby_contract.py` (the contract's case count)
 - Modify: `tests/unit/test_adapters_emby_adapter.py`, `tests/unit/test_fakes_emby_server.py`
@@ -2010,10 +2010,36 @@ async def test_a_filter_applies_before_the_page_is_cut(driver: _Driver) -> None:
     body = await _filtered(driver, "IsPlayed", StartIndex="1", Limit="1")
     assert [entry["Id"] for entry in body["Items"]] == ["played"]
     assert body["TotalRecordCount"] == 2
+
+
+async def test_a_played_series_with_an_unplayed_episode_is_listed_as_played_and_reads_unwatched(
+    driver: _Driver,
+) -> None:
+    """Both routes derive its `Played` from its episodes; `IsPlayed` reads the stored flag."""
+    series = SourceItem(external_id="series", name="series", kind=SourceItemKind.SERIES, year=2004)
+    driver.server.add_item(series, T0)
+    driver.server.set_watch_state(
+        SourceWatchState(external_id="series", position_seconds=0, played=True)
+    )
+    driver.server.set_unplayed_episodes("series", 1)
+    body = await _filtered(driver, "IsPlayed")
+    single = await driver.payload("series")
+    keys = ("Played", "UnplayedItemCount", "PlaybackPositionTicks")
+    assert [entry["Id"] for entry in body["Items"]] == ["series"]
+    assert [body["Items"][0]["UserData"].get(key) for key in keys] == [False, 1, 0]
+    assert [single["UserData"].get(key) for key in keys] == [False, 1, 0]
+    assert driver.server.recorded_watch_state("series") == (0, True)
+
+
+def test_only_a_series_takes_unplayed_episodes() -> None:
+    server = FakeEmbyServer()
+    server.add_item(MOVIE, T0)
+    with pytest.raises(ValueError, match="only a Series has episodes"):
+        server.set_unplayed_episodes(MOVIE.external_id, 1)
 ```
 
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_fakes_emby_server.py -k "filter"`
-Expected: FAIL — every item listed, `untouched` included.
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_fakes_emby_server.py -k "filter or unplayed"`
+Expected: FAIL — every item listed, `untouched` included; and the two Series cases on `AttributeError: 'FakeEmbyServer' object has no attribute 'set_unplayed_episodes'`.
 
 - [ ] **Step 3: Teach the fake `Filters`**
 
@@ -2043,6 +2069,47 @@ and add beside `_state_of`:
         if "IsPlayed" in filters and not state.played:
             return False
         return not ("IsResumable" in filters and state.position_seconds <= 0)
+```
+
+Then the control for a Series whose listed `Played` disagrees with the filter. In `__init__`, beside `self._states`:
+
+```python
+        self._unplayed_episodes: dict[str, int] = {}
+```
+
+in `remove_item`, beside the other pops:
+
+```python
+        self._unplayed_episodes.pop(external_id, None)
+```
+
+beside `set_watch_state`:
+
+```python
+    def set_unplayed_episodes(self, external_id: str, count: int) -> None:
+        """Give a seeded Series `count` unplayed episodes, which its `Played` is rendered from.
+
+        Emby derives a Series' `Played` from its episodes -- `series_item.json` says
+        `Played: false` beside `UnplayedItemCount: 12` -- while `Filters` here still reads
+        the flag `set_watch_state` stored. So a Series marked played that has since gained
+        an episode matches `IsPlayed` and is listed as unwatched. No live listing has shown
+        one; it is the entry a first watch walk must not take for a server that ignored
+        `Filters`.
+        """
+        item, _ = self._items[external_id]
+        if item.kind is not SourceItemKind.SERIES:
+            raise ValueError(f"{external_id} is a {item.kind.value}; only a Series has episodes")
+        self._unplayed_episodes[external_id] = count
+```
+
+and in `_user_data`, after the dict is built and before the `for_listing` branch:
+
+```python
+        episodes = self._unplayed_episodes.get(external_id)
+        if episodes is not None:
+            # Derived on both routes; `_passes` keeps reading the stored flag.
+            user_data["Played"] = episodes == 0
+            user_data["UnplayedItemCount"] = episodes
 ```
 
 Run the Step 2 command. Expected: PASS.
@@ -2131,16 +2198,41 @@ async def test_a_first_watch_walk_lists_played_then_in_progress_items() -> None:
 async def test_a_server_that_ignores_the_filter_still_yields_only_watched_states_once() -> None:
     """A server that ignored `Filters` lists the whole library on the first listing.
 
-    The walk still yields only played or in-progress states, and stops there: the
-    second listing would repeat the first, item for item.
+    Most of a library is unwatched, which is how the walk tells. It still yields only
+    played or in-progress states, and stops there: the second listing would repeat the
+    first, item for item.
     """
-    entries = [
-        {"Id": "movie-0", "Type": "Movie", "Name": "A",
-         "UserData": {"PlaybackPositionTicks": 0, "Played": True}},
-        {"Id": "movie-1", "Type": "Movie", "Name": "B",
-         "UserData": {"PlaybackPositionTicks": 0, "Played": False}},
-        {"Id": "movie-2", "Type": "Movie", "Name": "C",
-         "UserData": {"PlaybackPositionTicks": 6_400_000_000, "Played": False}},
+    entries: list[dict[str, Any]] = [
+        {
+            "Id": "movie-0",
+            "Type": "Movie",
+            "Name": "A",
+            "UserData": {"PlaybackPositionTicks": 0, "Played": True},
+        },
+        {
+            "Id": "movie-1",
+            "Type": "Movie",
+            "Name": "B",
+            "UserData": {"PlaybackPositionTicks": 0, "Played": False},
+        },
+        {
+            "Id": "movie-2",
+            "Type": "Movie",
+            "Name": "C",
+            "UserData": {"PlaybackPositionTicks": 6_400_000_000, "Played": False},
+        },
+        {
+            "Id": "movie-3",
+            "Type": "Movie",
+            "Name": "D",
+            "UserData": {"PlaybackPositionTicks": 0, "Played": False},
+        },
+        {
+            "Id": "movie-4",
+            "Type": "Movie",
+            "Name": "E",
+            "UserData": {"PlaybackPositionTicks": 0, "Played": False},
+        },
     ]
     asked: list[str] = []
 
@@ -2159,11 +2251,148 @@ async def test_a_server_that_ignores_the_filter_still_yields_only_watched_states
         ]
     finally:
         await adapter.aclose()
+    data = [entry["UserData"] for entry in entries]
+    unseen = sum(1 for each in data if not each["Played"] and not each["PlaybackPositionTicks"])
+    assert unseen > len(data) - unseen, "the premise: the library listed is mostly unwatched"
     assert walked == [("movie-0", True, 0), ("movie-2", False, 640)]
     assert asked == ["IsPlayed"], "the second listing repeated a whole-library walk"
+
+
+async def test_a_series_reading_unwatched_in_the_played_listing_keeps_the_in_progress_one() -> None:
+    """A Series marked played that has since gained an episode can match `IsPlayed`.
+
+    Its entry reads unwatched, with no position. One such entry beside one played
+    movie is a tie, not a server that ignored `Filters`, so the walk still asks for
+    the in-progress listing and yields the resume position it holds.
+    """
+    server = FakeEmbyServer()
+    series = SourceItem(
+        external_id="series-0", name="Series 0", kind=SourceItemKind.SERIES, year=2004, added_at=T0
+    )
+    for item in (_movie(0), _movie(1), series):
+        server.add_item(item, T0)
+    server.set_watch_state(SourceWatchState(external_id="movie-0", position_seconds=0, played=True))
+    server.set_watch_state(
+        SourceWatchState(external_id="movie-1", position_seconds=640, played=False)
+    )
+    server.set_watch_state(
+        SourceWatchState(external_id="series-0", position_seconds=0, played=True)
+    )
+    server.set_unplayed_episodes("series-0", 1)
+    asked: list[str] = []
+    served: dict[str, list[dict[str, Any]]] = {}
+
+    def spy(request: httpx.Request) -> httpx.Response:
+        response = server.handle(request)
+        if request.url.path.endswith("/Items"):
+            asked.append(request.url.params["Filters"])
+            served[asked[-1]] = response.json()["Items"]
+        return response
+
+    lines: list[str] = []
+    handle = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        adapter = _on(spy)
+        try:
+            walked = [
+                (state.external_id, state.played, state.position_seconds)
+                async for state in adapter.watch_state()
+            ]
+        finally:
+            await adapter.aclose()
+    finally:
+        logger.remove(handle)
+    played_listing = sorted(
+        (
+            entry["Id"],
+            entry["UserData"]["Played"],
+            entry["UserData"]["PlaybackPositionTicks"],
+            entry["UserData"].get("UnplayedItemCount"),
+        )
+        for entry in served["IsPlayed"]
+    )
+    assert played_listing == [("movie-0", True, 0, None), ("series-0", False, 0, 1)], (
+        "the premise: the played listing holds a played movie and a Series reading unwatched"
+    )
+    assert server.recorded_watch_state("movie-1") == (640, False), (
+        "the premise: the in-progress listing holds one unplayed movie at 640 s"
+    )
+    assert asked == ["IsPlayed", "IsResumable"], (
+        "one Series reading unwatched cost the walk its in-progress listing"
+    )
+    assert walked == [("movie-0", True, 0), ("movie-1", False, 640)]
+    assert lines == [], "a server that honours Filters was logged as ignoring them"
+
+
+@pytest.mark.parametrize(
+    ("unwatched", "watched", "listings", "warnings"),
+    [
+        pytest.param(
+            2,
+            1,
+            ["IsPlayed"],
+            [
+                "Living Room Emby appears to ignore Filters: its first watch walk's played "
+                "listing was mostly unwatched (2 unwatched skipped, 1 watched yielded), so "
+                "the walk did not ask for the in-progress listing"
+            ],
+            id="unwatched-outnumber-watched",
+        ),
+        pytest.param(1, 1, ["IsPlayed", "IsResumable"], [], id="a-tie"),
+    ],
+)
+async def test_a_played_listing_is_judged_unfiltered_only_when_mostly_unwatched(
+    unwatched: int, watched: int, listings: list[str], warnings: list[str]
+) -> None:
+    """A server ignoring `Filters` lists the whole library, and a library is mostly unwatched.
+
+    So the walk lists once, and says so, only when the played listing's unwatched entries
+    strictly outnumber its watched ones. On a tie it asks for the second listing as well,
+    dropping by id what the first already yielded.
+    """
+    entries: list[dict[str, Any]] = [
+        {
+            "Id": f"movie-{index}",
+            "Type": "Movie",
+            "Name": f"Movie {index}",
+            "UserData": {"PlaybackPositionTicks": 0, "Played": index >= unwatched},
+        }
+        for index in range(unwatched + watched)
+    ]
+    asked: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        authenticated = _authenticated(request)
+        if authenticated is not None:
+            return authenticated
+        asked.append(request.url.params.get("Filters", ""))
+        return httpx.Response(200, json={"Items": entries, "TotalRecordCount": len(entries)})
+
+    lines: list[str] = []
+    handle = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        adapter = _on(handler)
+        try:
+            walked = [(state.external_id, state.played) async for state in adapter.watch_state()]
+        finally:
+            await adapter.aclose()
+    finally:
+        logger.remove(handle)
+    stored = {entry["Id"]: entry["UserData"] for entry in entries}
+    unseen = [
+        key for key, data in stored.items() if not (data["Played"] or data["PlaybackPositionTicks"])
+    ]
+    seen = [key for key in stored if key not in unseen]
+    assert (len(unseen), len(seen)) == (unwatched, watched), (
+        f"the premise: the entries stored are {unwatched} unwatched and {watched} watched"
+    )
+    assert asked == listings, "the played listing was misjudged as filtered or as unfiltered"
+    assert len(lines) == len(warnings), "the walk listed once without a WARNING, or warned anyway"
+    assert [line.rstrip("\n") for line in lines] == warnings, "the WARNING miscounted the entries"
+    assert walked == [(key, True) for key in seen], "a watched state was lost or yielded twice"
 ```
 
-(Let `ruff format` lay out the `entries` dicts; the content is what matters.)
+A library is mostly unwatched, which is how the walk tells a server that ignored `Filters`: the first case lists three unwatched entries against two watched, and asserts that premise before its expectations.
 
 In the same file, `test_a_library_walk_and_a_watch_state_walk_filter_on_different_stamps` gains a last line:
 
@@ -2171,8 +2400,8 @@ In the same file, `test_a_library_walk_and_a_watch_state_walk_filter_on_differen
     assert "Filters" not in listings[1].url.params, "a delta is not filtered on watched-ness"
 ```
 
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_adapters_emby_contract.py tests/unit/test_source_adapter_contract.py tests/unit/test_adapters_emby_adapter.py -k "first_walk or first_watch or ignores_the_filter or zero_state or truncating"`
-Expected: FAIL — `test_a_first_walk_yields_every_watched_state_once_and_nothing_else` on both arms (all seven walked), the two adapter cases (no `Filters` sent).
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_adapters_emby_contract.py tests/unit/test_source_adapter_contract.py tests/unit/test_adapters_emby_adapter.py -k "first_walk or first_watch or ignores_the_filter or mostly_unwatched or reading_unwatched or zero_state or truncating"`
+Expected: FAIL — `test_a_first_walk_yields_every_watched_state_once_and_nothing_else` on both arms (all seven walked), the four adapter cases (no `Filters` sent).
 
 - [ ] **Step 5: Implement the filtered first walk**
 
@@ -2239,7 +2468,7 @@ Replace `watch_state` and `_watch_state`:
         yielded: set[str] = set()
         for number, filters in enumerate(FIRST_WALK_FILTERS):
             query = _listing_query(USER_DATA_SINCE_PARAM, None, filters=filters)
-            unfiltered = False
+            unwatched = watched = 0
             walk = self._walk(query, start_index=start_index if number == 0 else 0)
             async with aclosing(walk) as payloads:
                 async for payload in payloads:
@@ -2247,13 +2476,25 @@ Replace `watch_state` and `_watch_state`:
                     if state is None or state.external_id in yielded:
                         continue
                     if not state.played and state.position_seconds <= 0:
-                        unfiltered = True
+                        unwatched += 1
                         continue
                     yielded.add(state.external_id)
+                    watched += 1
                     yield state
-            if unfiltered:
-                # The server ignored `Filters` and listed everything, resume
-                # positions included, so a second walk would only repeat it.
+            if number == 0 and unwatched > watched:
+                # Unwatched entries strictly outnumbering watched ones mean the server
+                # ignored `Filters` and listed everything, resume positions included, so
+                # a second walk would only repeat it. A tie or an empty listing goes on:
+                # a Series marked played that has since gained an episode can match
+                # `IsPlayed` and still read unwatched.
+                logger.warning(
+                    "{source} appears to ignore Filters: its first watch walk's played "
+                    "listing was mostly unwatched ({unwatched} unwatched skipped, {watched} "
+                    "watched yielded), so the walk did not ask for the in-progress listing",
+                    source=self._source.name,
+                    unwatched=unwatched,
+                    watched=watched,
+                )
                 return
 ```
 
@@ -2386,10 +2627,16 @@ Expected: PASS.
 - [ ] **Step 9: Plant and verify**
 
 1. In the adapter's first walk, drop the `if not state.played and state.position_seconds <= 0` branch. Expect `test_a_server_that_ignores_the_filter_still_yields_only_watched_states_once` to fail (`movie-1` walked).
-2. Drop the `if unfiltered: return`. Expect the same case to fail on `asked == ["IsPlayed"]`.
+2. Drop the early return. Expect the same case to fail on `asked == ["IsPlayed"]`, and the `unwatched-outnumber-watched` arm too.
 3. Drop `or state.external_id in yielded`. Expect `test_a_first_watch_walk_lists_played_then_in_progress_items` and the contract's first-walk case on the Emby arm to fail ("came twice").
 4. Iterate `FIRST_WALK_FILTERS[:1]` only. Expect the contract's first-walk case to fail on both arms' Emby side (`filler-3` missing) — and on the fake arm, plant `_watched` returning `played` only, expecting the same.
 5. In `FakeEmbyServer._passes`, make `IsResumable` require `not state.played`. Expect `test_a_resumable_filter_lists_every_item_with_a_position_played_or_not` to fail.
+6. Judge the listing unfiltered on any unwatched entry (`if unwatched:`). Expect `test_a_series_reading_unwatched_in_the_played_listing_keeps_the_in_progress_one` to fail on "one Series reading unwatched cost the walk its in-progress listing".
+7. `>=` for `>`. Expect the `a-tie` arm to fail on "the played listing was misjudged as filtered or as unfiltered".
+8. Drop the WARNING. Expect the `unwatched-outnumber-watched` arm alone to fail, on "the walk listed once without a WARNING, or warned anyway".
+9. Log `watched=unwatched`. Expect the same arm alone to fail, on "the WARNING miscounted the entries".
+10. In the fake's rendered user data, drop the derived `Played`. Expect the fake's Series case to fail, and the Series case's premise about the played listing.
+11. Flip the third entry of the ignored-filter case to `Played: True`. Expect its premise to fail: "the library listed is mostly unwatched".
 
 - [ ] **Step 10: Say it in the PRD, the changelog and the rules**
 
@@ -2407,7 +2654,8 @@ libraries — and merges nothing else. Nothing schedules that first walk.
 ```markdown
 - **A source's first watch-state walk asks only for what was watched.** It lists
   played items, then in-progress ones: a few requests, where it used to walk the
-  whole library, which on a million-item library took most of a day.
+  whole library, which on a million-item library took most of a day. On a server
+  that ignores the filter, the walk lists once and logs a WARNING.
 ```
 
 `.claude/rules/emby-push-and-ingest.md`, "Gap-closing walks are unasked-for work" — replace the `⚠️ **And that guard reads the item lane's cursor only…` sentence with:
@@ -2716,13 +2964,13 @@ In `docs/plans/progress.md`, this plan's table: Tasks 1–8 → `✅ landed (PR 
 git push -u origin feat/fast-first-sync
 ```
 
-Open the PR against `main` titled `A first sync that pages faster and asks only for what was watched`. Follow the repository's PR template if one exists. The body states what Phase 1 changes for an operator, the gate results with counts, the six departures from the spec's letter, and that Phase 2 follows in a separate PR. It ends with:
+Open the PR against `main` titled `A first sync that pages faster and asks only for what was watched`. Follow the repository's PR template if one exists. The body states what Phase 1 changes for an operator, the gate results with counts, the six departures from the spec's letter, and that Phase 2 follows in a separate PR. Its operator section also says what an upgrade keeps: a `.env` that sets `USHER_SOURCE_PAGE_SIZE` or `USHER_PUSH_STALE_AFTER_SECONDS` keeps that value over the new default, 1,000 and 300. At 200, every page after the first re-reads 50 items, so a walk makes a third more requests than pages of 200 did, and the read-ahead overlaps little of it; at 90, an idle push channel reconnects, with a gap-closing delta, after 90 s of silence. The body names no deployment's values. It ends with:
 
 ```
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 ```
 
-Merging deploys to production. Ask the owner; do not merge.
+Merging deploys to production. Ask the owner; do not merge. The ask names production's two such lines, `USHER_SOURCE_PAGE_SIZE=200` and `USHER_PUSH_STALE_AFTER_SECONDS=90` in `~/code/usher-deploy/.env`, and recommends dropping both before the merge, so the deploy starts on the defaults. Editing that file is a production write, so it waits for the owner's yes.
 
 - [ ] **Step 6: Commit the status cells**
 
@@ -2768,9 +3016,11 @@ docker exec usher-postgres-1 psql -U usher -d ffs_first_watch -c \
   "DELETE FROM sync_runs WHERE kind = 'watch_state' AND status <> 'running'"
 docker exec usher-postgres-1 psql -U usher -d ffs_first_watch -Atc \
   "SELECT status, count(*), bool_or(cursor_at IS NOT NULL) FROM sync_runs WHERE kind = 'watch_state' GROUP BY 1"
+docker exec usher-postgres-1 psql -U usher -d ffs_first_watch -Atc \
+  "WITH gone AS (DELETE FROM watch_states WHERE origin = 'source' AND position_seconds > 0 AND NOT played RETURNING 1) SELECT count(*) FROM gone"
 ```
 
-Expected: `alembic` ends at the repository's head, and the last query prints only a `running|<n>|f` row. Those are unfinished first walks with no cursor. With every completed watch run gone, the next watch walk has no cursor to resume from, and it supersedes the newest of them.
+Expected: `alembic` ends at the repository's head, and the last query prints only a `running|<n>|f` row. Those are unfinished first walks with no cursor. With every completed watch run gone, the next watch walk has no cursor to resume from, and it supersedes the newest of them. The last command prints how many in-progress states the clone held and deletes them. Only the walk's second listing, the in-progress one, can put them back, so Step 3 counts them.
 
 - [ ] **Step 3: A first watch walk under a minute — with the owner's go-ahead**
 
@@ -2781,18 +3031,25 @@ cd ~/code/.worktrees/usher/fast-first-sync
 set -a; . ~/code/usher-devdb/.env; set +a
 export USHER_DATABASE_URL="${USHER_DATABASE_URL%/*}/ffs_first_watch"
 unset OTEL_EXPORTER_OTLP_ENDPOINT
-timeout 3600 uv run usher sync --source "Shared Emby" --kind delta 2>&1 | grep -v '^{"text"' \
+timeout 3600 uv run usher sync --source "Shared Emby" --kind delta 2>&1 \
+  | tee /var/tmp/sync-speed/first-watch.raw | grep -v '^{"text"' \
   | tee /var/tmp/sync-speed/first-watch.out
 docker exec usher-postgres-1 psql -U usher -d ffs_first_watch -Atc \
   "SELECT status, coalesce(error, ''), round(extract(epoch FROM finished_at - started_at)), items_seen, items_matched FROM sync_runs WHERE kind = 'watch_state' ORDER BY started_at DESC LIMIT 2" \
   | tee -a /var/tmp/sync-speed/first-watch.out
+docker exec usher-postgres-1 psql -U usher -d ffs_first_watch -Atc \
+  "SELECT count(*) FROM watch_states WHERE origin = 'source' AND position_seconds > 0 AND NOT played" \
+  | tee -a /var/tmp/sync-speed/first-watch.out
+grep -c 'appears to ignore Filters' /var/tmp/sync-speed/first-watch.raw
 ```
 
 The item lane is a cursored delta from the clone's last completed walk. The watch lane then supersedes the newest unfinished run and runs the filtered first walk.
 
 Pass:
 - the first row is `completed`, and its seconds are under `60`. That is the watch run's own `finished_at − started_at`, whatever the item lane took;
-- the second row reads `failed|superseded: a first watch walk restarts`.
+- the second row reads `failed|superseded: a first watch walk restarts`;
+- the `grep -c` prints `0`. The walk did not judge the source to ignore `Filters`, so it asked for both listings. The log lines are JSON, which the filter keeps out of `first-watch.out`, so the check reads `first-watch.raw`. That file can hold a host, so it is never posted;
+- the in-progress count is at least `1` if Step 2's was above `0`, because the second listing merged. If Step 2 printed `0`, the clone held no in-progress state, so say the check saw nothing. If the count is `0` while Step 2's was not, check the account's Continue Watching before calling it a failure.
 
 Expect far fewer merges than production would make. The clone holds only part of the source's items (52,560 when this plan was written), so most states find no item and count as unmatched. The listings walked are the same.
 
@@ -2800,7 +3057,7 @@ Before posting, check the file: `grep -c -E '[0-9a-f]{32}'` must print `0`, and 
 
 - [ ] **Step 4: An item walk of at most 6 h, on production — with the owner's go-ahead**
 
-A full walk loads a server the operator may not administer, so ask first. Production must be idle: `docker ps --filter name=usher-prod-sync --format '{{.Names}} {{.Status}}'` prints nothing. Then start the walk detached, the way the last production sync was started, with its kind stated. The old log is kept under a dated name:
+A full walk loads a server the operator may not administer, so ask first. Production's `.env` must not set the page size (Task 8's merge ask): `grep -c -E '^USHER_SOURCE_PAGE_SIZE=' ~/code/usher-deploy/.env` prints `0`. If it prints `1`, ask the owner to drop the line, or to approve dropping it. `docker compose run` reads `.env` when it creates the walk's container, so no restart is needed. If they keep it, the walk runs at that page size: say so in the post, and do not call it the default. Production must be idle: `docker ps --filter name=usher-prod-sync --format '{{.Names}} {{.Status}}'` prints nothing. Then start the walk detached, the way the last production sync was started, with its kind stated. The old log is kept under a dated name:
 
 ```bash
 cd ~/code/usher-deploy
