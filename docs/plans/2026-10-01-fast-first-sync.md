@@ -7757,7 +7757,7 @@ The gap-closer keeps the single walk however it is configured (spec §2.3), so i
 
 **Interfaces:**
 - Consumes: Task 11's `WalkPlan`, `UnitPage`, `pages_of`, `WHOLE_LIBRARY`, `DEFAULT_UNIT_KEY`, `SourceAdapter.plan_walk()` and `.list_unit(key, *, start_index=0)`, `WalkStage`, `STAGE_ORDER`, and `FakeSourceAdapter`'s `place`, `page_size`, `plan_walk` and `_walk_library`; Task 12's `SyncRunUnit`, `SyncRunUnitStatus`, `SyncRun.heartbeat_at`, and `SyncRunRepository.add_units`/`save_unit`/`units_for`; Task 13's `EmbyAdapter(…, unit_max_items=…)`; Task 15's `Settings.sync_walkers` and `ConfiguredSourceAdapterFactory(…, listing_concurrency=…)`.
-- Produces: `ReconcileService(…, walkers: int = 4, heartbeat_seconds: float = 60.0, clock: Callable[[], datetime] = _now)`, refusing `walkers < 1`; `reconcile(…, max_items: int = 0, plan: bool = True)`; the private `_walk_plan(source, progress, adapter)`, `_walk_stage`, `_fetch`, `_write`, `_commit_unit`, `_beat(progress)`, `_Fetched(unit_key, page=None, error=None)` and `_flush(…, unit=None)`. Task 17 splits `_walk_plan`'s first half into a fresh run's plan and a resumed run's stored units; Task 18 awaits `after_seed` between its stages.
+- Produces: `ReconcileService(…, walkers: int = 4, heartbeat_seconds: float = 60.0, clock: Callable[[], datetime] = _now)`, refusing `walkers < 1` and a `heartbeat_seconds` that is not positive; `reconcile(…, max_items: int = 0, plan: bool = True)`; the private `_walk_plan(source, progress, adapter)`, `_walk_stage`, `_fetch`, `_write`, `_commit_unit`, `_beat(progress)`, `_Fetched(unit_key, page=None, error=None)` and `_flush(…, unit=None)`. Task 17 splits `_walk_plan`'s first half into a fresh run's plan and a resumed run's stored units; Task 18 awaits `after_seed` between its stages.
 - Produces: `Settings.sync_unit_max_items: int` (default 100,000, from 1,000 to 1,000,000); `ConfiguredSourceAdapterFactory(…, unit_max_items: int = 100_000)`.
 - Produces (tests): `FakeSourceAdapter.stage(library, stage)`, `.fail_unit_after(library, count)`, `.hold(library) -> asyncio.Event` and `.journal: list[tuple[str, str]]`; in `tests/unit/test_services_reconcile.py`, `_Ticks`, `_Fixture(…, walkers=4, heartbeat_seconds=60.0)` with `.ingest`, `.journal`, `.checkpoints` and `.unit_states`, and the helpers `_shelve`, `_fetch_window` and `_progress`. Tasks 17–19 reuse all of them.
 
@@ -7819,7 +7819,7 @@ After `place`:
 
 - [ ] **Step 2: Write the failing service tests**
 
-`tests/unit/test_services_reconcile.py` — imports: `import asyncio`; `AsyncGenerator` beside `Iterator`; `from itertools import groupby, pairwise`; `SyncRunUnitStatus, WalkStage` beside `SyncRunKind, SyncRunStatus`; `UnitPage, WalkPlan` beside `SourceItem, SourceItemKind`. Replace `_Fixture` with:
+`tests/unit/test_services_reconcile.py` — imports: `import asyncio` and `import contextlib`; `AsyncGenerator` beside `Iterator`; `from itertools import groupby, pairwise`; `SyncRunUnitStatus, WalkStage` beside `SyncRunKind, SyncRunStatus`; `UnitPage, WalkPlan` beside `SourceItem, SourceItemKind`. Replace `_Fixture` with:
 
 ```python
 class _Ticks:
@@ -8059,6 +8059,73 @@ async def test_the_run_and_its_first_heartbeat_are_committed_before_the_plan_is_
     assert heartbeat is not None
 
 
+async def test_the_heartbeat_beats_while_the_plan_is_made() -> None:
+    """Emby counts each library through its retrying page, so a plan can take minutes too."""
+    fixture = _Fixture(heartbeat_seconds=0.01)
+    _shelve(fixture, "Films", range(2))
+    asked, release = asyncio.Event(), asyncio.Event()
+    original = fixture.adapter.plan_walk
+
+    async def _held() -> WalkPlan:
+        asked.set()
+        await release.wait()
+        return await original()
+
+    fixture.adapter.plan_walk = _held  # type: ignore[method-assign]
+    walk = asyncio.create_task(
+        fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    )
+    try:
+        with contextlib.suppress(TimeoutError):
+            async with asyncio.timeout(5):
+                while fixture.commits < 4:
+                    await asyncio.sleep(0.01)
+        assert asked.is_set(), "the premise: the plan was asked for"
+        assert fixture.commits >= 4, "fewer than three beats while the plan was made"
+        assert fixture.unit_states[:4] == [{}] * 4, "the premise: no plan was stored yet"
+        # The first commit is the run's insert; the three after it are beats.
+        beats = [beat for _, beat in fixture.checkpoints[1:4] if beat is not None]
+        assert len(beats) == 3
+        assert beats == sorted(set(beats)), "a beat that did not move the heartbeat"
+    finally:
+        release.set()
+        run = await walk
+    assert run.status is SyncRunStatus.COMPLETED
+    [unit] = await fixture.runs.units_for(run.id)
+    assert unit.status is SyncRunUnitStatus.COMPLETED
+
+
+async def test_a_beat_that_fails_while_the_plan_is_made_cancels_the_plan_first() -> None:
+    """However the wait for a plan ends, the plan is not left running: here a beat raised."""
+    fixture = _Fixture(heartbeat_seconds=0.01)
+    _shelve(fixture, "Films", range(2))
+    release, cancelled = asyncio.Event(), asyncio.Event()
+    original = fixture.adapter.plan_walk
+
+    async def _held() -> WalkPlan:
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return await original()
+
+    commit = fixture.service._commit
+
+    async def _commit_until_the_first_beat() -> None:
+        if fixture.commits == 1:
+            raise ConnectionError("the database went away")
+        await commit()
+
+    fixture.adapter.plan_walk = _held  # type: ignore[method-assign]
+    fixture.service._commit = _commit_until_the_first_beat
+    with pytest.raises(ConnectionError, match="the database went away"):
+        async with asyncio.timeout(5):
+            await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    assert fixture.commits == 1, "the premise: the run's insert committed, and the beat did not"
+    assert cancelled.is_set(), "the walk ended with its plan still being made"
+
+
 async def test_every_commit_of_a_planned_walk_moves_the_heartbeat() -> None:
     fixture = _Fixture(batch_size=2)
     _shelve(fixture, "Films", range(5))
@@ -8129,6 +8196,28 @@ async def test_a_unit_that_ends_on_a_batch_boundary_publishes_no_second_frame() 
     assert _progress(fixture) == [2, 4]
     [unit] = await fixture.runs.units_for(run.id)
     assert unit.status is SyncRunUnitStatus.COMPLETED
+
+
+async def test_a_unit_that_yields_no_page_is_still_saved_completed() -> None:
+    """Emby's seed when the account is watching nothing: planned, and no page at all.
+
+    Its end alone commits it `completed`, at the position it started from.
+    """
+    fixture = _Fixture()
+    _shelve(fixture, "Films", range(2))
+    for external_id in _shelve(fixture, "Watching", range(10, 11), stage=WalkStage.SEED):
+        fixture.adapter.forget(external_id)
+    plan = await fixture.adapter.plan_walk()
+    assert [(unit.key, unit.stage, unit.expected_items) for unit in plan.units] == [
+        ("library:Films", WalkStage.TITLES, 2),
+        ("library:Watching", WalkStage.SEED, 0),
+    ], "the premise: an empty seed unit, planned"
+    run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    assert run.status is SyncRunStatus.COMPLETED
+    assert ("fetched", "library:Watching") not in fixture.journal, "the premise: it fetched nothing"
+    units = {unit.unit_key: unit for unit in await fixture.runs.units_for(run.id)}
+    seed = units["library:Watching"]
+    assert (seed.status, seed.position, seed.items_seen) == (SyncRunUnitStatus.COMPLETED, 0, 0)
 
 
 async def test_a_delta_with_no_cursor_walks_the_plan_and_never_sweeps() -> None:
@@ -8227,6 +8316,13 @@ def test_a_service_with_no_walkers_is_refused() -> None:
     """No walker would fetch, and the writer would wait on an empty queue forever."""
     with pytest.raises(ValueError, match="at least one walker"):
         _Fixture(walkers=0)
+
+
+@pytest.mark.parametrize("heartbeat_seconds", [0, -0.5, float("nan")])
+def test_a_service_whose_heartbeat_is_not_positive_is_refused(heartbeat_seconds: float) -> None:
+    """Its beat would always be due, so the writer would beat and never read its queue."""
+    with pytest.raises(ValueError, match=f"a positive period, not {heartbeat_seconds} seconds"):
+        _Fixture(heartbeat_seconds=heartbeat_seconds)
 ```
 
 `tests/integration/test_services_reconcile.py` — `AsyncGenerator` beside `AsyncIterator, Iterator`; `SyncRunUnitStatus` beside `SyncRunKind, SyncRunStatus`; `DEFAULT_UNIT_KEY, WHOLE_LIBRARY, UnitPage, WalkPlan, pages_of` beside `SourceItem, SourceItemKind`. `_Adapter`'s summary line becomes `"""The smallest `list_items`, `plan_walk` and `list_unit` that satisfy `ReconcileService`.`, and after `_walk` it gains:
@@ -8267,7 +8363,7 @@ async def test_a_whole_library_walk_persists_its_units_against_real_sql(
     assert stored.heartbeat_at is not None and stored.heartbeat_at == run.heartbeat_at
 ```
 
-`tests/integration/test_pipeline_spans.py` — `AsyncGenerator` beside `AsyncIterator`; `WHOLE_LIBRARY, UnitPage, WalkPlan, pages_of` beside `SourceItem, SourceItemKind`. `_Adapter`'s summary line becomes `"""The smallest `list_items`, `plan_walk` and `list_unit` `ReconcileService` uses, with no network.`, and after `_walk` it gains:
+`tests/integration/test_pipeline_spans.py` — `AsyncGenerator` beside `AsyncIterator`; `WHOLE_LIBRARY, UnitPage, WalkPlan, pages_of` beside `SourceItem, SourceItemKind`. `_Adapter`'s summary line becomes `"""The smallest `list_items`, `plan_walk` and `list_unit` `ReconcileService` uses, no network.`, and after `_walk` it gains:
 
 ```python
     async def plan_walk(self) -> WalkPlan:
@@ -8345,6 +8441,11 @@ and its body begins:
 ```python
         if walkers < 1:
             raise ValueError(f"a whole-library walk needs at least one walker, not {walkers}")
+        # `not … > 0` rather than `<= 0`, which a NaN would pass.
+        if not heartbeat_seconds > 0:
+            raise ValueError(
+                f"a heartbeat needs a positive period, not {heartbeat_seconds} seconds"
+            )
 ```
 
 and ends:
@@ -8401,11 +8502,26 @@ After `_walk`:
     async def _walk_plan(self, source: Source, progress: _Progress, adapter: SourceAdapter) -> None:
         """Walk the adapter's plan, one stage at a time.
 
+        The plan's own requests can sit out a retry, so the heartbeat beats every
+        `heartbeat_seconds` while the plan is made. Those requests never touch the
+        session, which is what lets a beat commit beside them. However the wait
+        ends, a plan still being made is cancelled and awaited first.
+
         The units are stored with the heartbeat that follows the plan. A stage
         starts only once every unit of the stages before it has committed
         complete, so every episode finds its series.
         """
-        plan = await adapter.plan_walk()
+        planning = asyncio.create_task(adapter.plan_walk())
+        try:
+            pending = {planning}
+            while pending:
+                _, pending = await asyncio.wait(pending, timeout=self._heartbeat_seconds)
+                if pending:
+                    await self._beat(progress)
+        finally:
+            planning.cancel()
+            await asyncio.gather(planning, return_exceptions=True)
+        plan = planning.result()
         units = [
             SyncRunUnit(
                 run_id=progress.run.id,
@@ -8586,7 +8702,7 @@ A single walk never flushes an empty batch, so the guard changes only a planned 
 - [ ] **Step 5: Run them to see them pass**
 
 Run the Step 3 command, then `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/integration/test_services_reconcile.py tests/integration/test_pipeline_spans.py`.
-Expected: PASS — the new cases and every existing one. A `FakeSourceAdapter` with no libraries plans the port's one unit, so every full walk in the unit file now walks a one-unit plan in pages of two; at the batch sizes those cases set (two, three, four), the commits and `sync.progress` counts they assert are unchanged. One comment's count does change: in `test_a_run_checkpoints_every_batch`, `# Four batches, plus the run's own insert and its final save.` becomes `# Four batches, plus the run's insert, the beat that stores its plan, and its final save.` — seven commits, which its `>= 6` still holds.
+Expected: PASS — the new cases and every existing one. A `FakeSourceAdapter` with no libraries plans the port's one unit, so every full walk in the unit file now walks a one-unit plan in pages of two; at the batch sizes those cases set (two, three, four), the commits and `sync.progress` counts they assert are unchanged. One comment's count does change: in `test_a_run_checkpoints_every_batch`, `# Four batches, plus the run's own insert and its final save.` becomes `# Four batches, plus the run's insert, the beat that stores its plan, and its final save.`, and its `assert fixture.commits >= 6, fixture.commits` becomes `assert fixture.commits == 7, fixture.commits`: the seven commits it counts, so a lost batch commit fails it.
 
 - [ ] **Step 6: Keep the statement count's premise true**
 
@@ -8606,7 +8722,7 @@ async def test_statements_do_not_grow_with_the_page(
     """A flat statement count, at the library's own shape.
 
     Walked through `FakeSourceAdapter`, whose pages are exactly `page_size` items, so
-    each measured walk is nine batches of one page. The real adapter's overlapping
+    each counted walk is nine batches of one page. The real adapter's overlapping
     pages carry two or three new items, and batches of whole pages would give the two
     walks different commit counts for a reason that is not a statement per item.
     """
@@ -8659,7 +8775,7 @@ async def test_statements_do_not_grow_with_the_page(
     large = len(statement_counter)
 
     assert commits.count(5) == commits.count(50), (
-        "the premise: both measured walks committed the same number of times"
+        "the premise: both counted walks committed the same number of times"
     )
     assert small == large, (
         f"{small} statements for 9 batches of 5, {large} for 9 batches of 50 -- "
@@ -8941,7 +9057,7 @@ Expected: PASS.
 
 - [ ] **Step 12: Plant and verify**
 
-1. `_walk_plan`'s `for stage in STAGE_ORDER:` loop replaced by `await self._walk_stage(source, progress, adapter, units)`. Expect `test_no_unit_of_a_stage_is_fetched_before_every_unit_ahead_of_it_has_committed` to fail on `first_episode > titles_done`.
+1. `_walk_plan`'s `for stage in STAGE_ORDER:` loop replaced by one `await self._walk_stage(source, progress, adapter, sorted(units, key=lambda unit: STAGE_ORDER.index(unit.stage)))` (with plain `units`, ruff's F401 kills the plant on the now unused `STAGE_ORDER`). Expect `test_no_unit_of_a_stage_is_fetched_before_every_unit_ahead_of_it_has_committed` to fail on `first_episode > titles_done`.
 2. `claimable = deque(units)`. Expect `test_within_a_stage_the_largest_unit_is_fetched_first` to fail, Shorts fetched first.
 3. `for _ in range(1)` in `_walk_stage`. Expect the `(2, True)` parametrisation of `test_walkers_fetch_units_at_once_up_to_their_number` to fail on `False is True`.
 4. `_write`'s batch threshold removed (every page committed). Expect `test_a_units_pages_are_committed_once_they_add_up_to_a_batch_and_when_it_ends` to fail on `[2, 4, 5] == [4, 5]`, and `test_a_failed_walk_still_reported_the_batches_it_did_finish` on `[2, 3] == [2]`.
@@ -8961,6 +9077,11 @@ Expected: PASS.
 18. `sync_unit_max_items` with `ge=999`, then separately `le=1_000_001`. Expect the `999`, then the `1000001`, parametrisation to fail with `DID NOT RAISE`.
 19. In `_write`, `due = time.monotonic() + self._heartbeat_seconds` also directly after `unit = current[fetched.unit_key]`, so every page puts the beat off. Expect `test_pages_that_keep_arriving_below_a_batch_still_let_the_heartbeat_move` to fail on `no beat while pages kept arriving`.
 20. `_flush`'s `if batch:` removed, the publish unconditional. Expect `test_a_unit_that_ends_on_a_batch_boundary_publishes_no_second_frame` to fail on `[2, 4, 4] == [2, 4]`.
+21. In `_write`, `if done and not pages:` then `open_units -= 1` and `continue`, ahead of the commit; then, separately, `if done and not pages and not unit.items_seen:`. Expect `test_a_unit_that_yields_no_page_is_still_saved_completed` to fail, its seed unit left `PENDING`, under both; the first spelling also fails `test_a_unit_that_ends_on_a_batch_boundary_publishes_no_second_frame` on `RUNNING is COMPLETED`.
+22. `plan = await adapter.plan_walk()` in place of the planning task and its slices. Expect `test_the_heartbeat_beats_while_the_plan_is_made` to fail on `fewer than three beats while the plan was made` and `test_a_beat_that_fails_while_the_plan_is_made_cancels_the_plan_first` with `TimeoutError`, while `test_the_run_and_its_first_heartbeat_are_committed_before_the_plan_is_made` stays green. At most two beats while the plan is made (`if pending and beaten < 2:`): expect the beat case to fail on `3 >= 4`, and with three it passes. A beat after every slice, the one that brought the plan included: expect `test_a_run_checkpoints_every_batch` to fail on `8 == 7`.
+23. The planning `finally` without `planning.cancel()`, then separately without awaiting the plan. Expect the cancel case to fail, first with `TimeoutError`, then on `the walk ended with its plan still being made`.
+24. The heartbeat refusal removed; then `if heartbeat_seconds <= 0:`; then `if not heartbeat_seconds >= 0:`. Expect every parametrisation of `test_a_service_whose_heartbeat_is_not_positive_is_refused` to fail with `DID NOT RAISE`, then `[nan]` alone, then `[0]` alone.
+25. Each new case's premise: the beat case's Event set before the walk (on `no plan was stored yet`), its `plan_walk` left unheld (on `the plan was asked for`), and the cancel case's commit failing at the insert (on `the run's insert committed, and the beat did not`).
 
 - [ ] **Step 13: Commit**
 
@@ -9598,6 +9719,11 @@ After `cursor_for`:
     ) -> None:
         """Walk the adapter's plan, or a resumed run's stored units, one stage at a time.
 
+        The plan's own requests can sit out a retry, so the heartbeat beats every
+        `heartbeat_seconds` while the plan is made. Those requests never touch the
+        session, which is what lets a beat commit beside them. However the wait
+        ends, a plan still being made is cancelled and awaited first.
+
         A fresh plan's units are stored with the heartbeat that follows the plan. A
         stage starts only once every unit of the stages before it has committed
         complete, so every episode finds its series. A unit already complete is skipped.
@@ -9605,7 +9731,17 @@ After `cursor_for`:
         if resumed:
             units = await self._runs.units_for(progress.run.id)
         else:
-            plan = await adapter.plan_walk()
+            planning = asyncio.create_task(adapter.plan_walk())
+            try:
+                pending = {planning}
+                while pending:
+                    _, pending = await asyncio.wait(pending, timeout=self._heartbeat_seconds)
+                    if pending:
+                        await self._beat(progress)
+            finally:
+                planning.cancel()
+                await asyncio.gather(planning, return_exceptions=True)
+            plan = planning.result()
             units = [
                 SyncRunUnit(
                     run_id=progress.run.id,
