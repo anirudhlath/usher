@@ -1922,7 +1922,7 @@ async def test_a_server_that_ignores_the_filter_still_yields_only_watched_states
 
 
 async def test_a_series_reading_unwatched_in_the_played_listing_keeps_the_in_progress_one() -> None:
-    """A Series marked played that has since gained an episode can match `IsPlayed`.
+    """A Series marked played that has since gained an episode may match `IsPlayed`.
 
     Its entry reads unwatched, with no position. One such entry beside one played
     movie is a tie, not a server that ignored `Filters`, so the walk still asks for

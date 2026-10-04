@@ -130,7 +130,7 @@ reached the first page's total.
 No `IsPlayed` listing has been seen to hold an entry reading `Played: false`.
 `FakeEmbyServer.set_unplayed_episodes` exists for a Series that would: its
 listed `Played` is derived from its episodes, while the filter matches the flag
-stored for it. One such entry must not read as a server that ignored `Filters`.
+stored for it. One such entry beside a played one must not read as a server that ignored `Filters`.
 
 ## Regenerating
 

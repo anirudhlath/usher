@@ -530,7 +530,7 @@ class EmbyAdapter(SourceAdapter):
                 # Unwatched entries strictly outnumbering watched ones mean the server
                 # ignored `Filters` and listed everything, resume positions included, so
                 # a second walk would only repeat it. A tie or an empty listing goes on:
-                # a Series marked played that has since gained an episode can match
+                # a Series marked played that has since gained an episode may match
                 # `IsPlayed` and still read unwatched.
                 logger.warning(
                     "{source} appears to ignore Filters: its first watch walk's played "

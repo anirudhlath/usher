@@ -25,8 +25,9 @@ Versioning is `0.x` while the wire contract may still move —
   minutes before it fails, where it was about 11.
 - **A source's first watch-state walk asks only for what was watched.** It lists
   played items, then in-progress ones: a few requests, where it used to walk the
-  whole library, which on a million-item library took most of a day. On a server
-  that ignores the filter, the walk lists once and logs a WARNING.
+  whole library, which on a million-item library took most of a day. If most of
+  the played listing reads unwatched, the server is taken to ignore the filter,
+  and the walk lists once and logs a WARNING.
 - **An unfinished first watch-state walk starts again rather than resuming.**
   Its position counted the old whole-library walk, so resuming it would skip
   every played item that is not also in progress; its row is closed `failed`
