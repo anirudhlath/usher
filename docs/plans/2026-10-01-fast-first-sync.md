@@ -3373,7 +3373,7 @@ Each is repeated in the task where it happens.
 10. **The seed is planned only when both watch filters narrow the library, and a fallback plan keeps its seed.** A server that ignored a filter would make the seed a whole-library walk ahead of the real one. (Task 14.)
 11. **The watch lane after the walk reads back to the instant the walk began.** `WatchStateSyncService.sync` takes `since_at_most`. Without it, the run after the seed has moved the cursor past the walk's start, and a state saved meanwhile for an item not yet stored would be skipped. That run is the after-seed hook's, and the item walk does not beat while it runs, so a hook walk longer than `STALE_AFTER` leaves the item walk looking dead to a second walk: at the default gate, 0.4 requests/s with pages of 1,000 that each add 950 after the first, that is any hook walk of more than about 228,000 watch states (240 pages in 10 minutes), and fewer on a server slower than the gate. (Task 18.)
 12. **A run whose sweep was refused is not resumed.** The next attempt reads the library again, because a resume would re-run the sweep over the same rows and refuse again. (Task 17.)
-13. **A watch-state run carries a heartbeat too, and a live one is left alone.** The spec gives the heartbeat to whole-library walks; a watch-state run's is set when it is inserted or reclaimed and on every batch. A `running` watch run whose heartbeat is younger than 10 minutes is another walk's, alive: a second watch run neither supersedes nor resumes it, and runs beside it in a row of its own — a delta from the latest completed cursor, or a filtered first walk when there is none. Nothing is refused, so no caller changes, and the two runs converge: both merge on one key under one conflict rule. (Task 17.)
+13. **A watch-state run carries a heartbeat too, and a live one is left alone.** The spec gives the heartbeat to whole-library walks; a watch-state run's is set when it is inserted or reclaimed and on every batch. A `running` watch run whose heartbeat is younger than 10 minutes is another walk's, alive: a second watch run neither supersedes nor resumes it, and runs beside it in a row of its own — a delta from the latest completed cursor, or a filtered first walk when there is none. Nothing is refused, so no caller changes. Both runs merge on one key under one conflict rule, so they converge, but for a state that changes between their two reads, which can keep the earlier read until it next changes. (Task 17.)
 
 ### Review Focus (Phase 2)
 
@@ -3443,7 +3443,7 @@ git log --oneline -1   # the merge of PR 1
 
 Every later Phase 2 command runs in this worktree.
 
-Mark Phase 1 in both status tables, claiming only what has run. In `docs/plans/progress.md`, the Tasks 1–8 row becomes `✅ landed (PR #<n>)`, the Task 9 row becomes `🔨 the first watch walk passed in <s> s; the item walk on production waits on the owner`, with `<s>` the time Task 9 Step 3 printed, and the Tasks 10–20 row becomes `🔨 in progress`. `docs/prd/README.md` holds one row for this plan, and its cell says the same in one sentence: `🔨 Phase 1 landed (PR #<n>); its first watch walk passed in <s> s, and its item walk on production waits on the owner. Phase 2 in progress`. Task 20 Step 4 flips the Task 9 row to `✅ passed` once Task 9 Step 4's time is in. This is the Phase 2 branch's first commit, and it carries the plan's own amendments with it:
+Mark Phase 1 in both status tables, claiming only what has run. In `docs/plans/progress.md`, the Tasks 1–8 row becomes `✅ landed (PR #<n>)`, the Task 9 row becomes `🔨 the first watch walk passed in <s> s; the item walk on production waits on the owner`, with `<s>` the time Task 9 Step 3 printed, and the Tasks 10–20 row becomes `🔨 in progress — Task 10's writer measurement passed`, Step 8 having passed before this commit was made. `docs/prd/README.md` holds one row for this plan, and says the same in its one cell: `🔨 Phase 1 landed (PR #<n>); its first watch walk passed in <s> s, and its item walk on production waits on the owner. Phase 2 in progress — Task 10's writer measurement passed`. Task 20 Step 4 flips the Task 9 row to `✅ passed` once Task 9 Step 4's time is in. This is the Phase 2 branch's first commit, and it carries the plan's own amendments with it:
 
 ```bash
 git add docs/plans/2026-10-01-fast-first-sync.md docs/plans/progress.md docs/prd/README.md
@@ -3646,7 +3646,10 @@ Add rows to the `## Listing protocol (fast first sync)` table in `tests/fixtures
 Below the section's opening paragraph (`Recorded 2026-10-01 … the shape of the item fixtures above.`), add one more, so the provenance stays true for the new rows:
 
 ```markdown
-The rows from `/Users/{id}/Views` on were recorded on <date> by Phase 2's probe, a second read-only script outside the repository, which printed counts, seconds, booleans and type names, never an id, a name or a token. The one shape it kept is `view_item.json`, every value in it invented.
+The rows from `/Users/{id}/Views` on were recorded on <date> by Phase 2's
+probe, a second read-only script outside the repository, which printed
+counts, seconds, booleans and type names, never an id, a name or a token.
+The one shape it kept is `view_item.json`, every value in it invented.
 ```
 
 Fill every `<…>` from `facts2.out`, and `<date>` with the day Step 4 ran, before committing — nothing in angle brackets survives this step.
@@ -3834,9 +3837,7 @@ async def test_the_default_plan_is_one_unit_holding_the_whole_library() -> None:
     """Called on the port itself, past the fake's own override."""
     plan = await SourceAdapter.plan_walk(_fake())
     assert plan == WHOLE_LIBRARY
-    assert [(unit.key, unit.stage) for unit in plan.units] == [
-        (DEFAULT_UNIT_KEY, WalkStage.TITLES)
-    ]
+    assert [(unit.key, unit.stage) for unit in plan.units] == [(DEFAULT_UNIT_KEY, WalkStage.TITLES)]
 
 
 async def test_the_default_unit_is_list_items_in_pages() -> None:
@@ -4881,7 +4882,7 @@ A library is counted once, over every type a walk lists, so its count rides on i
 - Modify: `src/usher/adapters/emby/paging.py` (`OffsetWindow(stop=…)`, `cursor`, `request_limit`)
 - Modify: `src/usher/adapters/emby/adapter.py` (`NOT_LIBRARIES`, `unit_max_items`, `_pages`, `_unit_pages`, `_items_path`, `plan_walk`, `list_unit`, `_library_unit`, `_views`, `_count`, `_known_libraries`; `_walk` and `_read` rebuilt on `_pages`)
 - Modify: `src/usher/adapters/emby/session.py` (`_ROUTE_WORDS` gains `Views`)
-- Modify: `tests/fakes/emby_server.py` (views, `place`, `ParentId`, `IncludeItemTypes`), `tests/fakes/emby_harness.py` (`given_item_in_libraries` places items in views)
+- Modify: `tests/fakes/emby_server.py` (views, `place`, `ParentId`, `IncludeItemTypes`), `tests/fakes/emby_harness.py` (`given_item_in_libraries` places items in views), `tests/fixtures/emby/README.md` (what the fake renders from `view_item.json`)
 - Modify: `tests/contract/source_adapter_contract.py` (the resume case), `tests/unit/test_adapters_emby_contract.py` (55)
 - Test: `tests/unit/test_adapters_emby_planning.py` (new), `tests/unit/test_adapters_emby_paging.py`, `tests/unit/test_fakes_emby_server.py`, `tests/unit/test_adapters_emby_adapter.py`
 
@@ -5308,6 +5309,14 @@ After `_list`:
                 entry["CollectionType"] = collection_type
             entries.append(entry)
         return httpx.Response(200, json={"Items": entries, "TotalRecordCount": len(entries)})
+```
+
+`tests/fixtures/emby/README.md` names what the fake renders from these files, and from here that includes the views. Its lines `` identity fields from the seeded `SourceItem` — the item routes from the four `` and `` item fixtures, and `user_data_changed_frame`/`library_changed_frame`/ `` become:
+
+```markdown
+identity fields from the seeded `SourceItem` — the item routes from the four
+item fixtures, `/Users/{id}/Views` from `view_item.json`, and
+`user_data_changed_frame`/`library_changed_frame`/
 ```
 
 Run the command above. Expected: PASS.
@@ -6018,7 +6027,7 @@ Expected: PASS. On the Emby arm the plan case now walks three real libraries; th
 3. `request_limit` returning `self.limit` always. Expect four cases to fail: `test_a_bounded_window_asks_for_no_more_than_its_stop_allows` (at `== 3`), `test_a_bounded_window_already_at_its_stop_asks_for_nothing` (`4 == 0`), `test_a_bounded_chunk_reads_past_its_end_by_the_overlap_and_no_further` (`160 == 150`: the requests start at 0, 20, …, 120, and the one at 120 now ends at 160), and `test_a_chunk_resumed_at_its_stop_asks_for_nothing` (a listing goes out at `StartIndex=53`).
 4. `stopped = False`. Expect `test_a_bounded_window_asks_for_no_more_than_its_stop_allows` to fail on its last line.
 5. `stop = unit.upper` (no reach past the end). Expect the bounded-chunk case to fail on `100 == 150`.
-6. `resume_at = window.cursor` with the `advance()` result unassigned. Expect `test_a_page_s_resume_point_is_the_next_request_s_start_reach_back_included` to fail on `4 == 2`.
+6. `resume_at = window.cursor` with the `advance()` result unassigned, so each request starts at the cursor while the window steps back. Expect eight cases to fail: `test_a_page_s_resume_point_is_the_next_request_s_start_reach_back_included` on `4 == 2`; `test_a_bounded_chunk_reads_past_its_end_by_the_overlap_and_no_further` on `170 == 150`; and, in `tests/unit/test_adapters_emby_adapter.py`, Phase 1's `test_the_walk_pages_until_the_library_is_exhausted`, `test_only_the_first_page_asks_for_the_total`, `test_the_page_that_ends_the_walk_is_the_last_one_asked_for`, `test_a_deletion_behind_the_cursor_skips_nothing`, `test_the_last_item_of_a_page_leaving_the_listing_is_not_a_shift` and `test_a_walk_that_deletions_left_short_of_its_total_ends_on_its_tail`.
 7. Drop `_library_unit`'s known-library check. Expect `test_a_library_removed_between_attempts_ends_its_unit_empty` to fail on `gone == []`, and `test_walkers_resuming_together_read_the_libraries_once` on `0 == 1`: no walker reads the views at all.
 8. Drop the `NOT_LIBRARIES` test in `_views`. Expect `test_collection_and_playlist_views_are_not_libraries` to fail on the `ParentId` set.
 9. The fallback condition reduced to `if not libraries:`. Expect `test_libraries_that_hold_less_than_the_total_fall_back_to_one_walk` and the collection case's last assertion to fail.
@@ -6035,7 +6044,8 @@ Expected: PASS. On the Emby arm the plan case now walks three real libraries; th
 ```bash
 git add src/usher/adapters/emby/planning.py src/usher/adapters/emby/paging.py \
   src/usher/adapters/emby/adapter.py src/usher/adapters/emby/session.py \
-  tests/fakes/emby_server.py tests/fakes/emby_harness.py tests/contract/source_adapter_contract.py \
+  tests/fakes/emby_server.py tests/fakes/emby_harness.py tests/fixtures/emby/README.md \
+  tests/contract/source_adapter_contract.py \
   tests/unit/test_adapters_emby_planning.py tests/unit/test_adapters_emby_paging.py \
   tests/unit/test_fakes_emby_server.py tests/unit/test_adapters_emby_adapter.py \
   tests/unit/test_adapters_emby_contract.py
@@ -6503,9 +6513,7 @@ After `_library_unit`:
                         yielded.update(item.external_id for item in page)
                         yield UnitPage(page, resume_at=0)
 
-    async def _series_for(
-        self, items: Sequence[SourceItem], yielded: set[str]
-    ) -> list[SourceItem]:
+    async def _series_for(self, items: Sequence[SourceItem], yielded: set[str]) -> list[SourceItem]:
         """The series of `items`' episodes that neither they nor an earlier page hold."""
         held = yielded | {item.external_id for item in items}
         missing = sorted(
@@ -7760,9 +7768,7 @@ async def test_a_failing_unit_cancels_the_walkers_still_fetching() -> None:
     release = fixture.adapter.hold("Shows")
     try:
         async with asyncio.timeout(5):
-            run = await fixture.service.reconcile(
-                fixture.source, SyncRunKind.FULL, fixture.adapter
-            )
+            run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
     finally:
         release.set()
     assert run.status is SyncRunStatus.FAILED
@@ -8437,6 +8443,16 @@ If Task 10 moved the unit size to 50,000, that last paragraph's "20 or less" bec
   the whole source, and a WARNING names both numbers.
 ```
 
+The same section, after the bullet beginning `**Items are walked in ascending creation order**`, gains the bound the page size sets, which the guide's table above spells out:
+
+```markdown
+- **A walk fails on a listing that 10,000 pages do not finish**, and each unit
+  of a whole-library walk is a listing of its own: at the default page size
+  that is one of 9,500,050 items or more, and fewer at a smaller page (the
+  [configuration guide](../guide/configuration.md#walking-a-large-library) has
+  the table).
+```
+
 "Reconciliation is not optional" — after the paragraph beginning `**A delta with no cursor is a walk of the whole library**`:
 
 ```markdown
@@ -8546,13 +8562,13 @@ Spec §2.5's table, the resume half of §2.6, and §2.7's `started_at`. A whole-
 
 **The watch lane gets the same heartbeat, and runs beside a live walk instead of over it.** `WatchStateSyncService.sync` sets `heartbeat_at`, the column Task 12 added, when it inserts or reclaims its run and with every batch it commits. The save that ends a run moves no heartbeat, as for a whole-library walk: only a `running` row is ever read as live. A `running` newest watch run whose heartbeat is under `STALE_AFTER` old is another process's walk, alive, and `sync` neither supersedes nor resumes it. It goes on as if no unfinished run existed, in a row of its own: a delta from the latest completed cursor, which Task 18 reads back to `since_at_most`, or a filtered first walk when there is no cursor. A `running` watch run with no heartbeat predates `m10g`, and is taken for dead as before. `watch_sync.py` imports `STALE_AFTER` from `reconcile.py`: the import contracts let one service import another, and nothing `reconcile.py` imports leads back to `watch_sync.py`.
 
-**Two watch runs side by side converge.** Both write through `merge_from_source` (`db/repositories/watch_state.py`), which upserts on `(user_id, title_id)` or `(user_id, episode_id)`. Its conflict rule is the `UPDATE`'s `AND ws.updated_at <= d.observed_at`, `updated_at` being what the `BEFORE UPDATE` trigger stamps, the writing transaction's `now()`; its `INSERT` is `ON CONFLICT (user_id, {target}) DO NOTHING`. Two runs that read the same state write the same `position_seconds` and `played`, and `runtime_seconds`, `play_count` and `last_played_at` are COALESCEd, a walk's listing carrying no play history. So whichever write the rule lets land, the row holds the same values. Two residuals stay. A state that changes between the two reads can keep the earlier read: the later run's merges carry its own attempt's start, and a write the earlier run commits after that start outdates them, as a push write landing mid-walk outdates the walk's merge today. And a live run that dies once another has started beside it is never closed: no longer the newest, it is neither superseded nor resumed, and stays `running`.
+**Two watch runs side by side converge, but for the first residual below.** Both write through `merge_from_source` (`db/repositories/watch_state.py`), which upserts on `(user_id, title_id)` or `(user_id, episode_id)`. Its conflict rule is the `UPDATE`'s `AND ws.updated_at <= d.observed_at`, `updated_at` being what the `BEFORE UPDATE` trigger stamps, the writing transaction's `now()`; its `INSERT` is `ON CONFLICT (user_id, {target}) DO NOTHING`. Two runs that read the same state write the same `position_seconds` and `played`, and `runtime_seconds`, `play_count` and `last_played_at` are COALESCEd, a walk's listing carrying no play history. So whichever write the rule lets land, the row holds the same values. Two residuals stay. A state that changes between the two reads can keep the earlier read until it next changes: the later run's merges carry its own attempt's start, a write the earlier run commits after that start outdates them, and the next delta reads from the later run's start, past the change. Two watch runs that overlap today race the same way. And a run whose heartbeat is still fresh when another starts beside it, and which never finishes, is never closed: no longer the newest, it is neither superseded nor resumed, and it stays `running` — in dashboard 3's panel 6 for good, since that panel counts runs by status with no time filter, and in `usher sync-status` until five newer runs of its source push it out.
 
 `watch.sync` has three callers in the tree: `usher sync`, `sync_handler` and `LaneSupervisor._close_gap`; Task 18 adds a fourth, the after-seed hook, at the first two. None has anything new to handle from the watch lane: `sync` never refuses, so each gets a run, beside a live one if one is running.
 
 Neither check is atomic. `_claim` reads the newest run and writes later, with no lock between, so two whole-library walks that start together can both proceed. The watch lane's check has the same gap, as today: two watch runs that start together can both close one dead first walk, or both resume one dead delta.
 
-Departures 2, 5, 6, 12 and 13 happen here. **2:** a resumed unit's first page can re-read up to `PAGE_OVERLAP` items its last committed page already counted; the cases below run on the fake, which has no overlap, so they assert nothing counted twice. That overlap is all a resume reaches back, so a resume after more than `PAGE_OVERLAP` deletions ahead of a unit's position misses items, as an in-walk shift does, without the WARNING. **5:** a `failed` run with units resumes whatever its heartbeat says. **6:** a superseded row that is `failed` already keeps its own error. **12:** a run whose sweep was refused is not resumed. Its walk is what the refusal doubts — a library unmounted mid-walk reads exactly like one emptied — so the next attempt reads the library again; a resume would re-run the sweep over the same rows and refuse again. **13:** the watch lane's heartbeat, and its run beside a live one, above.
+Departures 2, 5, 6, 12 and 13 happen here. **2:** a resumed unit's first page can re-read up to `PAGE_OVERLAP` items its last committed page already counted; the cases below run on the fake, which has no overlap, so they assert nothing counted twice. That overlap is all a resume reaches back, so a resume after more than `PAGE_OVERLAP` deletions ahead of a unit's position misses items, as an in-walk shift does, without the WARNING. A full walk's sweep then retracts the items it skipped, up to the sweep's ceiling, until a later full walk reads them again. **5:** a `failed` run with units resumes whatever its heartbeat says. **6:** a superseded row that is `failed` already keeps its own error. **12:** a run whose sweep was refused is not resumed. Its walk is what the refusal doubts — a library unmounted mid-walk reads exactly like one emptied — so the next attempt reads the library again; a resume would re-run the sweep over the same rows and refuse again. **13:** the watch lane's heartbeat, and its run beside a live one, above.
 
 `tests/integration/test_ingest_end_to_end.py::test_a_walk_that_dies_mid_run_leaves_a_resumable_catalog` now resumes its failed run instead of starting another, and its assertions still hold: the failed attempt held its unit's pages below a batch of 1,000 and committed none, so the resume walks all six items once.
 
@@ -9042,9 +9058,7 @@ async def test_every_batch_of_a_watch_walk_moves_its_heartbeat() -> None:
     await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
 
     assert fixture.positions == [2, 4, 5], "the premise: three batches committed"
-    beats = [
-        saved.heartbeat_at for saved in fixture.saved if saved.status is SyncRunStatus.RUNNING
-    ]
+    beats = [saved.heartbeat_at for saved in fixture.saved if saved.status is SyncRunStatus.RUNNING]
     assert beats == [NOW + timedelta(seconds=seconds) for seconds in (1, 2, 3)]
 ```
 
@@ -9224,8 +9238,8 @@ After `incomplete = await self._runs.latest_incomplete_run(source.id, SyncRunKin
                 and self._clock() - incomplete.heartbeat_at < STALE_AFTER
             ):
                 # Another process's walk, alive. Closing or resuming its row would write
-                # under that walk, so this one runs in a row of its own: both merge the
-                # same states on one key, and converge. A row with no heartbeat predates
+                # under that walk, so this one runs in a row of its own, both merging on
+                # one key under one conflict rule. A row with no heartbeat predates
                 # heartbeats, and is taken for dead.
                 incomplete = None
 ```
@@ -9443,7 +9457,25 @@ starts, and such a run left `running` is closed `failed` with `superseded: a
 whole-library walk restarts`.
 ```
 
-The same file's paragraph beginning `**A watch-lane delta is resumable.**` gains, after its last sentence, `Nothing schedules it.`:
+In "Walking the library", the bullet beginning `**Items are walked in ascending creation order**` says how far a resume reaches back. Its last two lines, `` reconcile covers what it missed. Duplicates are permitted; silent truncation `` and `` is not. ``, become:
+
+```markdown
+  reconcile covers what it missed. A resumed unit of a whole-library walk
+  re-reads only that overlap before where it stopped, and logs nothing: if more
+  items vanish ahead of it between attempts, it misses them, a full walk's sweep
+  retracts them, and the next full walk reads them again. Duplicates are
+  permitted; silent truncation is not, except across such a resume.
+```
+
+The same file's paragraph beginning `**A watch-lane delta is resumable.**` changes twice. Its sentence closing an unfinished first walk now names only a dead one: the lines from `` first walk is never resumed: an unfinished one still `running` is closed `` through `` again. Nothing schedules it. `` become
+
+```markdown
+first walk is never resumed: an unfinished one still `running` and not alive
+(below) is closed `failed` with `superseded: a first watch walk restarts`, and
+the next run starts again. Nothing schedules it.
+```
+
+and after that last sentence, `Nothing schedules it.`, it gains:
 
 ```markdown
 A watch run moves its heartbeat when it starts and with every batch it
@@ -9481,9 +9513,9 @@ run of its own, a delta from the cursor or, with no cursor yet, a first walk.
   earlier attempt saw carries that instant, and a fresh one retracts them all.
 ```
 
-The file is past its 200-line target, so the same edit cuts the two lines it adds, both of them how a rule was found rather than the rule (`rules-file-maintenance.md`):
-- the write-back body bullet loses its last line, `` (`PlayCount` and `LastPlayedDate` survive the same omission.) ``;
-- in the Tier 4 bullet, `` `tmdb_id`. A probe with **no** year resolves nothing at all: the year `` and the line after it, `` `BETWEEN` propagates `NULL`, so "0.0%" there is not a bug. ``, become the one line `` `tmdb_id`. ``
+The file is past its 200-line target, so the same edit cuts the two lines it adds. Each restates what a source file keeps beside the code, and the Tier 4 one adds a measured figure; `rules-file-maintenance.md` prefers the source to a copy, and deletes a measurement on sight:
+- in the history-backfill bullet, `` accepts what Postgres refuses and `now()` is frozen per transaction, so the `` and the line after it, `` integration suite stages it with `clock_timestamp()` in a raw `INSERT`. ``, become the one line `` accepts what Postgres refuses and `now()` is frozen per transaction. `` How the suite stages that row is `_given_stored_history`'s, in `tests/integration/test_services_watch_sync.py`, whose docstring gives the raw `INSERT` and why it reads `clock_timestamp()`;
+- in the Tier 4 bullet, `` `tmdb_id`. A probe with **no** year resolves nothing at all: the year `` and the line after it, `` `BETWEEN` propagates `NULL`, so "0.0%" there is not a bug. ``, become the one line `` `tmdb_id`. `` The comment above the `BETWEEN` in `db/repositories/matching.py` says a probe with no year resolves to nothing, `NULL` propagating through it; the "0.0%" is the measured figure.
 
 In "Gap-closing walks are unasked-for work", the paragraph's last sentence, from `` An unfinished first walk is superseded, never resumed (`SUPERSEDED_ERROR`): `` through `` so its row cannot be reset. ``, becomes the lines below. They name `watch_sync.SUPERSEDED_ERROR`, `WALK_SUPERSEDED_ERROR` being the other one, and add the live run this task leaves alone, without which the sentence is no longer true; `rules-file-maintenance.md` allows going a line or two over the target to correct a claim.
 
@@ -10477,6 +10509,28 @@ async def test_a_unit_is_timed_from_its_walkers_claim_to_its_last_commit(
     }
 ```
 
+Task 16's `test_a_unit_that_ends_on_a_batch_boundary_publishes_no_second_frame` is replaced by the case below. A frame now counts units, so the empty batch a unit's end commits moves something a reader sees:
+
+```python
+async def test_a_unit_that_ends_on_a_batch_boundary_still_says_where_its_plan_stands() -> None:
+    """Its end commits an empty batch to save the unit `completed`, and that is a frame.
+
+    The empty batch moved no item counter, but it moved `units_done`: four items in
+    batches of two are three frames, the last saying the unit is done.
+    """
+    fixture = _Fixture(batch_size=2)
+    _shelve(fixture, "Films", range(4))
+    run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    frames = [
+        (event.data["items_seen"], event.data["units_done"])
+        for event in fixture.events.published
+        if event.kind is ClientEventKind.SYNC_PROGRESS
+    ]
+    assert frames == [(2, 0), (4, 0), (4, 1)]
+    [unit] = await fixture.runs.units_for(run.id)
+    assert unit.status is SyncRunUnitStatus.COMPLETED
+```
+
 `tests/unit/test_telemetry_metric_names.py`: `len(catalogue) == 43` becomes `== 44`.
 
 `tests/unit/test_dashboards.py`, `test_the_catalogue_scan_reaches_the_row_that_carries_no_usher_prefix` — PRD 10's table has a second reader: `assert len(catalogue) == 43, (` becomes `== 44`, and `not the 43 its own header` in its message becomes `not the 44 its own header`.
@@ -10485,7 +10539,7 @@ async def test_a_unit_is_timed_from_its_walkers_claim_to_its_last_commit(
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_services_reconcile.py tests/unit/test_telemetry_metric_names.py tests/unit/test_dashboards.py -k "plan_stands or carry_no_plan or timed_from or catalogue"`
 Expected: FAIL:
-- both frame cases with `KeyError: 'stage'`;
+- the two frame cases above with `KeyError: 'stage'`, and the boundary case with `KeyError: 'units_done'`;
 - the duration case on `{} == {…}`;
 - both catalogue counts on 43 rows: `the catalogue table parse found 43 rows`, and the dashboards reader's `PRD 10's metric table parsed to 43 rows`. The filter's four other `catalogue` cases in `test_dashboards.py` pass.
 
@@ -10575,7 +10629,17 @@ and the call becomes:
         )
 ```
 
-`_flush` takes `walk: WalkProgress | None = None` after `unit`, and its `await self._publish_progress(source, run)`, under Task 16's `if batch:`, becomes `await self._publish_progress(source, run, walk)`; `return run` stays. `_publish_progress` takes `walk: WalkProgress | None = None` after `run`, and its `data` gains, after `"items_unmatched"`:
+`_flush` takes `walk: WalkProgress | None = None` after `unit`, and Task 16's `if batch:` block, before `return run`, becomes the lines below; `return run` stays. A unit's end that commits an empty batch now moves `units_done`, and can move `stage`, so it is a frame.
+
+```python
+        if batch or (unit is not None and unit.status is SyncRunUnitStatus.COMPLETED):
+            # A batch with items is a frame (PRD 07: one per batch), and so is the empty
+            # one a unit's end commits to save the unit `completed`: that moves no item
+            # counter, but it moves `units_done`, and can move `stage`.
+            await self._publish_progress(source, run, walk)
+```
+
+`_publish_progress` takes `walk: WalkProgress | None = None` after `run`, and its `data` gains, after `"items_unmatched"`:
 
 ```python
                     # Where a planned walk's plan stands; a single walk's frame says `None`.
@@ -10609,7 +10673,7 @@ once for each unit that completes; a unit that fails records nothing. `stage` is
 - [ ] **Step 8: Run them to see them pass**
 
 Run the Step 6 command, then `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_services_reconcile.py tests/integration/test_services_reconcile.py`
-Expected: PASS. Each existing case still passes: none reads a frame by its whole dict, and none passes `_fetch` a deque.
+Expected: PASS. Each existing case still passes: none reads a frame by its whole dict, none passes `_fetch` a deque, and of the cases that read frames, only the boundary case replaced above has a unit that ends on an empty batch.
 
 - [ ] **Step 9: Write the failing status and `sync-status` tests**
 
@@ -11291,6 +11355,7 @@ Expected: PASS.
 17. `_plan_line` printing `expected={walk.items_expected}`. Expect the `unknown` case to fail on `expected=None`.
 18. Panel 11's target B grouped `by (source)`. Expect the walk-panel case to fail on its aggregations.
 19. `sourceStatusHealthy` without `last_sync`. Expect `npm run verify` to fail in typecheck naming `last_sync`.
+20. `_flush`'s guard back to Task 16's `if batch:`. Expect `test_a_unit_that_ends_on_a_batch_boundary_still_says_where_its_plan_stands` to fail on `[(2, 0), (4, 0)] == [(2, 0), (4, 0), (4, 1)]`.
 
 - [ ] **Step 19: Commit**
 
@@ -11344,7 +11409,7 @@ Task 9's row first. Its item walk on production, Task 9 Step 4, has to have run 
 
 The Tasks 10–20 row → `🔨 in review (PR #<n>)` until the PR merges. Task 21 flips it to `✅ landed (PR #<n>)`.
 
-`docs/prd/README.md` holds one row for this plan, and its cell says both in one sentence: `🔨 Phase 1 landed (PR #<p1>) and passed: its first watch walk in <s> s, its item walk on production in <h> h. Phase 2 in review (PR #<n>)`, with `<p1>` the number the cell already carries.
+`docs/prd/README.md` holds one row for this plan, and says both in its one cell: `🔨 Phase 1 landed (PR #<p1>) and passed: its first watch walk in <s> s, its item walk on production in <h> h. Phase 2 in review (PR #<n>)`, with `<p1>` the number the cell already carries.
 
 - [ ] **Step 5: Push and open the PR**
 
