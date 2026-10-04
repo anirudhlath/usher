@@ -890,11 +890,11 @@ class EpisodeRepositoryNextUpContract:
     ) -> None:
         """`ws.played`, not "has a watch state".
 
-        A walk writes a row for every item it sees, so on a full library
-        nearly every episode has a `watch_states` row and almost none of them
-        are played. Without the predicate the mark is the highest episode the
-        *source knows about* -- i.e. the finale -- and Next Up goes silent for
-        every series in the library at once.
+        A walk writes a row for every state it yields, and not every one is
+        played: a first walk yields each in-progress episode, and a delta an
+        un-marked one as a zero state. Without the predicate the mark is the
+        highest episode holding any row, so one merely started moves Next Up
+        past every episode before it.
 
         Here S02E03 is merely started, so the mark is S01E01 and the answer
         is S01E02.

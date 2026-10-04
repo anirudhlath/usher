@@ -107,6 +107,31 @@ with `IsEmpty: true`, and a `UserDataChanged` for a **series** entry — which
 is where `UnplayedItemCount` would plausibly appear, and the reason it was
 removed rather than kept with a note.
 
+## Listing protocol (fast first sync)
+
+Recorded 2026-10-01 against a 1.16M-item library with a read-only script
+outside the repository, which printed counts only. No payload was kept,
+because these rows are behaviour rather than shape: every item a listing
+returns has the shape of the item fixtures above.
+
+| Behaviour | What the server does | What depends on it |
+|---|---|---|
+| `EnableTotalRecordCount=false` | `TotalRecordCount` is still present, as **0**, at the head of the listing and a million items deep | `OffsetWindow` reads the total from a walk's first page only; `FakeEmbyServer` renders 0 |
+| `EnableTotalRecordCount` omitted | counted, exactly as `true` | the fake counts when the flag is absent |
+| `Filters=IsPlayed` | only items whose `UserData.Played` is true; some also hold a resume position | the first watch walk's first listing |
+| `Filters=IsResumable` | only items with a non-zero `PlaybackPositionTicks`, **played or not**, so it overlaps `IsPlayed` (21 of 208 on the recorded account) | the first watch walk's second listing, deduplicated by id |
+| A filtered listing's paging | the filter applies before `StartIndex`/`Limit`: the page at 700 of a 765-item filtered set held 65 | a filtered walk pages like any other |
+
+No source has been seen to cap `Limit`. `FakeEmbyServer.max_limit` exists for
+one that does, and so do two of the conditions on a short page that ends a
+walk: it is shorter than the longest page served before it, and the cursor has
+reached the first page's total.
+
+No `IsPlayed` listing has been seen to hold an entry reading `Played: false`.
+`FakeEmbyServer.set_unplayed_episodes` exists for a Series that would: its
+listed `Played` is derived from its episodes, while the filter matches the flag
+stored for it. One such entry beside a played one must not read as a server that ignored `Filters`.
+
 ## Regenerating
 
 Never paste a capture in. `scripts/capture_emby_fixture.py` replaces every

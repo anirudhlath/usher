@@ -1,11 +1,16 @@
 """EmbyAdapter behaviours the source-agnostic contract cannot express."""
 
 import asyncio
+import contextlib
+import gc
 import io
 import json
-from collections.abc import Callable
+import time
+import weakref
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 from urllib.parse import quote
 
 import httpx
@@ -77,12 +82,40 @@ def _movie(index: int) -> SourceItem:
     )
 
 
-def _adapter(server: FakeEmbyServer, *, page_size: int = 2) -> EmbyAdapter:
+def _numbered(count: int) -> list[SourceItem]:
+    """`count` movies whose listing order is their number: the names are zero-padded."""
+    return [
+        replace(
+            _movie(0), external_id=f"movie-{index:03d}", name=f"Movie {index:03d}", provider_ids={}
+        )
+        for index in range(count)
+    ]
+
+
+def _deleting(
+    server: FakeEmbyServer, external_ids: Sequence[str]
+) -> Callable[[httpx.Request], httpx.Response]:
+    """`server`, with `external_ids` deleted once its first listing has been served."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        response = server.handle(request)
+        if request.url.path.endswith("/Items") and server.listings == 1:
+            for external_id in external_ids:
+                server.remove_item(external_id)
+        return response
+
+    return handle
+
+
+def _adapter(
+    server: FakeEmbyServer, *, page_size: int = 2, max_pages: int = MAX_PAGES
+) -> EmbyAdapter:
     return EmbyAdapter(
         SOURCE,
         CREDENTIALS,
         client=httpx.AsyncClient(transport=server.transport(), base_url=SOURCE.base_url),
         page_size=page_size,
+        max_pages=max_pages,
     )
 
 
@@ -101,24 +134,30 @@ class _Waits:
         return self.now
 
 
+_Handler = (
+    Callable[[httpx.Request], httpx.Response]
+    | Callable[[httpx.Request], Coroutine[None, None, httpx.Response]]
+)
+
+
 def _on(
-    handler: Callable[[httpx.Request], httpx.Response],
+    handler: _Handler,
     *,
     max_pages: int = MAX_PAGES,
     waits: _Waits | None = None,
+    page_size: int | None = None,
 ) -> EmbyAdapter:
-    """An adapter over a hand-written handler, for shapes `FakeEmbyServer` will not produce."""
+    """An adapter over a hand-written handler, for shapes `FakeEmbyServer` will not produce.
+
+    `page_size` reaches the constructor only when a case names one.
+    """
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url=SOURCE.base_url)
-    if waits is None:
-        return EmbyAdapter(SOURCE, CREDENTIALS, client=client, max_pages=max_pages)
-    return EmbyAdapter(
-        SOURCE,
-        CREDENTIALS,
-        client=client,
-        max_pages=max_pages,
-        sleep=waits.sleep,
-        clock=waits.clock,
-    )
+    options: dict[str, Any] = {"max_pages": max_pages}
+    if page_size is not None:
+        options["page_size"] = page_size
+    if waits is not None:
+        options |= {"sleep": waits.sleep, "clock": waits.clock}
+    return EmbyAdapter(SOURCE, CREDENTIALS, client=client, **options)
 
 
 def _authenticated(request: httpx.Request) -> httpx.Response | None:
@@ -132,19 +171,272 @@ def _authenticated(request: httpx.Request) -> httpx.Response | None:
 
 
 async def test_the_walk_pages_until_the_library_is_exhausted() -> None:
-    server = FakeEmbyServer(page_size=2)
+    """5 items over pages of 4 is two requests.
+
+    The second reaches back two items, comes back short and at the total, and ends
+    the walk rather than paying a third request for an empty page.
+    """
+    server = FakeEmbyServer()
     for index in range(5):
         server.add_item(_movie(index), T0)
-    adapter = _adapter(server, page_size=2)
+    adapter = _adapter(server, page_size=4)
     try:
         seen = [item.external_id async for item in adapter.list_items()]
     finally:
         await adapter.aclose()
     assert sorted(seen) == [f"movie-{index}" for index in range(5)]
     listings = [entry for entry in server.requests if entry.endswith("/Items")]
-    # 5 items over pages of 2 is three requests: TotalRecordCount stops the
-    # walk after the third rather than paying a fourth for an empty page.
+    assert len(listings) == 2
+
+
+async def test_only_the_first_page_asks_for_the_total() -> None:
+    """A count costs Emby a pass over the whole filtered set, so a walk asks for it once.
+
+    Every later page sends `false`, and the walk reads its end from the first page's
+    total.
+    """
+    server = FakeEmbyServer()
+    for index in range(5):
+        server.add_item(_movie(index), T0)
+    captured: list[httpx.Request] = []
+
+    def spy(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return server.handle(request)
+
+    adapter = _on(spy, page_size=4)
+    try:
+        seen = [item.external_id async for item in adapter.list_items()]
+    finally:
+        await adapter.aclose()
+    flags = [
+        request.url.params["EnableTotalRecordCount"]
+        for request in captured
+        if request.url.path.endswith("/Items")
+    ]
+    assert sorted(seen) == [f"movie-{index}" for index in range(5)]
+    assert len(flags) == 2, "the walk did not end on the page that reached the first page's total"
+    assert flags[0] == "true"
+    assert set(flags[1:]) == {"false"}
+
+
+async def test_a_deletion_behind_the_cursor_skips_nothing() -> None:
+    """Deleting three of the first page's items shifts every later one left by three.
+
+    The next page reaches back `PAGE_OVERLAP` items, so the three it would have
+    skipped are still in it; the entries it re-reads are dropped by id, and a shift
+    inside the overlap is not reported.
+    """
+    server = FakeEmbyServer()
+    library = _numbered(250)
+    for item in library:
+        server.add_item(item, T0)
+    gone = ["movie-010", "movie-020", "movie-030"]
+    lines: list[str] = []
+    handle = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        adapter = _on(_deleting(server, gone), page_size=100)
+        try:
+            seen = [item.external_id async for item in adapter.list_items()]
+        finally:
+            await adapter.aclose()
+    finally:
+        logger.remove(handle)
+    survivors = {item.external_id for item in library} - set(gone)
+    assert survivors - set(seen) == set(), "an item shifted behind the cursor was skipped"
+    assert len(seen) == len(set(seen)), "an entry re-read by the overlap was yielded twice"
+    assert lines == []
+
+
+async def test_a_shift_past_the_overlap_is_logged_with_the_page_it_hit() -> None:
+    """Sixty deletions behind the cursor are more than the overlap can absorb.
+
+    Ten items are skipped, which nothing inside the walk can repair; it says so,
+    names the page, and carries on.
+    """
+    server = FakeEmbyServer()
+    for item in _numbered(250):
+        server.add_item(item, T0)
+    lines: list[str] = []
+    handle = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        adapter = _on(
+            _deleting(server, [f"movie-{index:03d}" for index in range(60)]), page_size=100
+        )
+        try:
+            _ = [item async for item in adapter.list_items()]
+        finally:
+            await adapter.aclose()
+    finally:
+        logger.remove(handle)
+    assert [line.rstrip("\n") for line in lines] == [
+        "Living Room Emby's listing shifted by at least 50 items before StartIndex=50; "
+        "an item shifted further was not read, and the next full walk reads it"
+    ]
+
+
+async def test_a_shift_past_a_clamped_overlap_names_the_clamped_reach_back() -> None:
+    """Pages of 40 reach back 20, so the WARNING says 20, not `PAGE_OVERLAP`.
+
+    Thirty deletions move the page at `StartIndex=20` past `movie-039`; the ten items
+    after it are skipped.
+    """
+    server = FakeEmbyServer()
+    for item in _numbered(200):
+        server.add_item(item, T0)
+    lines: list[str] = []
+    handle = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        adapter = _on(
+            _deleting(server, [f"movie-{index:03d}" for index in range(30)]), page_size=40
+        )
+        try:
+            _ = [item async for item in adapter.list_items()]
+        finally:
+            await adapter.aclose()
+    finally:
+        logger.remove(handle)
+    assert [line.rstrip("\n") for line in lines] == [
+        "Living Room Emby's listing shifted by at least 20 items before StartIndex=20; "
+        "an item shifted further was not read, and the next full walk reads it"
+    ]
+
+
+async def test_the_last_item_of_a_page_leaving_the_listing_is_not_a_shift() -> None:
+    """The first page's last item is deleted, so the next page lacks its id.
+
+    That page still re-reads the rest of its reach-back, so nothing moved past it:
+    nothing is skipped and nothing is reported.
+    """
+    server = FakeEmbyServer()
+    library = _numbered(250)
+    for item in library:
+        server.add_item(item, T0)
+    gone = ["movie-099"]
+    lines: list[str] = []
+    handle = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        adapter = _on(_deleting(server, gone), page_size=100)
+        try:
+            seen = [item.external_id async for item in adapter.list_items()]
+        finally:
+            await adapter.aclose()
+    finally:
+        logger.remove(handle)
+    survivors = {item.external_id for item in library} - set(gone)
+    assert survivors - set(seen) == set(), "an item behind the cursor was skipped"
+    assert len(seen) == len(set(seen)), "an entry re-read by the overlap was yielded twice"
+    assert lines == []
+
+
+async def test_a_limit_capped_below_the_overlap_still_advances() -> None:
+    """A server serving 40 a page, against an overlap of 50, is still read to its end.
+
+    An unclamped reach-back re-reads all 40 and moves the cursor backwards, so the
+    walk runs out its page bound instead of the library.
+    """
+    server = FakeEmbyServer()
+    server.max_limit = 40
+    library = _numbered(200)
+    for item in library:
+        server.add_item(item, T0)
+    adapter = _adapter(server, page_size=100, max_pages=30)
+    try:
+        seen = [item.external_id async for item in adapter.list_items()]
+    finally:
+        await adapter.aclose()
+    assert sorted(set(seen)) == [item.external_id for item in library]
+
+
+async def test_a_walk_that_deletions_left_short_of_its_total_ends_on_its_tail() -> None:
+    """Two deletions make the first page's total of six unreachable.
+
+    The page that re-reads the tail brings nothing new and ends the walk. Without
+    that rule the reach-back halves its way down to an empty page, one deep request
+    at a time.
+    """
+    server = FakeEmbyServer()
+    library = _numbered(6)
+    for item in library:
+        server.add_item(item, T0)
+    adapter = _on(_deleting(server, ["movie-000", "movie-001"]), page_size=4)
+    try:
+        seen = [item.external_id async for item in adapter.list_items()]
+    finally:
+        await adapter.aclose()
+    listings = [entry for entry in server.requests if entry.endswith("/Items")]
+    assert set(seen) == {item.external_id for item in library}
     assert len(listings) == 3
+
+
+async def test_a_server_that_caps_the_limit_is_still_walked_to_its_end() -> None:
+    """Short pages below the first page's total are the server's cap, not the library's end."""
+    server = FakeEmbyServer()
+    server.max_limit = 2
+    for index in range(7):
+        server.add_item(_movie(index), T0)
+    sizes: list[int] = []
+
+    def spy(request: httpx.Request) -> httpx.Response:
+        response = server.handle(request)
+        if request.url.path.endswith("/Items"):
+            sizes.append(len(response.json()["Items"]))
+        return response
+
+    adapter = _on(spy, page_size=4)
+    try:
+        seen = [item.external_id async for item in adapter.list_items()]
+    finally:
+        await adapter.aclose()
+    assert sizes and max(sizes) < 4, "the premise: every page came back shorter than asked for"
+    assert sorted(set(seen)) == [f"movie-{index}" for index in range(7)]
+
+
+async def test_a_library_that_grows_during_the_walk_is_read_to_its_end() -> None:
+    """Items added mid-walk sort last, past the stale total its first page reported."""
+    server = FakeEmbyServer()
+    for index in range(4):
+        server.add_item(_movie(index), T0)
+
+    def grow(request: httpx.Request) -> httpx.Response:
+        response = server.handle(request)
+        if request.url.path.endswith("/Items") and server.listings == 1:
+            for index in range(4, 7):
+                server.add_item(replace(_movie(index), added_at=T1), T1)
+        return response
+
+    adapter = _on(grow, page_size=2)
+    try:
+        seen = [item.external_id async for item in adapter.list_items()]
+    finally:
+        await adapter.aclose()
+    assert sorted(set(seen)) == [f"movie-{index}" for index in range(7)]
+
+
+async def test_a_capped_server_on_a_growing_library_is_read_to_its_end() -> None:
+    """Items added mid-walk are still read when every page is shorter than `Limit`."""
+    server = FakeEmbyServer()
+    server.max_limit = 2
+    for index in range(4):
+        server.add_item(_movie(index), T0)
+    sizes: list[int] = []
+
+    def grow(request: httpx.Request) -> httpx.Response:
+        response = server.handle(request)
+        if request.url.path.endswith("/Items"):
+            sizes.append(len(response.json()["Items"]))
+            if server.listings == 1:
+                for index in range(4, 7):
+                    server.add_item(replace(_movie(index), added_at=T1), T1)
+        return response
+
+    adapter = _on(grow, page_size=4)
+    try:
+        seen = [item.external_id async for item in adapter.list_items()]
+    finally:
+        await adapter.aclose()
+    assert sizes and max(sizes) < 4, "the premise: every page came back shorter than asked for"
+    assert sorted(set(seen)) == [f"movie-{index}" for index in range(7)]
 
 
 async def test_the_walk_asks_for_the_types_and_fields_the_mapper_needs() -> None:
@@ -315,6 +607,7 @@ async def test_a_library_walk_and_a_watch_state_walk_filter_on_different_stamps(
     assert "MinDateLastSaved" in listings[0].url.params
     assert "MinDateLastSavedForUser" in listings[1].url.params
     assert "MinDateLastSavedForUser" not in listings[0].url.params
+    assert "Filters" not in listings[1].url.params, "a delta is not filtered on watched-ness"
 
 
 @pytest.mark.parametrize("walk", ["list_items", "watch_state"])
@@ -452,7 +745,7 @@ async def test_the_default_page_size_is_what_goes_out_as_the_limit() -> None:
         _ = [item async for item in adapter.list_items()]
     finally:
         await adapter.aclose()
-    assert captured[0].url.params["Limit"] == "200"
+    assert captured[0].url.params["Limit"] == "1000"
 
 
 async def test_a_page_entry_that_is_not_an_object_is_skipped_not_fatal() -> None:
@@ -505,7 +798,7 @@ async def test_a_listing_with_no_items_array_is_malformed() -> None:
 
 
 async def test_a_watch_state_walk_resumes_from_the_start_index_it_is_given() -> None:
-    """A resumed walk asks Emby for the page it stopped at rather than for page one.
+    """A resumed delta asks Emby for the page it stopped at rather than for page one.
 
     The walk's order is `SortBy=DateCreated,SortName` ascending and `DateCreated` is
     immutable, so the prefix already walked does not reorder between attempts.
@@ -521,7 +814,7 @@ async def test_a_watch_state_walk_resumes_from_the_start_index_it_is_given() -> 
 
     adapter = _on(handler)
     try:
-        states = [one async for one in adapter.watch_state(start_index=50_000)]
+        states = [one async for one in adapter.watch_state(T0, start_index=50_000)]
     finally:
         await adapter.aclose()
 
@@ -548,8 +841,8 @@ async def test_a_resumed_watch_state_walk_re_yields_what_it_dropped() -> None:
 
     adapter = _on(handler)
     try:
-        first = [one async for one in adapter.watch_state()]
-        resumed = [one async for one in adapter.watch_state(start_index=len(first))]
+        first = [one async for one in adapter.watch_state(T0)]
+        resumed = [one async for one in adapter.watch_state(T0, start_index=len(first))]
     finally:
         await adapter.aclose()
 
@@ -588,6 +881,515 @@ async def test_an_item_walk_always_starts_at_the_beginning() -> None:
     assert requested == ["0"]
 
 
+async def test_a_listing_page_may_take_two_minutes_to_read_and_nothing_else_may() -> None:
+    """A deep page of a big library outlasts the 30 s every other request gets.
+
+    Read off each request's `timeout` extension, which is what httpx enforces and
+    what `failure_detail` reports. Only the read phase moves. Every call site in the
+    adapter that sends a request is reached -- `verify`'s three, the walks, `_fetch`
+    through `get_item`, and both of `push_watch_state`'s writes -- so a listing's
+    budget reaching any of them reads 120 here.
+    """
+    server = FakeEmbyServer()
+    server.add_item(_movie(0), T0)
+    captured: list[httpx.Request] = []
+
+    def spy(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return server.handle(request)
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(spy), base_url=SOURCE.base_url, timeout=30.0
+    )
+    adapter = EmbyAdapter(SOURCE, CREDENTIALS, client=client)
+    try:
+        await adapter.verify()
+        _ = [item async for item in adapter.list_items()]
+        _ = [state async for state in adapter.watch_state(since=T0)]
+        await adapter.get_item("movie-0")
+        await adapter.push_watch_state(
+            "movie-0", WatchStateUpdate(position_seconds=600, played=True)
+        )
+    finally:
+        await adapter.aclose()
+    budgets = {
+        (request.method, redact_path(request.url.path), request.extensions["timeout"]["read"])
+        for request in captured
+    }
+    assert budgets == {
+        ("POST", "/Users/AuthenticateByName", 30.0),
+        ("GET", "/System/Info/Public", 30.0),
+        ("GET", "/System/Info", 30.0),
+        ("GET", "/Users/{user_id}", 30.0),
+        ("GET", "/Users/{user_id}/Items", 120.0),
+        ("GET", "/Users/{user_id}/Items/{item_id}", 30.0),
+        ("POST", "/Users/{user_id}/Items/{item_id}/UserData", 30.0),
+        ("POST", "/Users/{user_id}/PlayedItems/{item_id}", 30.0),
+    }
+    listing = next(request for request in captured if request.url.path.endswith("/Items"))
+    assert listing.extensions["timeout"] == {
+        "connect": 30.0,
+        "read": 120.0,
+        "write": 30.0,
+        "pool": 30.0,
+    }
+
+
+async def test_a_listing_that_times_out_says_it_had_two_minutes() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        authenticated = _authenticated(request)
+        if authenticated is not None:
+            return authenticated
+        raise httpx.ReadTimeout("", request=request)
+
+    adapter = _on(handler, waits=_Waits())
+    try:
+        with pytest.raises(PortUnavailable) as caught:
+            _ = [item async for item in adapter.list_items()]
+    finally:
+        await adapter.aclose()
+    assert str(caught.value) == (
+        "GET /Users/{user_id}/Items failed: ReadTimeout after 120.0s (read budget) "
+        "(gave up after 6 attempts over 465s)"
+    )
+
+
+# --- read-ahead ---------------------------------------------------------------
+
+
+def _parking_second_listing(
+    server: FakeEmbyServer, parked: asyncio.Event, cancelled: asyncio.Event
+) -> _Handler:
+    """`server`, holding its second listing open until the request is cancelled."""
+    listings = 0
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal listings
+        if request.url.path.endswith("/Items"):
+            listings += 1
+            if listings == 2:
+                parked.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
+        return server.handle(request)
+
+    return handle
+
+
+def _the_read_ahead() -> weakref.ref[asyncio.Task[Any]]:
+    """A weak reference to the walk's read-ahead: the one other task still running.
+
+    asyncio reports an exception nobody retrieved only when the task is destroyed, so
+    a case asserting that nothing was reported first asserts that the read-ahead was
+    collected, and holds nothing that would keep it alive.
+    """
+    others = asyncio.all_tasks() - {asyncio.current_task()}
+    assert len(others) == 1, f"the premise: one read-ahead in flight, found {len(others)} tasks"
+    return weakref.ref(others.pop())
+
+
+def _recording(
+    lost: list[dict[str, Any]],
+) -> Callable[[asyncio.AbstractEventLoop, dict[str, Any]], None]:
+    """A loop exception handler appending each report to `lost`, minus the task it names.
+
+    asyncio reports a lost exception from the task's finalizer, with the task in the
+    report. Keeping it would bring the task back to life, and the premise that the
+    read-ahead was collected would then fail where `lost` should.
+    """
+
+    def record(_loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+        lost.append({key: value for key, value in context.items() if key != "future"})
+
+    return record
+
+
+async def test_the_next_page_is_requested_while_the_current_one_is_handled() -> None:
+    """Read-ahead, shown by observed overlap rather than by counting requests.
+
+    The consumer holds the first item until the second page's request reaches the
+    server, with a deadline that gives up. A walk that asks only when the consumer
+    comes back for more sends nothing in that window, so the deadline expires and
+    the two recorded intervals come out disjoint.
+    """
+    server = FakeEmbyServer()
+    for index in range(4):
+        server.add_item(_movie(index), T0)
+    arrivals: list[float] = []
+    second = asyncio.Event()
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/Items"):
+            arrivals.append(time.monotonic())
+            if len(arrivals) == 2:
+                second.set()
+        return server.handle(request)
+
+    adapter = _on(handle, page_size=2)
+    handling: tuple[float, float] | None = None
+    try:
+        async for _item in adapter.list_items():
+            if handling is None:
+                began = time.monotonic()
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(second.wait(), timeout=2.0)
+                handling = (began, time.monotonic())
+    finally:
+        await adapter.aclose()
+    assert handling is not None and len(arrivals) >= 2, "the premise: the walk paged"
+    began, ended = handling
+    assert began <= arrivals[1] <= ended, (
+        f"the second page was requested at {arrivals[1]:.3f}, outside the first page's "
+        f"handling [{began:.3f}, {ended:.3f}]: nothing was read ahead"
+    )
+
+
+@pytest.mark.parametrize(
+    "walk",
+    [
+        pytest.param(lambda adapter: adapter.list_items(), id="list_items"),
+        # A delta from `T0`, which every item here carries: one listing, walked from
+        # its start, as `_parking_second_listing` assumes and a first walk need not be.
+        pytest.param(lambda adapter: adapter.watch_state(since=T0), id="watch_state"),
+    ],
+)
+async def test_stopping_the_walk_cancels_the_request_it_read_ahead(
+    walk: Callable[[EmbyAdapter], AsyncIterator[SourceItem | SourceWatchState]],
+) -> None:
+    server = FakeEmbyServer()
+    for index in range(4):
+        server.add_item(_movie(index), T0)
+    parked, cancelled = asyncio.Event(), asyncio.Event()
+    reported: list[dict[str, Any]] = []
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: reported.append(context))
+    adapter = _on(_parking_second_listing(server, parked, cancelled), page_size=2)
+    items = cast(AsyncGenerator[SourceItem | SourceWatchState], walk(adapter))
+    try:
+        first = await asyncio.wait_for(anext(items), timeout=2.0)
+        await asyncio.wait_for(parked.wait(), timeout=2.0)
+        await asyncio.wait_for(items.aclose(), timeout=2.0)
+    finally:
+        loop.set_exception_handler(previous)
+        await adapter.aclose()
+    assert first.external_id == "movie-0"
+    assert cancelled.is_set(), "the request read ahead outlived the walk that asked for it"
+    assert reported == [], f"stopping the walk left asyncio something to report: {reported}"
+
+
+async def test_stopping_a_first_walk_in_its_second_listing_cancels_that_listings_read_ahead() -> (
+    None
+):
+    """A first walk's second listing is closed with the walk, as its first is.
+
+    Stopped on the first in-progress state, with that listing's next page held open:
+    the request is cancelled before stopping returns, and nothing holds the read-ahead
+    afterwards. A listing walked outside `aclosing` is left to the collector, which
+    closes it on some later turn of the loop.
+    """
+    server = FakeEmbyServer()
+    for index in range(5):
+        server.add_item(_movie(index), T0)
+    server.set_watch_state(SourceWatchState(external_id="movie-0", position_seconds=0, played=True))
+    for index in range(1, 5):
+        server.set_watch_state(
+            SourceWatchState(external_id=f"movie-{index}", position_seconds=640, played=False)
+        )
+    parked, cancelled = asyncio.Event(), asyncio.Event()
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        params = request.url.params
+        if params.get("Filters") == "IsResumable" and params.get("StartIndex") != "0":
+            parked.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+        return server.handle(request)
+
+    lost: list[dict[str, Any]] = []
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(_recording(lost))
+    adapter = _on(handle, page_size=2)
+    try:
+        states = cast(AsyncGenerator[SourceWatchState], adapter.watch_state())
+        played = await asyncio.wait_for(anext(states), timeout=2.0)
+        resuming = await asyncio.wait_for(anext(states), timeout=2.0)
+        await asyncio.wait_for(parked.wait(), timeout=2.0)
+        ahead = _the_read_ahead()
+        await asyncio.wait_for(states.aclose(), timeout=2.0)
+        stopped = cancelled.is_set()
+        del states
+        gc.collect()
+    finally:
+        loop.set_exception_handler(previous)
+        await adapter.aclose()
+    assert (played.external_id, resuming.external_id) == ("movie-0", "movie-1"), (
+        "the premise: the walk was stopped in its second listing"
+    )
+    assert stopped, "the second listing's read-ahead outlived the walk that asked for it"
+    assert ahead() is None, "the second listing's read-ahead was still held once the walk stopped"
+    assert lost == [], f"asyncio reported a read-ahead failure nobody retrieved: {lost}"
+
+
+async def test_a_read_ahead_that_failed_is_retrieved_when_the_walk_stops() -> None:
+    """A page refused while the consumer is still on the one before.
+
+    The consumer then stops. Stopping raises nothing, and asyncio is never left
+    holding an exception nobody read, which it would log as lost.
+    """
+    server = FakeEmbyServer()
+    for index in range(4):
+        server.add_item(_movie(index), T0)
+    refused = asyncio.Event()
+    listings = 0
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal listings
+        if request.url.path.endswith("/Items"):
+            listings += 1
+            if listings == 2:
+                refused.set()
+                return httpx.Response(404, json={"Error": "gone"})
+        return server.handle(request)
+
+    lost: list[dict[str, Any]] = []
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(_recording(lost))
+    adapter = _on(handle, page_size=2)
+    try:
+        items = cast(AsyncGenerator[SourceItem], adapter.list_items())
+        await asyncio.wait_for(anext(items), timeout=2.0)
+        ahead = _the_read_ahead()
+        await asyncio.wait_for(refused.wait(), timeout=2.0)
+        # Long enough for the refused request's task to finish raising.
+        await asyncio.sleep(0.05)
+        t = ahead()
+        assert t is not None and t.done() and not t.cancelled(), (
+            "the premise: the refused read had finished failing before the walk stopped"
+        )
+        del t
+        await items.aclose()
+        del items
+        gc.collect()
+    finally:
+        loop.set_exception_handler(previous)
+        await adapter.aclose()
+    assert listings == 2, "the premise: the second page was asked for and refused"
+    assert ahead() is None, "the premise: the read-ahead was collected"
+    assert lost == [], f"asyncio reported a read-ahead failure nobody retrieved: {lost}"
+
+
+async def test_a_read_ahead_that_fails_once_cancelled_is_retrieved_too() -> None:
+    """Cancelling asks a read to stop, and a read can answer with a failure instead.
+
+    `cancel()` alone silences a failure that is already in, so a read-ahead that failed
+    before the walk stopped is quiet whether or not the walk reads what it raised. Here
+    the second listing is held open until it is cancelled and then refused: the task
+    ends raising, after the cancel.
+    """
+    server = FakeEmbyServer()
+    for index in range(4):
+        server.add_item(_movie(index), T0)
+    parked, refused = asyncio.Event(), asyncio.Event()
+    listings = 0
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal listings
+        if request.url.path.endswith("/Items"):
+            listings += 1
+            if listings == 2:
+                parked.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    refused.set()
+                return httpx.Response(404, json={"Error": "gone"})
+        return server.handle(request)
+
+    lost: list[dict[str, Any]] = []
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(_recording(lost))
+    adapter = _on(handle, page_size=2)
+    try:
+        items = cast(AsyncGenerator[SourceItem], adapter.list_items())
+        await asyncio.wait_for(anext(items), timeout=2.0)
+        ahead = _the_read_ahead()
+        await asyncio.wait_for(parked.wait(), timeout=2.0)
+        await asyncio.wait_for(items.aclose(), timeout=2.0)
+        del items
+        gc.collect()
+    finally:
+        loop.set_exception_handler(previous)
+        await adapter.aclose()
+    assert refused.is_set(), "the premise: the read-ahead was cancelled, then refused"
+    assert ahead() is None, "the premise: the read-ahead was collected"
+    assert lost == [], f"asyncio reported a read-ahead failure nobody retrieved: {lost}"
+
+
+async def test_cancelling_the_consumer_cancels_the_walk_rather_than_being_swallowed() -> None:
+    server = FakeEmbyServer()
+    for index in range(4):
+        server.add_item(_movie(index), T0)
+    parked, cancelled = asyncio.Event(), asyncio.Event()
+    adapter = _on(_parking_second_listing(server, parked, cancelled), page_size=2)
+
+    async def consume() -> list[str]:
+        return [item.external_id async for item in adapter.list_items()]
+
+    task = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(parked.wait(), timeout=2.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=2.0)
+    finally:
+        await adapter.aclose()
+    assert cancelled.is_set(), "the request in flight survived its consumer's cancellation"
+
+
+async def test_a_read_ahead_that_fails_after_its_walk_was_cancelled_is_retrieved() -> None:
+    """The walk is cancelled while it waits on its read-ahead, which fails afterwards.
+
+    A lane shutting down: the task closing the walk is cancelled mid-wait and the
+    adapter closed, and only then does the read-ahead, slow to stop, fail. That
+    cancellation leaves the walk rather than ending there, and asyncio must still not
+    report the read-ahead's failure as lost, though nothing waits on it any more.
+    """
+    server = FakeEmbyServer()
+    for index in range(4):
+        server.add_item(_movie(index), T0)
+    parked, stopping = asyncio.Event(), asyncio.Event()
+    release, failing = asyncio.Event(), asyncio.Event()
+    listings = 0
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal listings
+        if request.url.path.endswith("/Items"):
+            listings += 1
+            if listings == 2:
+                parked.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    stopping.set()
+                    await release.wait()
+                failing.set()
+                raise httpx.ReadError("the connection dropped while the read was stopping")
+        return server.handle(request)
+
+    lost: list[dict[str, Any]] = []
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(_recording(lost))
+    adapter = _on(handle, page_size=2)
+    items = cast(AsyncGenerator[SourceItem], adapter.list_items())
+
+    async def stop(walk: AsyncGenerator[SourceItem]) -> None:
+        await walk.aclose()
+
+    try:
+        await asyncio.wait_for(anext(items), timeout=2.0)
+        ahead = _the_read_ahead()
+        await asyncio.wait_for(parked.wait(), timeout=2.0)
+        closing = asyncio.create_task(stop(items))
+        await asyncio.wait_for(stopping.wait(), timeout=2.0)
+        assert not closing.done(), "the premise: the walk is still waiting on its read-ahead"
+        closing.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(closing, timeout=2.0)
+        # Closed first, as a lane shutting down closes it, so `_page` passes the
+        # failure on rather than asking again.
+        await adapter.aclose()
+        release.set()
+        await asyncio.wait_for(failing.wait(), timeout=2.0)
+        # Long enough for the read-ahead's task to finish raising.
+        await asyncio.sleep(0.05)
+        del items, closing
+        gc.collect()
+    finally:
+        loop.set_exception_handler(previous)
+        await adapter.aclose()
+        # Released on every path, or a read-ahead first cancelled at teardown, by a
+        # walk that never stopped it, waits on this forever and hangs the session.
+        release.set()
+    assert ahead() is None, "the premise: the read-ahead was collected"
+    assert lost == [], f"asyncio reported a read-ahead failure nobody retrieved: {lost}"
+
+
+async def test_the_page_that_ends_the_walk_is_the_last_one_asked_for() -> None:
+    """Nothing is read ahead past the end, however long the consumer takes.
+
+    The consumer waits on every item, which is when a page read ahead reaches the
+    server: the second arrives during the first item, so one asked for past the end
+    would arrive during the last.
+    """
+    server = FakeEmbyServer()
+    for index in range(5):
+        server.add_item(_movie(index), T0)
+    seen: list[str] = []
+    arrivals: list[int] = []
+
+    def spy(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/Items"):
+            arrivals.append(len(seen))
+        return server.handle(request)
+
+    adapter = _on(spy, page_size=4)
+    try:
+        async for item in adapter.list_items():
+            seen.append(item.external_id)
+            await asyncio.sleep(0.01)
+    finally:
+        await adapter.aclose()
+    assert sorted(seen) == [f"movie-{index}" for index in range(5)]
+    assert arrivals[:2] == [0, 1], "the premise: a page read ahead arrives while the consumer waits"
+    assert len(arrivals) == 2, f"a page was asked for after the one that ended the walk: {arrivals}"
+
+
+async def test_the_last_page_the_bound_allows_is_the_last_one_asked_for() -> None:
+    """A walk at its page bound reads nothing ahead, however long the consumer takes.
+
+    Every page here is new, so the listing never ends and each page has an item for
+    the consumer to wait on, which is when a page read past the bound would arrive.
+    """
+    seen: list[str] = []
+    arrivals: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        authenticated = _authenticated(request)
+        if authenticated is not None:
+            return authenticated
+        arrivals.append(len(seen))
+        # The escape hatch, so a walk with no bound fails this case instead of
+        # hanging it.
+        if len(arrivals) > 20:
+            return httpx.Response(200, json={"Items": []})
+        index = len(arrivals) - 1
+        entry = {"Id": f"movie-{index}", "Type": "Movie", "Name": f"M{index}"}
+        return httpx.Response(200, json={"Items": [entry]})
+
+    adapter = _on(handler, max_pages=3)
+    try:
+        with pytest.raises(PortDataMalformed, match="never ended"):
+            async for item in adapter.list_items():
+                seen.append(item.external_id)
+                await asyncio.sleep(0.01)
+    finally:
+        await adapter.aclose()
+    assert seen == ["movie-0", "movie-1", "movie-2"]
+    assert arrivals[:3] == [0, 1, 2], "the premise: each page read ahead arrives mid-item"
+    assert len(arrivals) == 3, f"a page was asked for past the bound: {arrivals}"
+
+
 # --- a transient failure mid-walk ------------------------------------------
 
 # The waits between attempts at one page, in order: six attempts, five waits.
@@ -612,9 +1414,11 @@ def _status(code: int, headers: dict[str, str] | None = None) -> Callable[[], ht
 class _FlakyLibrary:
     """Three items served one per page, failing a scripted number of times per `StartIndex`.
 
-    Every entry carries `UserData`, so the watch-state walk yields all three too. Given
-    `waits`, every listing request moves its clock by `REQUEST_SECONDS`, as a real one
-    takes time.
+    Every entry carries a default `UserData`, so a watch-state delta yields all three; a
+    first walk would yield none. Given `waits`, every listing request moves its clock by
+    `REQUEST_SECONDS`, as a real one takes time. Every page is one item long, as a server
+    capping `Limit` at 1 serves, so a walk that reaches the end asks once more, at
+    `StartIndex=3`, and ends on the empty page.
     """
 
     def __init__(
@@ -673,11 +1477,11 @@ async def test_a_page_that_fails_transiently_is_asked_for_again(
     waits = _Waits()
     adapter = _on(library, waits=waits)
     try:
-        seen = [one.external_id async for one in getattr(adapter, walk)()]
+        seen = [one.external_id async for one in getattr(adapter, walk)(T0)]
     finally:
         await adapter.aclose()
     assert seen == ["movie-0", "movie-1", "movie-2"]
-    assert library.requested == [0, 1, 1, 1, 2]
+    assert library.requested == [0, 1, 1, 1, 2, 3]
     assert waits.waits == RETRY_WAITS[:2]
 
 
@@ -696,7 +1500,7 @@ async def test_a_page_that_keeps_failing_ends_the_walk_on_the_sixth_attempt(walk
     adapter = _on(library, waits=waits)
     try:
         with pytest.raises(PortUnavailable) as caught:
-            _ = [one async for one in getattr(adapter, walk)()]
+            _ = [one async for one in getattr(adapter, walk)(T0)]
     finally:
         await adapter.aclose()
     assert library.requested == [0, 1, 1, 1, 1, 1, 1]
@@ -799,7 +1603,7 @@ async def test_a_rate_limited_page_waits_out_the_longer_of_its_hint_and_the_sche
     finally:
         await adapter.aclose()
     assert seen == ["movie-0", "movie-1", "movie-2"]
-    assert library.requested == [0, 1, 1, 2]
+    assert library.requested == [0, 1, 1, 2, 3]
     assert waits.waits == [wait]
 
 
@@ -1022,11 +1826,266 @@ async def test_watch_state_is_attributed_to_the_authenticated_user() -> None:
     )
     adapter = _adapter(server)
     try:
-        states = [state async for state in adapter.watch_state()]
+        states = [state async for state in adapter.watch_state(since=T0)]
     finally:
         await adapter.aclose()
     assert states[0].source_user_id == USER_ID
     assert states[0].position_seconds == 600
+
+
+async def test_a_first_watch_walk_lists_played_then_in_progress_items() -> None:
+    server = FakeEmbyServer()
+    for index in range(3):
+        server.add_item(_movie(index), T0)
+    server.set_watch_state(SourceWatchState(external_id="movie-0", position_seconds=0, played=True))
+    server.set_watch_state(
+        SourceWatchState(external_id="movie-2", position_seconds=640, played=True)
+    )
+    captured: list[httpx.Request] = []
+
+    def spy(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return server.handle(request)
+
+    adapter = _on(spy)
+    try:
+        walked = [state.external_id async for state in adapter.watch_state()]
+    finally:
+        await adapter.aclose()
+    listings = [request.url.params for request in captured if request.url.path.endswith("/Items")]
+    assert [params.get("Filters") for params in listings] == ["IsPlayed", "IsResumable"]
+    assert not any("MinDateLastSavedForUser" in params for params in listings)
+    assert walked == ["movie-0", "movie-2"], "a state both played and in progress came twice"
+
+
+async def test_a_server_that_ignores_the_filter_still_yields_only_watched_states_once() -> None:
+    """A server that ignored `Filters` lists the whole library on the first listing.
+
+    Most of a library is unwatched, which is how the walk tells. It still yields only
+    played or in-progress states, and stops there: the second listing would repeat the
+    first, item for item.
+    """
+    entries: list[dict[str, Any]] = [
+        {
+            "Id": "movie-0",
+            "Type": "Movie",
+            "Name": "A",
+            "UserData": {"PlaybackPositionTicks": 0, "Played": True},
+        },
+        {
+            "Id": "movie-1",
+            "Type": "Movie",
+            "Name": "B",
+            "UserData": {"PlaybackPositionTicks": 0, "Played": False},
+        },
+        {
+            "Id": "movie-2",
+            "Type": "Movie",
+            "Name": "C",
+            "UserData": {"PlaybackPositionTicks": 6_400_000_000, "Played": False},
+        },
+        {
+            "Id": "movie-3",
+            "Type": "Movie",
+            "Name": "D",
+            "UserData": {"PlaybackPositionTicks": 0, "Played": False},
+        },
+        {
+            "Id": "movie-4",
+            "Type": "Movie",
+            "Name": "E",
+            "UserData": {"PlaybackPositionTicks": 0, "Played": False},
+        },
+    ]
+    asked: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        authenticated = _authenticated(request)
+        if authenticated is not None:
+            return authenticated
+        asked.append(request.url.params.get("Filters", ""))
+        return httpx.Response(200, json={"Items": entries, "TotalRecordCount": len(entries)})
+
+    adapter = _on(handler)
+    try:
+        walked = [
+            (state.external_id, state.played, state.position_seconds)
+            async for state in adapter.watch_state()
+        ]
+    finally:
+        await adapter.aclose()
+    data = [entry["UserData"] for entry in entries]
+    unseen = sum(1 for each in data if not each["Played"] and not each["PlaybackPositionTicks"])
+    assert unseen > len(data) - unseen, "the premise: the library listed is mostly unwatched"
+    assert walked == [("movie-0", True, 0), ("movie-2", False, 640)]
+    assert asked == ["IsPlayed"], "the second listing repeated a whole-library walk"
+
+
+async def test_a_series_reading_unwatched_in_the_played_listing_keeps_the_in_progress_one() -> None:
+    """A Series marked played that has since gained an episode may match `IsPlayed`.
+
+    Its entry reads unwatched, with no position. One such entry beside one played
+    movie is a tie, not a server that ignored `Filters`, so the walk still asks for
+    the in-progress listing and yields the resume position it holds.
+    """
+    server = FakeEmbyServer()
+    series = SourceItem(
+        external_id="series-0", name="Series 0", kind=SourceItemKind.SERIES, year=2004, added_at=T0
+    )
+    for item in (_movie(0), _movie(1), series):
+        server.add_item(item, T0)
+    server.set_watch_state(SourceWatchState(external_id="movie-0", position_seconds=0, played=True))
+    server.set_watch_state(
+        SourceWatchState(external_id="movie-1", position_seconds=640, played=False)
+    )
+    server.set_watch_state(
+        SourceWatchState(external_id="series-0", position_seconds=0, played=True)
+    )
+    server.set_unplayed_episodes("series-0", 1)
+    asked: list[str] = []
+    served: dict[str, list[dict[str, Any]]] = {}
+
+    def spy(request: httpx.Request) -> httpx.Response:
+        response = server.handle(request)
+        if request.url.path.endswith("/Items"):
+            asked.append(request.url.params["Filters"])
+            served[asked[-1]] = response.json()["Items"]
+        return response
+
+    lines: list[str] = []
+    handle = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        adapter = _on(spy)
+        try:
+            walked = [
+                (state.external_id, state.played, state.position_seconds)
+                async for state in adapter.watch_state()
+            ]
+        finally:
+            await adapter.aclose()
+    finally:
+        logger.remove(handle)
+    played_listing = sorted(
+        (
+            entry["Id"],
+            entry["UserData"]["Played"],
+            entry["UserData"]["PlaybackPositionTicks"],
+            entry["UserData"].get("UnplayedItemCount"),
+        )
+        for entry in served["IsPlayed"]
+    )
+    assert played_listing == [("movie-0", True, 0, None), ("series-0", False, 0, 1)], (
+        "the premise: the played listing holds a played movie and a Series reading unwatched"
+    )
+    assert server.recorded_watch_state("movie-1") == (640, False), (
+        "the premise: the in-progress listing holds one unplayed movie at 640 s"
+    )
+    assert asked == ["IsPlayed", "IsResumable"], (
+        "one Series reading unwatched cost the walk its in-progress listing"
+    )
+    assert walked == [("movie-0", True, 0), ("movie-1", False, 640)]
+    assert lines == [], "a server that honours Filters was logged as ignoring them"
+
+
+@pytest.mark.parametrize(
+    ("unwatched", "watched", "listings", "warnings"),
+    [
+        pytest.param(
+            2,
+            1,
+            ["IsPlayed"],
+            [
+                "Living Room Emby appears to ignore Filters: its first watch walk's played "
+                "listing was mostly unwatched (2 unwatched skipped, 1 watched yielded), so "
+                "the walk did not ask for the in-progress listing"
+            ],
+            id="unwatched-outnumber-watched",
+        ),
+        pytest.param(1, 1, ["IsPlayed", "IsResumable"], [], id="a-tie"),
+    ],
+)
+async def test_a_played_listing_is_judged_unfiltered_only_when_mostly_unwatched(
+    unwatched: int, watched: int, listings: list[str], warnings: list[str]
+) -> None:
+    """A server ignoring `Filters` lists the whole library, and a library is mostly unwatched.
+
+    So the walk lists once, and says so, only when the played listing's unwatched entries
+    strictly outnumber its watched ones. On a tie it asks for the second listing as well,
+    dropping by id what the first already yielded.
+    """
+    entries: list[dict[str, Any]] = [
+        {
+            "Id": f"movie-{index}",
+            "Type": "Movie",
+            "Name": f"Movie {index}",
+            "UserData": {"PlaybackPositionTicks": 0, "Played": index >= unwatched},
+        }
+        for index in range(unwatched + watched)
+    ]
+    asked: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        authenticated = _authenticated(request)
+        if authenticated is not None:
+            return authenticated
+        asked.append(request.url.params.get("Filters", ""))
+        return httpx.Response(200, json={"Items": entries, "TotalRecordCount": len(entries)})
+
+    lines: list[str] = []
+    handle = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        adapter = _on(handler)
+        try:
+            walked = [(state.external_id, state.played) async for state in adapter.watch_state()]
+        finally:
+            await adapter.aclose()
+    finally:
+        logger.remove(handle)
+    stored = {entry["Id"]: entry["UserData"] for entry in entries}
+    unseen = [
+        key for key, data in stored.items() if not (data["Played"] or data["PlaybackPositionTicks"])
+    ]
+    seen = [key for key in stored if key not in unseen]
+    assert (len(unseen), len(seen)) == (unwatched, watched), (
+        f"the premise: the entries stored are {unwatched} unwatched and {watched} watched"
+    )
+    assert asked == listings, "the played listing was misjudged as filtered or as unfiltered"
+    assert len(lines) == len(warnings), "the walk listed once without a WARNING, or warned anyway"
+    assert [line.rstrip("\n") for line in lines] == warnings, "the WARNING miscounted the entries"
+    assert walked == [(key, True) for key in seen], "a watched state was lost or yielded twice"
+
+
+async def test_a_resumed_first_walk_reads_its_second_listing_from_the_top() -> None:
+    """A first walk resumed at 1 asks for its first listing from 1 and its second from 0.
+
+    The resume point counts what the walk yielded, and until the first listing ends all
+    of it came from there. Starting the second listing past 0 would skip in-progress
+    items no attempt ever yielded.
+    """
+    server = FakeEmbyServer()
+    for index, (position, played) in enumerate(((0, True), (0, True), (640, False), (90, False))):
+        server.add_item(_movie(index), T0)
+        server.set_watch_state(
+            SourceWatchState(external_id=f"movie-{index}", position_seconds=position, played=played)
+        )
+    captured: list[httpx.Request] = []
+
+    def spy(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return server.handle(request)
+
+    adapter = _on(spy)
+    try:
+        walked = [state.external_id async for state in adapter.watch_state(start_index=1)]
+    finally:
+        await adapter.aclose()
+    listings = [
+        (request.url.params["Filters"], request.url.params["StartIndex"])
+        for request in captured
+        if request.url.path.endswith("/Items")
+    ]
+    assert listings == [("IsPlayed", "1"), ("IsResumable", "0")]
+    assert walked == ["movie-1", "movie-2", "movie-3"]
 
 
 async def test_get_watch_state_uses_the_single_item_route() -> None:
@@ -1149,7 +2208,7 @@ async def test_the_walk_reports_absent_play_history() -> None:
     )
     adapter = _adapter(server)
     try:
-        states = [state async for state in adapter.watch_state()]
+        states = [state async for state in adapter.watch_state(since=T0)]
     finally:
         await adapter.aclose()
     assert len(states) == 1
@@ -1249,7 +2308,7 @@ async def test_reporting_a_position_does_not_reach_the_played_route() -> None:
         await adapter.push_watch_state(
             "movie-0", WatchStateUpdate(position_seconds=600, played=False)
         )
-        states = [state async for state in adapter.watch_state()]
+        states = [state async for state in adapter.watch_state(since=T0)]
         after = await adapter.get_watch_state("movie-0")
     finally:
         await adapter.aclose()
@@ -2043,7 +3102,7 @@ async def test_every_path_this_adapter_issues_redacts_to_a_route_with_no_identif
         await adapter.verify()
         [item async for item in adapter.list_items()]
         await adapter.get_item("movie-1")
-        [state async for state in adapter.watch_state()]
+        [state async for state in adapter.watch_state(since=T0)]
         await adapter.push_watch_state("movie-1", WatchStateUpdate(position_seconds=1, played=True))
     finally:
         await adapter.aclose()

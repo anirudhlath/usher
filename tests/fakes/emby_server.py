@@ -155,6 +155,9 @@ class FakeEmbyServer:
         # answer rather than fail `verify()`.
         self.user_route_fails = False
         self.fail_after: int | None = None
+        # A listing's `Limit` ceiling, or `None` for none. A server may serve fewer
+        # items than asked for on every page, which a walk must not read as its end.
+        self.max_limit: int | None = None
         self.authentications = 0
         # Read by `_ordered` as well as by tests: it is what rotates a group
         # of items the request supplied no way to distinguish, so successive
@@ -180,6 +183,7 @@ class FakeEmbyServer:
         self._items: dict[str, tuple[SourceItem, AwareDatetime]] = {}
         self._alternates: dict[str, list[dict[str, Any]]] = {}
         self._states: dict[str, SourceWatchState] = {}
+        self._unplayed_episodes: dict[str, int] = {}
         self._sessions = 0
         self._session_token: str | None = None
 
@@ -226,9 +230,25 @@ class FakeEmbyServer:
         self._items.pop(external_id, None)
         self._states.pop(external_id, None)
         self._alternates.pop(external_id, None)
+        self._unplayed_episodes.pop(external_id, None)
 
     def set_watch_state(self, state: SourceWatchState) -> None:
         self._states[state.external_id] = state
+
+    def set_unplayed_episodes(self, external_id: str, count: int) -> None:
+        """Give a seeded Series `count` unplayed episodes, which its `Played` is rendered from.
+
+        Emby derives a Series' `Played` from its episodes -- `series_item.json` says
+        `Played: false` beside `UnplayedItemCount: 12` -- while `Filters` here still reads
+        the flag `set_watch_state` stored. So a Series marked played that has since gained
+        an episode matches `IsPlayed` and is listed as unwatched. No live listing has shown
+        one; it is the entry a first watch walk must not take for a server that ignored
+        `Filters`.
+        """
+        item, _ = self._items[external_id]
+        if item.kind is not SourceItemKind.SERIES:
+            raise ValueError(f"{external_id} is a {item.kind.value}; only a Series has episodes")
+        self._unplayed_episodes[external_id] = count
 
     def recorded_watch_state(self, external_id: str) -> tuple[int, bool] | None:
         state = self._states.get(external_id)
@@ -382,11 +402,14 @@ class FakeEmbyServer:
         looks like from the outside.
         """
         since = params.get("MinDateLastSaved") or params.get("MinDateLastSavedForUser")
+        wanted = {name for name in (params.get("Filters") or "").split(",") if name}
         fields = [field for field in (params.get("SortBy") or "").split(",") if field]
         descending = (params.get("SortOrder") or "Ascending").lower().startswith("desc")
         tied: dict[tuple[str, ...], list[str]] = {}
         for external_id, (item, changed_at) in self._items.items():
             if since is not None and _stamp(changed_at) < since:
+                continue
+            if not self._passes(external_id, wanted):
                 continue
             key = tuple(_sort_value(item, field) for field in fields)
             tied.setdefault(key, []).append(external_id)
@@ -402,6 +425,9 @@ class FakeEmbyServer:
         self.listings += 1
         start = int(params.get("StartIndex", "0"))
         limit = int(params.get("Limit", str(self.page_size)))
+        if self.max_limit is not None:
+            limit = min(limit, self.max_limit)
+        counted = (params.get("EnableTotalRecordCount") or "true").lower() != "false"
         ordered = self._ordered(params)
         if self.fail_after is not None and start >= self.fail_after:
             raise httpx.ReadTimeout("upstream stopped responding")
@@ -410,7 +436,8 @@ class FakeEmbyServer:
             200,
             json={
                 "Items": [self._payload(external_id, for_listing=True) for external_id in page],
-                "TotalRecordCount": len(ordered),
+                # Present and 0 when uncounted, as the live server sends it.
+                "TotalRecordCount": len(ordered) if counted else 0,
             },
         )
 
@@ -430,6 +457,17 @@ class FakeEmbyServer:
         return self._states.get(external_id) or SourceWatchState(
             external_id=external_id, position_seconds=0, played=False, play_count=0
         )
+
+    def _passes(self, external_id: str, filters: set[str]) -> bool:
+        """`Filters`, applied before the page is cut, as the live server does.
+
+        `IsPlayed` is the played flag; `IsResumable` is a non-zero resume position,
+        played or not. A filter this fake does not model filters nothing.
+        """
+        state = self._state_of(external_id)
+        if "IsPlayed" in filters and not state.played:
+            return False
+        return not ("IsResumable" in filters and state.position_seconds <= 0)
 
     def _write_user_data(self, request: httpx.Request, external_id: str) -> httpx.Response:
         """`POST /Users/{user}/Items/{item}/UserData` -- a resume position, no session.
@@ -572,6 +610,11 @@ class FakeEmbyServer:
             "IsFavorite": False,
             "Played": state.played,
         }
+        episodes = self._unplayed_episodes.get(external_id)
+        if episodes is not None:
+            # Derived on both routes; `_passes` keeps reading the stored flag.
+            user_data["Played"] = episodes == 0
+            user_data["UnplayedItemCount"] = episodes
         if for_listing:
             # Emby 4.9.5.0's listing route reports `PlayCount: 0` and omits
             # `LastPlayedDate` entirely -- not null, absent -- for an item whose

@@ -92,9 +92,9 @@ class MediaItemRepository(ABC):
     ) -> dict[str, MediaItemTarget]:
         """Map each `external_id` to what its row is matched to.
 
-        The read a watch-state walk needs. A walk of `watch_state()` yields
-        one record per item, so this is one statement per batch, never one
-        per state.
+        The read a watch-state walk needs. A first walk of `watch_state()`
+        yields one record per watched item and a delta one per change, so
+        this is one statement per batch, never one per state.
 
         Absent keys mean "not stored, or stored and not matched to anything"
         -- the same convention `resolve_series_titles` uses, and the same

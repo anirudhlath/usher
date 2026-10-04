@@ -13,7 +13,6 @@ paths:
 
 # Emby, the push lane, and the ingest pipeline
 
-Rules for this subsystem; the docstrings named below hold the detail.
 `ReconcileService` walks the source → `IngestService` writes `media_items` →
 `MatchService` runs the ladder → `WatchStateSyncService` merges watch state.
 Beside it `EmbyPushChannel` → `PushSupervisor` → `PushApplyService` run the
@@ -25,7 +24,6 @@ websocket, and `WatchWriteService` the client's own writes back out.
 uv run pytest tests/unit/test_adapters_emby_contract.py \
   tests/unit/test_services_{push,watch_write}.py         # the contract suite
 uv run pytest tests/integration/test_services_{ingest,reconcile,push,watch_sync}.py
-uv run usher sync --source "Living Room Emby"   # items, then watch state
 uv run python scripts/measure_ingest.py --items 50000   # NOT a test; real database
 ```
 
@@ -64,8 +62,7 @@ says nothing about a source left out of step by a parked write-back.
   whole contract suite passed against a write-back that had never worked.
 - **That body must name `Played` even when `Played` is not what is changing** —
   it takes the DTO default and a position-only body unplays a played item.
-  (`PlayCount` and `LastPlayedDate` survive the same omission; `Played` does
-  not.)
+  (`PlayCount` and `LastPlayedDate` survive the same omission.)
 - **`DELETE /Users/{user}/PlayedItems/{item}` is destructive beyond its name**:
   it resets `PlayCount`, clears `LastPlayedDate` *and* a non-zero resume
   position, so report unplayed through `UserData` instead. `POST` to it *is* how
@@ -123,11 +120,13 @@ and **a DELTA with no completed item-lane run has no `since`, so
 `cursored`, closing a gap only when a completed walk gives it a `since` (#9).
 ⚠️ **The bound is a refusal rather than a cap on purpose**: a truncated walk
 records `COMPLETED`, so everything it never reached is skipped by every later
-delta, permanently. ⚠️ **And that guard reads the item lane's cursor only, while
-`_close_gap` also runs `watch.sync(...)`** (#41): a source with completed delta
-runs and no completed `watch_state` run passes it, then walks the whole library
-on the watch half for ~11 hours, and **neither log line names it**. That walk
-resumes from `sync_runs.position`; the guard still reads one cursor.
+delta, permanently.
+⚠️ **And that guard reads the item lane's cursor only, while `_close_gap` also
+runs `watch.sync(...)`** (#41): a source with completed delta runs and no
+completed `watch_state` run passes it and runs the watch lane's first walk, two
+filtered listings (`FIRST_WALK_FILTERS`), and **neither log line names it**.
+An unfinished first walk is superseded, never resumed (`SUPERSEDED_ERROR`):
+`save` only raises `position`, so its row cannot be reset.
 
 ## The match ladder
 
@@ -164,11 +163,14 @@ job is enqueued at `BACKFILL` for that remote search.
   range (`mapping._stored`, provider ids in both `_as_int`s): asyncpg's encoder
   raises a bare `OverflowError` past `INT32_MAX`, and the walk dies `RUNNING`;
   a negative one fails a `>= 0` CHECK and the run is `FAILED` on every sync.
-- **Nor may a blip: `EmbyAdapter._page` retries an outage or a 429** for about
-  eight minutes, since a failed item walk restarts from the top — but never a
+- **Nor may a blip: `EmbyAdapter._page` retries an outage or a 429** through
+  eight minutes of waits, as a failed item walk restarts from the top — never a
   `RequestRefused`, the 4xx `EmbySession.ok` still reports as `PortUnavailable`.
   A test that fails a walk on purpose injects `sleep=instant_sleep`
   (`tests/fakes/emby_harness.py`), or it sits through those minutes as a hang.
+- **A page's reach-back is clamped to half the page before it**, and a walk ends
+  on a short page that brought nothing new (`paging.OffsetWindow`): a fixed
+  `PAGE_OVERLAP` stalls on pages of 50 or fewer, and deletions strand the total.
 - **A service that checkpoints per batch must not evolve its own stale copy in
   the failure handler** — `reconcile`'s binding is the pre-walk value, so
   `run.evolve(status=FAILED)` writes `items_seen = 0` over a real checkpoint.

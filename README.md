@@ -106,8 +106,9 @@ The credentials are encrypted at rest with `USHER_SECRET_KEY`. The first walk
 reads every item, as fast as your media server answers, so a large library can
 take hours. The command prints nothing while it runs, so watch it from another
 terminal with `docker compose exec usher usher sync-status`. If it's
-interrupted, run it again. The item walk starts over from the beginning but
-duplicates nothing, and the watch-state walk resumes from its checkpoint.
+interrupted, run it again. Both walks start over from the beginning and
+duplicate nothing; the watch-state walk asks only for what was watched, so it is
+the short one.
 
 **5. Open the console** at <http://localhost:8100/console>. The API's
 interactive reference is at <http://localhost:8100/docs>.

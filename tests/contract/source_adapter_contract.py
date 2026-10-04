@@ -390,19 +390,24 @@ class SourceAdapterContract:
 
     # --- watch state ---------------------------------------------------
 
-    async def test_watch_state_reports_position_and_played(self, harness: SourceHarness) -> None:
+    @pytest.mark.parametrize("since", [None, T0], ids=["first-walk", "delta"])
+    async def test_watch_state_reports_position_and_played(
+        self, harness: SourceHarness, since: datetime | None
+    ) -> None:
         await harness.given_item(MOVIE, changed_at=T0)
         await harness.given_watch_state(
             SourceWatchState(
                 external_id="movie-1", position_seconds=1840, played=False, play_count=1
             )
         )
-        states = {state.external_id: state async for state in harness.adapter.watch_state()}
+        walk = harness.adapter.watch_state(since=since)
+        states = {state.external_id: state async for state in walk}
         assert states["movie-1"].position_seconds == 1840
         assert states["movie-1"].played is False
 
+    @pytest.mark.parametrize("since", [None, T0], ids=["first-walk", "delta"])
     async def test_a_walk_never_reports_play_history_it_cannot_know(
-        self, harness: SourceHarness
+        self, harness: SourceHarness, since: datetime | None
     ) -> None:
         """The failure, expressed so it cannot be passed by lying.
 
@@ -428,7 +433,8 @@ class SourceAdapterContract:
                 last_played_at=last_played,
             )
         )
-        states = {state.external_id: state async for state in harness.adapter.watch_state()}
+        walk = harness.adapter.watch_state(since=since)
+        states = {state.external_id: state async for state in walk}
         walked = states["movie-1"]
         assert walked.position_seconds == 1840
         assert walked.played is True
@@ -438,26 +444,53 @@ class SourceAdapterContract:
         )
         assert walked.last_played_at in (None, last_played)
 
-    async def test_watch_state_reports_a_played_item(self, harness: SourceHarness) -> None:
+    @pytest.mark.parametrize("since", [None, T0], ids=["first-walk", "delta"])
+    async def test_watch_state_reports_a_played_item(
+        self, harness: SourceHarness, since: datetime | None
+    ) -> None:
         await harness.given_item(EPISODE, changed_at=T0)
         await harness.given_watch_state(
             SourceWatchState(external_id="episode-1", position_seconds=0, played=True)
         )
-        states = {state.external_id: state async for state in harness.adapter.watch_state()}
+        walk = harness.adapter.watch_state(since=since)
+        states = {state.external_id: state async for state in walk}
         assert states["episode-1"].played is True
 
-    async def test_watch_state_emits_a_zero_state_rather_than_skipping_it(
+    async def test_a_delta_walk_emits_a_zero_state_rather_than_skipping_it(
         self, harness: SourceHarness
     ) -> None:
-        """Filtering empty states looks like an obvious saving and is a correctness bug.
+        """Filtering empty states out of a delta looks like a saving and is a correctness bug.
 
         Un-marking something played *is* an all-zero state, so an adapter that skipped
         them could never propagate a reset -- the delta walk would find the changed item
         and then discard exactly the record describing the change.
         """
-        await harness.given_item(MOVIE, changed_at=T0)
-        states = {state.external_id async for state in harness.adapter.watch_state()}
+        await harness.given_item(MOVIE, changed_at=T1)
+        states = {state.external_id async for state in harness.adapter.watch_state(since=T1)}
         assert "movie-1" in states
+
+    async def test_a_first_walk_yields_every_watched_state_once_and_nothing_else(
+        self, harness: SourceHarness
+    ) -> None:
+        """With no `since`, only played or in-progress states, each exactly once.
+
+        A first walk over a million items is a few hundred states. An item it does not
+        yield is not asserted unplayed, so a default state has no place in it, and an
+        item both played and in progress is still one record.
+        """
+        await self._seed_library(harness)
+        for external_id, position, played in (
+            ("filler-1", 0, True),
+            ("filler-3", 640, False),
+            ("filler-5", 90, True),
+        ):
+            await harness.given_watch_state(
+                SourceWatchState(external_id=external_id, position_seconds=position, played=played)
+            )
+        everything = {state.external_id async for state in harness.adapter.watch_state(since=T0)}
+        assert len(everything) == 7, "the premise: four of the seven hold a default state"
+        walked = [state.external_id async for state in harness.adapter.watch_state()]
+        assert sorted(walked) == ["filler-1", "filler-3", "filler-5"]
 
     async def test_watch_state_since_is_inclusive(self, harness: SourceHarness) -> None:
         await harness.given_item(MOVIE, changed_at=T1)
@@ -495,6 +528,10 @@ class SourceAdapterContract:
 
     async def test_watch_state_raises_rather_than_truncating(self, harness: SourceHarness) -> None:
         await self._seed_library(harness)
+        for index in range(7):
+            await harness.given_watch_state(
+                SourceWatchState(external_id=f"filler-{index}", position_seconds=0, played=True)
+            )
         await harness.fail_after_items(3)
         seen: list[SourceWatchState] = []
         with pytest.raises(PortUnavailable):

@@ -290,6 +290,21 @@ class EmbySession:
 
     # -- requests ------------------------------------------------------
 
+    def _timeout(self, read: float | None) -> httpx.Timeout:
+        """The client's budget, whose read phase a named read budget only ever lengthens.
+
+        A client with no read limit keeps none, and the other three phases are always
+        the client's.
+        """
+        base = self._client.timeout
+        if read is None:
+            return base
+        if base.read is None:
+            return base
+        return httpx.Timeout(
+            connect=base.connect, read=max(read, base.read), write=base.write, pool=base.pool
+        )
+
     async def _send(
         self,
         method: str,
@@ -299,6 +314,7 @@ class EmbySession:
         payload: Mapping[str, Any] | None,
         headers: Mapping[str, str],
         op: str,
+        read_timeout: float | None = None,
     ) -> httpx.Response:
         # Pace before the wire, and before the clock the request duration runs
         # against starts: the gate's wait is its own series
@@ -307,7 +323,12 @@ class EmbySession:
         started = self._clock()
         try:
             request = self._client.build_request(
-                method, path, params=params, json=payload, headers=dict(headers)
+                method,
+                path,
+                params=params,
+                json=payload,
+                headers=dict(headers),
+                timeout=self._timeout(read_timeout),
             )
             return await self._client.send(request)
         except UNTRANSLATED_FAILURES as exc:
@@ -330,6 +351,7 @@ class EmbySession:
         params: Mapping[str, str] | None = None,
         payload: Mapping[str, Any] | None = None,
         op: str,
+        read_timeout: float | None = None,
     ) -> httpx.Response:
         """Send an authenticated request, re-authenticating once on a 401.
 
@@ -337,7 +359,8 @@ class EmbySession:
         raising, so `get_item` can tell a 404 ("gone") from a transport
         failure ("unreachable") -- the distinction the port's own docstring
         calls out as the one that must not be conflated. Use `ok()` or
-        `json_body()` when any 4xx is a failure.
+        `json_body()` when any 4xx is a failure. `read_timeout` can lengthen the
+        client's read budget for this request, never shorten it.
         """
         self._raise_if_closed()
         token, generation = await self._session()
@@ -345,7 +368,13 @@ class EmbySession:
             span.set_attribute("usher.source", self._source_name)
             span.set_attribute("usher.op", op)
             response = await self._send(
-                method, path, params=params, payload=payload, headers=self._headers(token), op=op
+                method,
+                path,
+                params=params,
+                payload=payload,
+                headers=self._headers(token),
+                op=op,
+                read_timeout=read_timeout,
             )
             if response.status_code == 401:
                 span.set_attribute("usher.reauthenticated", True)
@@ -357,6 +386,7 @@ class EmbySession:
                     payload=payload,
                     headers=self._headers(token),
                     op=op,
+                    read_timeout=read_timeout,
                 )
                 if response.status_code == 401:
                     raise PortAuthFailed(
@@ -375,8 +405,11 @@ class EmbySession:
         params: Mapping[str, str] | None = None,
         payload: Mapping[str, Any] | None = None,
         op: str,
+        read_timeout: float | None = None,
     ) -> httpx.Response:
-        response = await self.request(method, path, params=params, payload=payload, op=op)
+        response = await self.request(
+            method, path, params=params, payload=payload, op=op, read_timeout=read_timeout
+        )
         status = response.status_code
         if status >= 400:
             message = f"{method} {redact_path(path)} returned HTTP {status}"
@@ -393,8 +426,11 @@ class EmbySession:
         params: Mapping[str, str] | None = None,
         payload: Mapping[str, Any] | None = None,
         op: str,
+        read_timeout: float | None = None,
     ) -> dict[str, Any]:
-        response = await self.ok(method, path, params=params, payload=payload, op=op)
+        response = await self.ok(
+            method, path, params=params, payload=payload, op=op, read_timeout=read_timeout
+        )
         return decode_json(response, path)
 
     async def anonymous_json(self, path: str, *, op: str) -> dict[str, Any]:

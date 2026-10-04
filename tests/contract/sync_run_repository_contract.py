@@ -160,16 +160,23 @@ class SyncRunRepositoryContract:
     ) -> None:
         """Both non-completed states, because a crash produces each in turn.
 
-        A gap-closing walk reclaims a running attempt's row and finishes it; the
+        A gap-closing walk reclaims a running delta's row and finishes it (a
+        first walk's row is superseded instead, so the race needs a delta); the
         original attempt then fails and saves `failed` over the completion, so
-        `latest_completed_cursor` stops answering for a walk that finished and
-        the whole library is walked again. `RUNNING` is the same write one moment
-        earlier, from an attempt that has not died yet. The cursor is the
-        assertion that matters: a status column reading `failed` is a wrong row
-        on a dashboard, but a cursor back at `None` is the next walk being the
-        whole library.
+        `latest_completed_cursor` stops answering for a walk that finished.
+        `RUNNING` is the same write one moment earlier, from an attempt that has
+        not died yet. The cursor is the assertion that matters: a status column
+        reading `failed` is a wrong row on a dashboard, but a lost completion
+        moves the next walk's cursor back -- here, with no earlier completion
+        seeded, to `None`, a first walk, which reports no reset.
         """
-        one = run(source_id, kind=SyncRunKind.WATCH_STATE, started_at=EARLIER, position=0)
+        one = run(
+            source_id,
+            kind=SyncRunKind.WATCH_STATE,
+            cursor_at=EARLIER - timedelta(days=1),
+            started_at=EARLIER,
+            position=0,
+        )
         await repository.add(one)
         await repository.save(
             one.evolve(
@@ -195,7 +202,7 @@ class SyncRunRepositoryContract:
         assert stored.error is None, "a completed run is reported as having failed"
         assert (
             await repository.latest_completed_cursor(source_id, SyncRunKind.WATCH_STATE) == EARLIER
-        ), "the next walk has no cursor and is the whole library again"
+        ), "the next walk has no cursor and is a first walk again"
 
     async def test_no_completed_run_means_no_cursor(
         self, repository: SyncRunRepository, source_id: uuid.UUID

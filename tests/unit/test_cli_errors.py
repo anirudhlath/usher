@@ -937,7 +937,10 @@ def test_a_failed_watch_lane_is_a_non_zero_exit_without_the_retraction_hint(
         watch=_run(
             SyncRunKind.WATCH_STATE,
             SyncRunStatus.FAILED,
-            error="GET /Users/{user_id}/Items failed: ReadTimeout after 30.0s (read budget)",
+            error=(
+                "GET /Users/{user_id}/Items failed: ReadTimeout after 120.0s (read budget) "
+                "(gave up after 6 attempts over 1065s)"
+            ),
         ),
     )
 

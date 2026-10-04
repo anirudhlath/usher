@@ -331,9 +331,9 @@ async def test_a_batch_costs_the_same_number_of_statements_however_big_it_is(
     user_id: uuid.UUID,
     statement_counter: list[str],
 ) -> None:
-    """A full watch-state walk covers the same 1,126,674 items the ingest walk does.
+    """A walk merges its states a batch at a time, as the ingest walk writes items.
 
-    so a per-row merge is the same design defect one port over.
+    So a per-row merge is the same design defect one port over.
     """
     titles = []
     for index in range(500):

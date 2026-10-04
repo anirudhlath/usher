@@ -20,6 +20,7 @@ _MILESTONE_TABLE = "## Milestones (from"
 _EVAL_PHASE_TABLE = "## Quality-eval phases (from"
 _RATING_SPLIT_TABLE = "## Rating provenance (from"
 _WATCH_RESUME_TABLE = "## Resumable watch lane (from"
+_FAST_FIRST_SYNC_TABLE = "## Fast first sync (from"
 _IMPLEMENTATION_PLAN_TABLE = "## Implementation plans"
 
 # A dated plan filename, excluding the `-design.md` specs that sit beside them.
@@ -66,11 +67,12 @@ def test_every_plan_file_is_named_by_every_status_table() -> None:
 
     progress = _PROGRESS.read_text()
     tables = {
-        "docs/plans/progress.md's four status tables": (
+        "docs/plans/progress.md's five status tables": (
             _table_rows(progress, _MILESTONE_TABLE)
             | _table_rows(progress, _EVAL_PHASE_TABLE)
             | _table_rows(progress, _RATING_SPLIT_TABLE)
             | _table_rows(progress, _WATCH_RESUME_TABLE)
+            | _table_rows(progress, _FAST_FIRST_SYNC_TABLE)
         ),
         "docs/prd/README.md's implementation-plan table": _table_rows(
             _PRD_README.read_text(), _IMPLEMENTATION_PLAN_TABLE
@@ -195,6 +197,7 @@ def test_the_progress_log_really_does_name_plan_files_outside_its_table() -> Non
         | set(_section(text, _EVAL_PHASE_TABLE))
         | set(_section(text, _RATING_SPLIT_TABLE))
         | set(_section(text, _WATCH_RESUME_TABLE))
+        | set(_section(text, _FAST_FIRST_SYNC_TABLE))
     )
     outside = [
         line

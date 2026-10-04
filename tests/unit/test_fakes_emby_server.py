@@ -788,3 +788,113 @@ def test_a_sessions_frame_is_a_message_that_maps_to_no_event() -> None:
     assert message["MessageType"] == "Sessions"
     assert message["Data"][0]["UserId"] == USER_ID
     assert to_source_events(message, source_user_id=USER_ID) == ()
+
+
+# --- the listing's count and its ceiling ----------------------------------
+
+
+async def test_an_uncounted_listing_still_reports_a_total_of_zero(driver: _Driver) -> None:
+    """`EnableTotalRecordCount=false` sends the key, as 0, as the live server does."""
+    driver.server.add_item(MOVIE, T0)
+    body = await driver.session.json_body(
+        "GET",
+        f"/Users/{USER_ID}/Items",
+        params={"Recursive": "true", "EnableTotalRecordCount": "false"},
+        op="list",
+    )
+    assert body["TotalRecordCount"] == 0
+    assert len(body["Items"]) == 1, "the premise: the page itself was served"
+
+
+async def test_a_listing_that_does_not_say_is_counted(driver: _Driver) -> None:
+    driver.server.add_item(MOVIE, T0)
+    body = await driver.session.json_body(
+        "GET", f"/Users/{USER_ID}/Items", params={"Recursive": "true"}, op="list"
+    )
+    assert body["TotalRecordCount"] == 1
+
+
+async def test_a_capped_limit_serves_fewer_than_were_asked_for(driver: _Driver) -> None:
+    for index in range(3):
+        driver.server.add_item(replace(MOVIE, external_id=f"movie-{index}"), T0)
+    driver.server.max_limit = 2
+    body = await driver.session.json_body(
+        "GET", f"/Users/{USER_ID}/Items", params={"Recursive": "true", "Limit": "10"}, op="list"
+    )
+    assert len(body["Items"]) == 2
+    assert body["TotalRecordCount"] == 3
+
+
+# --- Filters ---------------------------------------------------------------
+
+
+def _given_watched(driver: _Driver) -> None:
+    """Four items: played, in progress, both, and untouched."""
+    for name, state in (
+        ("played", (0, True)),
+        ("resuming", (640, False)),
+        ("both", (90, True)),
+        ("untouched", None),
+    ):
+        driver.server.add_item(replace(MOVIE, external_id=name, name=name), T0)
+        if state is not None:
+            position, played = state
+            driver.server.set_watch_state(
+                SourceWatchState(external_id=name, position_seconds=position, played=played)
+            )
+
+
+async def _filtered(driver: _Driver, filters: str, **paging: str) -> dict[str, Any]:
+    # A page wide enough for every item unless a case cuts one, because the fake's
+    # default page of two ends an unfiltered listing at exactly the two played items.
+    params = {"Recursive": "true", "Filters": filters, "SortBy": "SortName", "Limit": "10"}
+    return await driver.session.json_body(
+        "GET", f"/Users/{USER_ID}/Items", params=params | paging, op="list"
+    )
+
+
+async def test_a_played_filter_lists_only_played_items(driver: _Driver) -> None:
+    _given_watched(driver)
+    body = await _filtered(driver, "IsPlayed")
+    assert [entry["Id"] for entry in body["Items"]] == ["both", "played"]
+
+
+async def test_a_resumable_filter_lists_every_item_with_a_position_played_or_not(
+    driver: _Driver,
+) -> None:
+    _given_watched(driver)
+    body = await _filtered(driver, "IsResumable")
+    assert [entry["Id"] for entry in body["Items"]] == ["both", "resuming"]
+
+
+async def test_a_filter_applies_before_the_page_is_cut(driver: _Driver) -> None:
+    _given_watched(driver)
+    body = await _filtered(driver, "IsPlayed", StartIndex="1", Limit="1")
+    assert [entry["Id"] for entry in body["Items"]] == ["played"]
+    assert body["TotalRecordCount"] == 2
+
+
+async def test_a_played_series_with_an_unplayed_episode_is_listed_as_played_and_reads_unwatched(
+    driver: _Driver,
+) -> None:
+    """Both routes derive its `Played` from its episodes; `IsPlayed` reads the stored flag."""
+    series = SourceItem(external_id="series", name="series", kind=SourceItemKind.SERIES, year=2004)
+    driver.server.add_item(series, T0)
+    driver.server.set_watch_state(
+        SourceWatchState(external_id="series", position_seconds=0, played=True)
+    )
+    driver.server.set_unplayed_episodes("series", 1)
+    body = await _filtered(driver, "IsPlayed")
+    single = await driver.payload("series")
+    keys = ("Played", "UnplayedItemCount", "PlaybackPositionTicks")
+    assert [entry["Id"] for entry in body["Items"]] == ["series"]
+    assert [body["Items"][0]["UserData"].get(key) for key in keys] == [False, 1, 0]
+    assert [single["UserData"].get(key) for key in keys] == [False, 1, 0]
+    assert driver.server.recorded_watch_state("series") == (0, True)
+
+
+def test_only_a_series_takes_unplayed_episodes() -> None:
+    server = FakeEmbyServer()
+    server.add_item(MOVIE, T0)
+    with pytest.raises(ValueError, match="only a Series has episodes"):
+        server.set_unplayed_episodes(MOVIE.external_id, 1)

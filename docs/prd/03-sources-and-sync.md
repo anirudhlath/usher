@@ -88,22 +88,31 @@ recovers them.
 
 ### Walking the library
 
-`list_items` and `watch_state` page over the source's own listing, one page in
-flight at a time:
+`list_items` and `watch_state` page over the source's own listing, in pages of
+`USHER_SOURCE_PAGE_SIZE` items (default **1,000**, at most 1,000), asking for
+the next page while the current one is written — one page read ahead, cancelled
+when the walk stops:
 
 - **Items are walked in ascending creation order**, so items added during a
-  walk land at the end. A deletion mid-walk can shift one item out of view,
-  which the next full reconcile covers. Duplicates are permitted; silent
-  truncation is not.
+  walk land at the end. Each page after the first re-reads the last 50 items of
+  the page before (half the page, if it held fewer than 100), so a deletion
+  mid-walk shifts nothing out of view unless more items than that vanish between
+  two pages; the walk then logs a WARNING naming the page, and the next full
+  reconcile covers what it missed. Duplicates are permitted; silent truncation
+  is not.
 - **The delta cursor is widened by one second.**
 - **An unrecognised filter degrades to a full walk, never to an empty result.**
 - **A page that fails as unreachable is asked for again** — a 5xx, a 408, a
   refused or dropped connection, a timeout — after 15, 30, 60, 120 and 240 s,
-  about eight minutes. A 429 is asked for again on the same schedule, waiting out
-  its `Retry-After` when that is longer, up to 240 s a time. The sixth failure
-  ends the walk, and its error says how many attempts it made over how long; each
-  page gets its own six. Any other 4xx, an answer that is not a listing, a
-  rejected credential and a closed adapter fail at once.
+  about eight minutes of waiting. A listing page has 120 s to answer once
+  connected, or `USHER_SOURCE_TIMEOUT_SECONDS` (default 30) if that is longer,
+  so at the defaults a page whose every attempt connects and then stalls holds
+  the walk about 20 minutes. Connecting, and every other request, has
+  `USHER_SOURCE_TIMEOUT_SECONDS`. A 429 is asked for again on the same schedule,
+  waiting out its `Retry-After` when that is longer, up to 240 s a time. The
+  sixth failure ends the walk, and its error says how many attempts it made over
+  how long; each page gets its own six. Any other 4xx, an answer that is not a
+  listing, a rejected credential and a closed adapter fail at once.
 
 The item lane filters on the library edit time, the watch lane on the user-data
 change time.
@@ -182,12 +191,16 @@ play state to an account on a server the operator does not administer.
 (full or delta). A full walk ignores every cursor. `watch_state` is a third lane
 with its own cursor.
 
-**The watch lane is resumable.** A run checkpoints its position on
+**A watch-lane delta is resumable.** A run checkpoints its position on
 `sync_runs.position`, and the next attempt reclaims that same row and resumes
 there, so a failure that outlasts a page's retries costs the page in flight
-rather than the whole walk. 🔶 Until a source has completed one `watch_state` run, its watch lane has
-no cursor and its next run walks the whole library; nothing schedules that
-first walk.
+rather than the whole walk. **Until a source has completed one `watch_state`
+run, its watch lane has no cursor**, and its next run asks the source only for
+what the account has played or holds a resume position in — two filtered
+listings, a few requests on most libraries — and merges nothing else. That
+first walk is never resumed: an unfinished one still `running` is closed
+`failed` with `superseded: a first watch walk restarts`, and the next run starts
+again. Nothing schedules it.
 
 **Each batch is committed with the run's counters**, and a `sync_runs` row an
 operator can watch exists before the walk starts rather than after it finishes.

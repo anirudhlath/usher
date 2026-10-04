@@ -603,8 +603,8 @@ class MediaItemRepositoryContract:
     ) -> None:
         """The read a watch-state walk makes once per batch, not once per state.
 
-        `watch_state()` yields one record per item, and a library has as many
-        items as it has files.
+        A first walk of `watch_state()` yields one record per item the account has
+        watched, and a delta one per change.
         """
         await repository.upsert_many([item(source_id, "movie-1", title_id=title_id)])
         resolved = await repository.resolve_targets(source_id, ["movie-1", "movie-2"])

@@ -24,7 +24,7 @@ from usher.db.repositories.watch_state import PostgresWatchStateRepository
 from usher.domain.enums import SourceKind, TitleKind
 from usher.domain.ids import new_id
 from usher.domain.source import Source
-from usher.domain.sync import SyncRunStatus
+from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus
 from usher.domain.title import Title
 from usher.ports.ingest import MediaItemUpsert
 from usher.ports.source import SourceItem, SourceItemKind, SourceWatchState
@@ -287,6 +287,15 @@ async def test_one_batch_keeps_an_absent_count_and_writes_a_reported_zero(
     something played impossible to propagate; `COALESCE(count, 0)` writes
     the reset and erases the 7. Only reading each row's own value does both.
     """
+    await PostgresSyncRunRepository(session).add(
+        SyncRun(
+            source_id=source.id,
+            kind=SyncRunKind.WATCH_STATE,
+            status=SyncRunStatus.COMPLETED,
+            started_at=RUN_AT,
+            finished_at=RUN_AT,
+        )
+    )
     adapter = _LossyAdapter(source, blind_to={"movie-1"})
     kept = await _given_matched_movie(session, media_items, source, "movie-1")
     reset = await _given_matched_movie(session, media_items, source, "movie-2")
@@ -444,7 +453,8 @@ async def test_a_batch_of_states_costs_a_bounded_number_of_statements(
     """The scale property, against real SQL rather than a fake's call counter.
 
     20 states and 200 must cost the same number of statements: a per-state resolve or a
-    per-state merge is one round trip per row of the library, every walk.
+    per-state merge is one round trip per watched item on a first walk, and one per
+    change on every delta.
 
     Not an exact number -- the staged `COPY` path issues DDL and a
     `SAVEPOINT` per merge, and pinning the total would break on any
@@ -467,3 +477,45 @@ async def test_a_batch_of_states_costs_a_bounded_number_of_statements(
     small = await _walk(20, 0)
     large = await _walk(200, 1000)
     assert small == large, f"{small} statements for 20 states, {large} for 200"
+
+
+async def test_an_unfinished_first_walk_is_closed_and_a_fresh_one_runs(
+    session: AsyncSession,
+    service: WatchStateSyncService,
+    media_items: PostgresMediaItemRepository,
+    watch_states: PostgresWatchStateRepository,
+    source: Source,
+    user_id: uuid.UUID,
+) -> None:
+    """Against Postgres, whose `save` keeps the greater `position`.
+
+    Resetting the old row in place would leave 300,000 in it, so it is closed and
+    the fresh run starts at 0.
+    """
+    runs = PostgresSyncRunRepository(session)
+    abandoned = SyncRun(
+        source_id=source.id,
+        kind=SyncRunKind.WATCH_STATE,
+        position=300_000,
+        items_seen=300_000,
+        started_at=RUN_AT,
+    )
+    await runs.add(abandoned)
+    watched = await _given_matched_movie(session, media_items, source, "movie-1")
+    adapter = FakeSourceAdapter(source)
+    adapter.seed(_item("movie-1"), CHANGED_AT)
+    adapter.seed_state(SourceWatchState(external_id="movie-1", position_seconds=0, played=True))
+
+    run = await service.sync(source, adapter, user_id=user_id)
+
+    assert adapter.resumed_from == [0]
+    assert run.id != abandoned.id
+    assert (run.status, run.position) == (SyncRunStatus.COMPLETED, 1)
+    closed = await runs.get(abandoned.id)
+    assert closed is not None
+    assert (closed.status, closed.error) == (
+        SyncRunStatus.FAILED,
+        "superseded: a first watch walk restarts",
+    )
+    stored = await watch_states.get_for_title(user_id, watched)
+    assert stored is not None and stored.played is True

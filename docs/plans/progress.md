@@ -65,7 +65,7 @@ that file could see it.
 ## Resumable watch lane (from docs/specs/2026-08-21-issue-41-resumable-watch-lane-design.md)
 | Task | What it delivers | Plan file | Status |
 |---|---|---|---|
-| 1–6 | `sync_runs.position` as a `StartIndex` checkpoint; `latest_incomplete_run` on the sync-run port and both its arms; `watch_state(start_index=…)` on `SourceAdapter`; `WatchStateSyncService` reclaiming its own incomplete run in place; a planted regression to prove the new cases have teeth; the docs the change invalidates | docs/plans/2026-08-21-issue-41-resumable-watch-lane.md | ✅ **all six landed, not yet merged** — 13 commits from `aa125da` to the tip of `fix/41-resumable-watch-lane`, landed 2026-08-25 → 2026-08-26 (the 2026-08-21 in the plan's filename is its *authoring* date; nothing landed until the 25th). No final sha is named because this row ships *in* that last commit, so any sha it quoted would be the one before the amend that wrote it. The design spec, [ADR-0042](../prd/decisions/0042-the-watch-lane-resumes-from-a-startindex-checkpoint.md) and the plan landed together in `aa125da`; the reasoning for the approach is ADR-0042's and is not restated here. Fixes #41 |
+| 1–6 | `sync_runs.position` as a `StartIndex` checkpoint; `latest_incomplete_run` on the sync-run port and both its arms; `watch_state(start_index=…)` on `SourceAdapter`; `WatchStateSyncService` reclaiming its own incomplete run in place; a planted regression to prove the new cases have teeth; the docs the change invalidates | docs/plans/2026-08-21-issue-41-resumable-watch-lane.md | ✅ **all six landed, merged in PR #68** — 13 commits from `aa125da` to the tip of `fix/41-resumable-watch-lane`. The live deployment's watch walk has since run to completion, and its lane runs cursored deltas; ⏳ nothing schedules a source's first watch walk, and closing #41 is the owner's call. The design spec and the plan landed together in `aa125da`, and the reasoning for the approach is the spec's. |
 
 **Two behaviours on that branch are not in the plan above, and both came out
 of review rather than out of a task.** The plan's reuse-in-place rested on
@@ -96,9 +96,21 @@ own, because M9 is a milestone of the v1 design the first heading names and
 that heading is true of it. So the rule is not *"one table per spec"* but
 *"a plan that is **not** a milestone gets a heading naming its own spec"*, and
 what the repetition says is that this project has stopped numbering its work
-into one sequence. `tests/unit/test_docs_currency.py` reads all four tables as
+into one sequence. `tests/unit/test_docs_currency.py` reads every one of these tables as
 a **union**, which is what keeps *"every plan file is named by every status
 table"* one obligation rather than four separate ones a plan can fall between.
+
+## Fast first sync (from docs/specs/2026-10-01-fast-first-sync-design.md)
+| Task | What it delivers | Plan file | Status |
+|---|---|---|---|
+| 1–8 | Phase 1, PR 1: 1,000-item pages, the count asked for once, overlapping pages deduplicated, one page of read-ahead, a 120 s listing read budget, and a first watch walk that asks only for what was watched | docs/plans/2026-10-01-fast-first-sync.md | 🔨 in review (PR #94) |
+| 9 | Phase 1's live acceptance on Shared Emby: the first watch walk timed on a clone of the dev catalog, the item walk on production — owner-gated | docs/plans/2026-10-01-fast-first-sync.md | 📋 planned |
+| 10–20 | Phase 2, PR 2: the planner's facts measured, a whole-library walk as a persisted plan of units (`m10g`), several walkers and one writer, the seed and the early watch lane, backoff, resume in place, and where a walk stands | docs/plans/2026-10-01-fast-first-sync.md | 📋 planned — starts once Task 9 has passed |
+| 21 | Phase 2's live acceptance: the 2-, 10- and 75-minute targets, a resume after a kill mid-EPISODES, and panel 11's first real walk — owner-gated | docs/plans/2026-10-01-fast-first-sync.md | 📋 planned |
+
+**A fifth table, for the fourth's reason.** Fast first sync has its own spec and
+is not a milestone, so a row under any heading above would make that heading
+false. `tests/unit/test_docs_currency.py` reads it into the same union.
 
 ## M1 task groups → plan line ranges
 Plan file: `docs/plans/2026-07-28-m1-foundation.md` (2470 lines)

@@ -10,16 +10,43 @@ Versioning is `0.x` while the wire contract may still move —
 
 ### Changed
 
+- **`USHER_SOURCE_PAGE_SIZE` defaults to 1,000, up from 200.** A page of 1,000
+  costs a source little more than a page of 200, so a walk makes a fifth of the
+  requests. A `.env` copied from an earlier `.env.example` still sets
+  `USHER_SOURCE_PAGE_SIZE=200`; change that line or delete it.
+- **A walk asks for its next page while it writes the current one**, so the
+  source and the database work at once. One page is read ahead, and it is
+  cancelled when the walk stops.
+- **A library listing page may take 120 s**, where every other request still
+  gets `USHER_SOURCE_TIMEOUT_SECONDS`; a timeout set longer than 120 s applies
+  to listing pages too. Deep pages of a large library outlast 30 s, and asking
+  again early only queued a second copy of the slowest query. At the defaults,
+  a source that accepts connections and then stalls now holds a walk about 20
+  minutes before it fails, where it was about 11.
+- **A source's first watch-state walk asks only for what was watched.** It lists
+  played items, then in-progress ones: a few requests, where it used to walk the
+  whole library, which on a million-item library took most of a day. If most of
+  the played listing reads unwatched, the server is taken to ignore the filter,
+  and the walk lists once and logs a WARNING.
+- **An unfinished first watch-state walk starts again rather than resuming.**
+  Its position counted the old whole-library walk, so resuming it would skip
+  every played item that is not also in progress; its row is closed `failed`
+  as superseded.
 - **`USHER_PUSH_STALE_AFTER_SECONDS` defaults to 300, up from 90.** An idle
   library's push channel routinely went longer than 90 s between messages, and
   every such gap cost a reconnect. `usher push --probe` listens for one window,
-  so it now takes five minutes.
+  so it now takes five minutes. A `.env` copied from an earlier `.env.example`
+  still sets `USHER_PUSH_STALE_AFTER_SECONDS=90`; change that line or delete it.
 - **The README is a short introduction and quickstart.** Its how-to material
   moved to [`docs/guide/`](docs/guide/): configuration, the command line, and
   building a client.
 
 ### Fixed
 
+- **Items deleted from the source mid-walk no longer hide others from the
+  walk**, unless more of them vanish between two pages than a page re-reads.
+  Each page re-reads the end of the page before, so a full walk no longer marks
+  a file that is still there unavailable.
 - **An embedding model that fails the embedder's norm check now fails every
   batch, not only the first.** The first batch used to park one `index` job and
   let every later vector through unchecked.

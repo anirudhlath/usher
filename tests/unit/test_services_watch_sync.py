@@ -157,6 +157,18 @@ class _Fixture:
             self.episodes[external_id] = episode_id
         return episode_id if episode_id is not None else title_id
 
+    async def given_completed_walk(self, *, at: AwareDatetime = T0) -> None:
+        """A finished first walk, so the next run is a delta that yields every state."""
+        await self.runs.add(
+            SyncRun(
+                source_id=self.source.id,
+                kind=SyncRunKind.WATCH_STATE,
+                status=SyncRunStatus.COMPLETED,
+                started_at=at,
+                finished_at=at,
+            )
+        )
+
     async def given_history(self, external_id: str, play_count: int) -> None:
         """A stored play count, as a backfill or an authoritative read would leave it.
 
@@ -265,8 +277,9 @@ async def test_a_source_that_reports_a_zero_has_its_zero_written(fixture: _Fixtu
 
     "Never write a count from a merge" makes un-marking something played impossible to
     propagate, which is the same correctness bug as filtering zero states out of a
-    walk. A source that *can* count and says zero is reporting a reset.
+    delta walk. A source that *can* count and says zero is reporting a reset.
     """
+    await fixture.given_completed_walk()
     await fixture.given_matched("movie-1")
     await fixture.given_history("movie-1", 7)
     honest = FakeSourceAdapter(fixture.source)
@@ -577,6 +590,7 @@ async def test_a_walk_still_reports_the_same_counters_after_the_split(
     place would change what every stored `sync_runs` row means. The two agree on every
     batch where nothing is refused, which is nearly all of them, so nothing else fails.
     """
+    await fixture.given_completed_walk()
     await fixture.given_matched("movie-1")
     fixture.adapter.seed(_item("orphan-1"), T0)
     fixture.watch_states.refuse_next_merge()
@@ -608,8 +622,10 @@ async def test_a_played_item_with_unknown_history_is_enqueued_for_backfill(
 async def test_an_unplayed_item_is_not_enqueued_for_backfill(fixture: _Fixture) -> None:
     """A household has played a few thousand of a library's million items.
 
-    An enqueue predicate that ignored `played` would queue the library.
+    An enqueue predicate that ignored `played` would also queue every unplayed
+    state a walk reports.
     """
+    await fixture.given_completed_walk()
     await fixture.given_matched("movie-1")
     fixture.adapter.seed_state(
         SourceWatchState(external_id="movie-1", position_seconds=0, played=False)
@@ -1099,10 +1115,10 @@ async def test_the_walk_publishes_nothing_and_the_push_lane_through_the_same_cha
 ) -> None:
     """The walk publishes nothing, which is a scale decision rather than an omission.
 
-    A walk merges a whole library's states; one `watchstate.updated` per merged row is
-    a fan-out per row per night to every connected client, and every one of them is
-    the source echoing back state that has not changed since the last walk. The push
-    lane publishes because a push event *is* a change.
+    A walk merges states in bulk -- a first walk every state the account has watched,
+    a delta every change since its cursor -- and one `watchstate.updated` per merged
+    row is a fan-out per row per night to every connected client. The push lane
+    publishes because a push event *is* a change.
 
     The reachable version of this defect is the *shared chain*: `apply_states` has
     exactly two callers -- this walk and `PushApplyService` -- and moving the publish
@@ -1167,7 +1183,7 @@ def _no_ingest() -> IngestService:
     )
 
 
-# -- the resume, which is what makes the first full walk completable --------
+# -- the resume, which keeps a long delta from starting over ------------------
 
 
 async def test_a_failed_walk_is_resumed_from_the_position_it_committed(
@@ -1175,14 +1191,15 @@ async def test_a_failed_walk_is_resumed_from_the_position_it_committed(
 ) -> None:
     """A crashed walk leaves no completed run, so the next one resumes rather than restarts.
 
-    Without the resume the next walk has no cursor and re-walks the whole library,
-    which is where the next transient failure comes from.
+    Without the resume a long delta starts over from its first page, which is where
+    the next transient failure comes from.
 
     Batched at 2 deliberately: at the default 1,000 a six-item walk that
     fails part-way has committed *nothing*, so the position it resumes from
     would be 0 and the case would pass against a service that never
     checkpoints at all.
     """
+    await fixture_batched.given_completed_walk()
     for index in range(6):
         await fixture_batched.given_matched(f"movie-{index}")
     fixture_batched.adapter.fail_after(3)
@@ -1235,6 +1252,7 @@ async def test_the_position_advances_per_committed_batch(fixture_batched: _Fixtu
     A crash re-walks exactly the uncommitted batch, which the merge's idempotent
     upsert makes free.
     """
+    await fixture_batched.given_completed_walk()
     for index in range(5):
         await fixture_batched.given_matched(f"movie-{index}")
 
@@ -1263,6 +1281,7 @@ async def test_a_failed_walk_keeps_the_position_it_reached(
     after it is a different claim: that the per-batch checkpoint reached the repository
     at all, and that the two agree.
     """
+    await fixture_batched.given_completed_walk()
     for index in range(6):
         await fixture_batched.given_matched(f"movie-{index}")
     fixture_batched.adapter.fail_after(3)
@@ -1312,6 +1331,7 @@ async def test_the_resume_point_is_the_position_and_not_the_counter(
             source_id=fixture_batched.source.id,
             kind=SyncRunKind.WATCH_STATE,
             status=SyncRunStatus.RUNNING,
+            cursor_at=T0,
             position=0,
             items_seen=5,
         )
@@ -1339,6 +1359,7 @@ async def test_a_running_run_left_by_a_killed_process_is_reclaimed_not_orphaned(
         source_id=fixture_batched.source.id,
         kind=SyncRunKind.WATCH_STATE,
         status=SyncRunStatus.RUNNING,
+        cursor_at=T0,
         position=3,
         items_seen=3,
         items_matched=3,
@@ -1382,6 +1403,7 @@ async def test_each_failed_attempt_resumes_further_in_than_the_last(
     that resumes at the right page *once* and then never advances again satisfies all
     of them: its `items_seen` still climbs attempt after attempt.
     """
+    await fixture_batched.given_completed_walk()
     for index in range(8):
         await fixture_batched.given_matched(f"movie-{index}")
 
@@ -1446,6 +1468,7 @@ async def test_a_resumed_attempt_merges_at_its_own_start_not_the_reclaimed_runs(
         source_id=fixture_batched.source.id,
         kind=SyncRunKind.WATCH_STATE,
         status=SyncRunStatus.RUNNING,
+        cursor_at=T0,
         started_at=T0,
     )
     await fixture_batched.runs.add(abandoned)
@@ -1478,6 +1501,7 @@ async def test_the_span_records_the_page_the_walk_resumed_from(
             source_id=fixture_batched.source.id,
             kind=SyncRunKind.WATCH_STATE,
             status=SyncRunStatus.RUNNING,
+            cursor_at=T0,
             position=4,
         )
     )
@@ -1490,3 +1514,62 @@ async def test_the_span_records_the_page_the_walk_resumed_from(
     assert walks, [one.name for one in spans.get_finished_spans()]
     assert walks[0].attributes is not None
     assert walks[0].attributes["usher.resumed_from"] == 4
+
+
+async def test_an_unfinished_first_walk_is_superseded_rather_than_resumed(
+    fixture: _Fixture,
+) -> None:
+    """A first walk is a few hundred states; an old position would skip its played listing.
+
+    `save` only raises `position`, so the old row cannot be reset: it is closed
+    `FAILED`, and a fresh run walks from the start.
+    """
+    await fixture.given_matched("movie-0")
+    fixture.adapter.seed_state(
+        SourceWatchState(external_id="movie-0", position_seconds=0, played=True)
+    )
+    abandoned = SyncRun(
+        source_id=fixture.source.id,
+        kind=SyncRunKind.WATCH_STATE,
+        status=SyncRunStatus.RUNNING,
+        position=300_000,
+        items_seen=300_000,
+        started_at=T0,
+    )
+    await fixture.runs.add(abandoned)
+
+    run = await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
+
+    assert run.id != abandoned.id, "the abandoned first walk was resumed"
+    assert fixture.adapter.resumed_from == [0]
+    assert run.status is SyncRunStatus.COMPLETED
+    assert run.items_matched == 1, "the fresh walk merged nothing: it kept the old position"
+    closed = await fixture.runs.get(abandoned.id)
+    assert closed is not None
+    assert (closed.status, closed.error) == (
+        SyncRunStatus.FAILED,
+        "superseded: a first watch walk restarts",
+    )
+    assert closed.finished_at is not None
+
+
+async def test_a_first_walk_that_already_failed_keeps_its_own_error(fixture: _Fixture) -> None:
+    """Closed already, so it is not relabelled: its error says why that walk failed."""
+    failed = SyncRun(
+        source_id=fixture.source.id,
+        kind=SyncRunKind.WATCH_STATE,
+        status=SyncRunStatus.FAILED,
+        position=40,
+        error="GET /Users/{user_id}/Items returned HTTP 502",
+        started_at=T0,
+        finished_at=T0,
+    )
+    await fixture.runs.add(failed)
+
+    run = await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
+
+    assert run.id != failed.id, "the failed first walk was resumed"
+    assert fixture.adapter.resumed_from == [0]
+    stored = await fixture.runs.get(failed.id)
+    assert stored is not None
+    assert stored.error == "GET /Users/{user_id}/Items returned HTTP 502"

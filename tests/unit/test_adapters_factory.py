@@ -11,6 +11,7 @@ from pydantic import SecretStr
 from usher.adapters.emby.adapter import EmbyAdapter
 from usher.adapters.factory import ConfiguredSourceAdapterFactory
 from usher.adapters.http import SourceGateRegistry
+from usher.config import Settings
 from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
 from usher.domain.source import Source
@@ -82,6 +83,23 @@ async def test_the_deployment_tuning_reaches_the_adapter() -> None:
         # leave an operator who widened the staleness window still reconnecting at 90 s.
         assert adapter._health.stale_after == 11.5
         assert adapter._push_poll_seconds == 0.75
+    finally:
+        await adapter.aclose()
+
+
+async def test_an_unconfigured_factory_pages_at_the_settings_default() -> None:
+    """A factory nobody configured must build what `USHER_SOURCE_PAGE_SIZE`'s default builds.
+
+    The composition root always passes the setting, so this default is read only by a
+    factory constructed directly, and no other case here both leaves it alone and reads it.
+    """
+    adapter = ConfiguredSourceAdapterFactory().build(SOURCE, CREDENTIALS)
+    try:
+        assert isinstance(adapter, EmbyAdapter)
+        assert adapter._page_size == Settings.model_fields["source_page_size"].default == 1000, (
+            "an unconfigured factory pages differently from USHER_SOURCE_PAGE_SIZE's default, "
+            "or that default is no longer 1,000"
+        )
     finally:
         await adapter.aclose()
 

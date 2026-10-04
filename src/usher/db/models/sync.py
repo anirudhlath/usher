@@ -30,8 +30,8 @@ class SyncRunRow(Base):
     A history, not a checkpoint -- contrast `ImportRunRow`, one row per dataset.
 
     **`position` half-excepts that**, and only for the `watch_state` kind: such
-    a run reuses its own row across attempts and advances `position` per
-    committed batch, so while the walk is unfinished its row is read back as a
+    a run advances `position` per committed batch, and a delta reuses its own
+    row across attempts, so while it is unfinished its row is read back as a
     checkpoint. The table is still a history -- one row per *walk* rather than
     one per attempt at it -- and the other kinds leave the column at 0 and
     restart from `cursor_at`.

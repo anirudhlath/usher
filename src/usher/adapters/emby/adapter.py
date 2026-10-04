@@ -3,8 +3,8 @@
 import asyncio
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from contextlib import AbstractAsyncContextManager
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import AbstractAsyncContextManager, aclosing
 from typing import Any
 from urllib.parse import quote
 
@@ -19,6 +19,7 @@ from usher.adapters.emby.mapping import (
     to_source_item,
     to_watch_state,
 )
+from usher.adapters.emby.paging import OffsetWindow
 from usher.adapters.emby.playback import build_stream_targets
 from usher.adapters.emby.push import (
     DEFAULT_POLL_SECONDS,
@@ -73,6 +74,10 @@ ITEM_FIELDS = (
 LIBRARY_SINCE_PARAM = "MinDateLastSaved"
 USER_DATA_SINCE_PARAM = "MinDateLastSavedForUser"
 
+# A first watch walk asks only for what the account has watched: played items,
+# then items holding a resume position. The two overlap.
+FIRST_WALK_FILTERS = ("IsPlayed", "IsResumable")
+
 # Two keys, because `StartIndex` paging reads a window out of an order the
 # server recomputes for every request and `DateCreated` alone is not a total
 # order. Emby does apply the second key.
@@ -87,10 +92,17 @@ USER_PATH = "/Users"
 # The walk's dead-man's switch.
 MAX_PAGES = 10_000
 
-# The waits between attempts at one page of a walk: six attempts over about eight
-# minutes. A full walk of a large library takes hours and a failed item walk restarts
-# from the top, so riding out a server restart on the page it hit is the cheap side.
+# The waits between attempts at one page of a walk: about eight minutes of waits
+# across six attempts. A full walk of a large library takes hours and a failed item
+# walk restarts from the top, so riding out a server restart on the page it hit is the
+# cheap side.
 PAGE_RETRY_WAITS = (15.0, 30.0, 60.0, 120.0, 240.0)
+
+# A listing page may read for this long, or for the client's budget if that is longer;
+# every other request keeps the client's. A timed-out request does not stop the
+# server's query, so asking again early only adds a second copy of the slowest query
+# there is.
+LISTING_READ_SECONDS = 120.0
 
 
 def _segment(value: str) -> str:
@@ -108,9 +120,50 @@ def _segment(value: str) -> str:
     return quote(value, safe="")
 
 
+async def _settle(task: asyncio.Task[Any]) -> None:
+    """Cancel a read-ahead the walk no longer wants, and retrieve what it raised.
+
+    Waited on rather than awaited, so its failure is never raised over whatever is
+    ending the walk, and the caller's own cancellation still propagates. Retrieved
+    by a callback, because asyncio reports an exception nobody read as lost, and
+    the caller may be cancelled before the read-ahead finishes.
+    """
+    task.add_done_callback(_retrieve)
+    task.cancel()
+    await asyncio.wait({task})
+
+
+def _retrieve(task: asyncio.Task[Any]) -> None:
+    if not task.cancelled():
+        task.exception()
+
+
 def _version_of(body: Mapping[str, Any]) -> str | None:
     version = body.get("Version")
     return version if isinstance(version, str) and version else None
+
+
+def _listed_state(payload: dict[str, Any], user_id: str) -> SourceWatchState | None:
+    # play_history_is_trustworthy=False: this is the listing route.
+    return to_watch_state(payload, source_user_id=user_id, play_history_is_trustworthy=False)
+
+
+def _listing_query(
+    since_param: str, since: AwareDatetime | None, *, filters: str | None = None
+) -> dict[str, str]:
+    """A listing's parameters, less the paging `_walk` adds to each request."""
+    query = {
+        "Recursive": "true",
+        "IncludeItemTypes": ITEM_TYPES,
+        "Fields": ITEM_FIELDS,
+        "SortBy": SORT_BY,
+        "SortOrder": "Ascending",
+    }
+    if since is not None:
+        query[since_param] = emby_datetime(since)
+    if filters is not None:
+        query["Filters"] = filters
+    return query
 
 
 class EmbyAdapter(SourceAdapter):
@@ -120,7 +173,7 @@ class EmbyAdapter(SourceAdapter):
         credentials: SourceCredentials,
         *,
         client: httpx.AsyncClient | None = None,
-        page_size: int = 200,
+        page_size: int = 1000,
         max_pages: int = MAX_PAGES,
         timeout_seconds: float = 30.0,
         reauth_cooldown_seconds: float = 60.0,
@@ -263,56 +316,66 @@ class EmbyAdapter(SourceAdapter):
         return value if isinstance(value, bool) else None
 
     async def _walk(
-        self, *, since_param: str, since: AwareDatetime | None, start_index: int
-    ) -> AsyncIterator[dict[str, Any]]:
-        user_id = await self._session.user_id()
-        # The resume point (#41). Deliberately no default: every
-        # caller states its own, so `list_items` passing 0 is written down
-        # rather than inferred from an absent keyword. The item lanes restart
-        # from their cursor; the watch lane's first walk is the whole library
-        # and has to survive a transient failure.
-        start = start_index
-        # `for`, not `while True`: the bound is then part of the loop rather
-        # than a counter alongside it, and the raise below cannot be reached
-        # by any path that should have returned.
-        for _ in range(self._max_pages):
-            params = {
-                "Recursive": "true",
-                "IncludeItemTypes": ITEM_TYPES,
-                "Fields": ITEM_FIELDS,
-                "SortBy": SORT_BY,
-                "SortOrder": "Ascending",
-                "StartIndex": str(start),
-                "Limit": str(self._page_size),
-                "EnableTotalRecordCount": "true",
-            }
-            if since is not None:
-                params[since_param] = emby_datetime(since)
-            body = await self._page(f"/Users/{_segment(user_id)}/Items", params, start)
-            items = body.get("Items")
-            if not isinstance(items, list):
-                # Not a truncation: a caller must be able to tell "the
-                # library ended" from "that was not a listing at all".
-                raise PortDataMalformed(
-                    "Emby's item listing carried no Items array",
-                    detail=f"StartIndex={start}",
-                )
-            if not items:
-                return
-            for payload in items:
-                if isinstance(payload, dict):
+        self, query: Mapping[str, str], *, start_index: int
+    ) -> AsyncGenerator[dict[str, Any]]:
+        """Page one listing to its end, one request ahead of the consumer.
+
+        The next page is asked for as soon as a page arrives and before its items
+        are yielded, so the source answers while the caller writes; the request
+        outstanding when the consumer stops is cancelled. `start_index` is the
+        resume point (#41), never defaulted: every caller states its own.
+        """
+        path = f"/Users/{_segment(await self._session.user_id())}/Items"
+        window = OffsetWindow(limit=self._page_size, start=start_index)
+        pending = self._read(path, query, window.start, count=True)
+        try:
+            # `for`, not `while True`: the bound is part of the loop, and the raise
+            # below is reachable only by a walk that never ended.
+            for number in range(1, self._max_pages + 1):
+                body = await pending
+                entries = body.get("Items")
+                if not isinstance(entries, list):
+                    # Not a truncation: a caller must be able to tell "the library
+                    # ended" from "that was not a listing at all".
+                    raise PortDataMalformed(
+                        "Emby's item listing carried no Items array",
+                        detail=f"StartIndex={window.start}",
+                    )
+                page = window.receive(entries, body.get("TotalRecordCount"))
+                if page.shifted:
+                    logger.warning(
+                        "{source}'s listing shifted by at least {overlap} items before "
+                        "StartIndex={start}; an item shifted further was not read, and the "
+                        "next full walk reads it",
+                        source=self._source.name,
+                        overlap=window.overlap,
+                        start=window.start,
+                    )
+                if not page.ended and number < self._max_pages:
+                    pending = self._read(path, query, window.advance(), count=False)
+                for payload in page.fresh:
                     yield payload
-            start += len(items)
-            total = body.get("TotalRecordCount")
-            # `total > 0`, not `total >= 0`: a server that omits the count
-            # (or reports zero while returning items) must not stop the walk
-            # at page one.
-            if isinstance(total, int) and total > 0 and start >= total:
-                return
+                if page.ended:
+                    return
+        finally:
+            await _settle(pending)
         raise PortDataMalformed(
-            "Emby's item listing never ended; the server appears to ignore StartIndex",
-            detail=f"gave up after {self._max_pages} pages at StartIndex={start}",
+            "Emby's item listing never ended; the server appears to ignore StartIndex "
+            "or to cap Limit far below the page size",
+            detail=f"gave up after {self._max_pages} pages at StartIndex={window.start}",
         )
+
+    def _read(
+        self, path: str, query: Mapping[str, str], start: int, *, count: bool
+    ) -> asyncio.Task[dict[str, Any]]:
+        """One page's request, started now and awaited when the walk reaches it."""
+        params = {
+            **query,
+            "StartIndex": str(start),
+            "Limit": str(self._page_size),
+            "EnableTotalRecordCount": "true" if count else "false",
+        }
+        return asyncio.create_task(self._page(path, params, start))
 
     async def _page(self, path: str, params: Mapping[str, str], start: int) -> dict[str, Any]:
         """One page of a walk, asked for again while its failure is one a wait can fix.
@@ -331,7 +394,9 @@ class EmbyAdapter(SourceAdapter):
         while True:
             attempt += 1
             try:
-                return await self._session.json_body("GET", path, params=params, op="list")
+                return await self._session.json_body(
+                    "GET", path, params=params, op="list", read_timeout=LISTING_READ_SECONDS
+                )
             except RequestRefused:
                 raise
             except (PortUnavailable, PortRateLimited) as exc:
@@ -365,12 +430,14 @@ class EmbyAdapter(SourceAdapter):
     async def _list_items(self, since: AwareDatetime | None) -> AsyncIterator[SourceItem]:
         # `start_index=0` always: the item lanes have a working `since`
         # cursor, so a failed walk restarts from it rather than resuming.
-        async for payload in self._walk(
-            since_param=LIBRARY_SINCE_PARAM, since=since, start_index=0
-        ):
-            item = to_source_item(payload)
-            if item is not None:
-                yield item
+        query = _listing_query(LIBRARY_SINCE_PARAM, since)
+        # `aclosing`, so a consumer that stops closes the walk now, read-ahead
+        # included, rather than whenever the generator is collected.
+        async with aclosing(self._walk(query, start_index=0)) as payloads:
+            async for payload in payloads:
+                item = to_source_item(payload)
+                if item is not None:
+                    yield item
 
     async def _fetch(self, external_id: str, *, op: str = "get_item") -> dict[str, Any] | None:
         """One item's payload, or `None` for a 404.
@@ -425,22 +492,55 @@ class EmbyAdapter(SourceAdapter):
     def watch_state(
         self, since: AwareDatetime | None = None, *, start_index: int = 0
     ) -> AsyncIterator[SourceWatchState]:
-        """Walk this user's watch state."""
+        """A delta since `since`; with none, the account's played and in-progress items."""
         return self._watch_state(since, start_index)
 
     async def _watch_state(
         self, since: AwareDatetime | None, start_index: int
     ) -> AsyncIterator[SourceWatchState]:
         user_id = await self._session.user_id()
-        async for payload in self._walk(
-            since_param=USER_DATA_SINCE_PARAM, since=since, start_index=start_index
-        ):
-            # play_history_is_trustworthy=False: this is the listing route.
-            state = to_watch_state(
-                payload, source_user_id=user_id, play_history_is_trustworthy=False
-            )
-            if state is not None:
-                yield state
+        if since is not None:
+            query = _listing_query(USER_DATA_SINCE_PARAM, since)
+            async with aclosing(self._walk(query, start_index=start_index)) as payloads:
+                async for payload in payloads:
+                    state = _listed_state(payload, user_id)
+                    if state is not None:
+                        yield state
+            return
+        # A resumed first walk starts its first listing at `start_index` and its
+        # second at 0. `WatchStateSyncService` never resumes one -- it starts
+        # again -- so this only keeps the port's promise.
+        yielded: set[str] = set()
+        for number, filters in enumerate(FIRST_WALK_FILTERS):
+            query = _listing_query(USER_DATA_SINCE_PARAM, None, filters=filters)
+            unwatched = watched = 0
+            walk = self._walk(query, start_index=start_index if number == 0 else 0)
+            async with aclosing(walk) as payloads:
+                async for payload in payloads:
+                    state = _listed_state(payload, user_id)
+                    if state is None or state.external_id in yielded:
+                        continue
+                    if not state.played and state.position_seconds <= 0:
+                        unwatched += 1
+                        continue
+                    yielded.add(state.external_id)
+                    watched += 1
+                    yield state
+            if number == 0 and unwatched > watched:
+                # Unwatched entries strictly outnumbering watched ones mean the server
+                # ignored `Filters` and listed everything, resume positions included, so
+                # a second walk would only repeat it. A tie or an empty listing goes on:
+                # a Series marked played that has since gained an episode may match
+                # `IsPlayed` and still read unwatched.
+                logger.warning(
+                    "{source} appears to ignore Filters: its first watch walk's played "
+                    "listing was mostly unwatched ({unwatched} unwatched skipped, {watched} "
+                    "watched yielded), so the walk did not ask for the in-progress listing",
+                    source=self._source.name,
+                    unwatched=unwatched,
+                    watched=watched,
+                )
+                return
 
     async def get_watch_state(self, external_id: str) -> SourceWatchState | None:
         """Authoritative watch state, from the route carrying the play history.

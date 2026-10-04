@@ -406,7 +406,7 @@ async def test_a_large_event_defers_to_a_delta_instead_of_a_request_per_item(
 
     A request per changed item on a lane budgeted at one connection per source
     is not slow, it is a design defect -- and a delta walk is one paged request
-    per 200 items under `MinDateLastSaved`.
+    per `USHER_SOURCE_PAGE_SIZE` items under `MinDateLastSaved`.
     """
     many = tuple(f"item-{index}" for index in range(60))
     outcome = await fixture.apply(SourceEvent(kind=SourceEventKind.ITEM_ADDED, external_ids=many))
@@ -1118,7 +1118,7 @@ async def test_a_refused_merge_leaves_the_cached_screen_alone(fixture: _Fixture)
 
 
 async def test_the_nightly_walk_invalidates_nothing(fixture: _Fixture) -> None:
-    """A nightly walk merges the whole library, so it must not invalidate per row.
+    """A nightly walk merges states in bulk, so it must not invalidate per row.
 
     The walk's changes reach the screen through the 30 s screen TTL and a
     demand read instead. Kills an `invalidate` call added to
@@ -1183,7 +1183,7 @@ async def test_a_pushed_watch_state_publishes_row_invalidated_for_the_rows_it_mo
 
 
 async def test_the_nightly_walk_publishes_no_row_invalidated(fixture: _Fixture) -> None:
-    """A nightly walk merges the whole library, so it must not publish per row.
+    """A nightly walk merges states in bulk, so it must not publish per row.
 
     One `row.invalidated` per merged row is a fan-out per row per night to every
     connected client *and* a thundering herd of refetches at 04:00. Kills a
