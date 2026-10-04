@@ -7245,10 +7245,10 @@ RAISE_AFTER = 10
 class ListingLimit:
     """The cap on listing requests in flight, shared by every walker and read-ahead.
 
-    It starts at its ceiling. A failure that will be asked again drops it to one,
-    and each run of `RAISE_AFTER` successes in a row raises it by one, back up to
-    the ceiling. A page waiting for a slot holds no request; a raise lets a
-    waiter in at once, without anyone leaving.
+    It starts at its ceiling. An outage or a 429 drops it to one, and each run of
+    `RAISE_AFTER` successes in a row raises it by one, back up to the ceiling. A
+    page waiting for a slot holds no request; a raise lets a waiter in at once,
+    without anyone leaving.
     """
 
     def __init__(self, ceiling: int, *, source: str) -> None:
@@ -7279,7 +7279,7 @@ class ListingLimit:
             self._wake.set()
 
     def failed(self) -> None:
-        """A request failed in a way that is asked again: one at a time from here."""
+        """A request failed as an outage or a 429: one at a time from here."""
         self._limit = 1
         self._streak = 0
         _concurrency.set(self._limit, self._labels)
@@ -7620,9 +7620,9 @@ Expected: FAIL —
 `.env.example`, after `USHER_SYNC_MAX_RETRACT_FRACTION=0.25`:
 
 ```
-# The most listing requests one walk has in flight to a source. A failure that is
-# asked again drops it to one, and each ten pages that succeed raise it a step,
-# back to this. 1 is one request at a time.
+# The most listing requests one walk has in flight to a source. An outage or a
+# 429 drops it to one, and each ten pages that succeed raise it a step, back to
+# this. 1 is one request at a time.
 USHER_SYNC_WALKERS=4
 ```
 
@@ -7634,7 +7634,7 @@ USHER_SYNC_WALKERS=4
     group: 'ingest',
     def: '4',
     about:
-      'The most listing requests one walk has in flight to a source. A failure that is asked again drops it to one, and each ten pages that succeed raise it a step, back to this. 1 is one request at a time. Against a real Emby at the default gate, four walkers read 0.37 pages/s and two read 0.34.',
+      'The most listing requests one walk has in flight to a source. An outage or a 429 drops it to one, and each ten pages that succeed raise it a step, back to this. 1 is one request at a time. Against a real Emby at the default gate, four walkers read 0.37 pages/s and two read 0.34.',
     secret: false,
     measured: true,
   },
@@ -7659,10 +7659,10 @@ at a time.
 
 ```markdown
 - **At most `USHER_SYNC_WALKERS` listing requests are in flight** (default
-  **4**), the read-ahead included. A failure that is asked again drops that to
-  one, and each run of ten pages that succeed raises it by one, back up to the
-  setting. A page waiting for its turn, or waiting to ask again, holds no
-  request.
+  **4**), the read-ahead included. A page that fails as unreachable or with a
+  429 drops that to one, and each run of ten pages that succeed raises it by
+  one, back up to the setting. A page waiting for its turn, or waiting to ask
+  again, holds no request.
 ```
 
 `docs/prd/08-operations.md`, "Configuration", a paragraph before `Two things are **not** settings:`:
@@ -7693,7 +7693,7 @@ series.
 
 ```markdown
 - Listing requests to a source are capped at `USHER_SYNC_WALKERS` (default 4)
-  and back off on their own: a failure that is asked again drops the cap to one,
+  and back off on their own: an outage or a 429 drops the cap to one,
   and every ten pages that succeed raise it by one. The gauge
   `usher.source.listing.concurrency` shows the cap.
 ```
@@ -7716,7 +7716,7 @@ Expected: PASS.
 6. `_concurrency.set(...)` removed from `failed()`. Expect the gauge case to fail, its second reading `[]`: the last-value aggregation resets on every collect, so a gauge nobody set since reads nothing.
 7. `_concurrency.set(ceiling, self._labels)` added to `__init__`. Expect the gauge case to fail on `no page yet, so no reading`.
 8. `_page`'s request sent without `async with self._listing_limit.slot():`. Expect all three `cap` parametrisations to fail on `5 == cap`.
-9. `_page` without `self._listing_limit.failed()`. Expect `test_a_retried_failure_lets_pages_in_one_at_a_time_until_ten_succeed` to fail on `{1, 2} == {1}`.
+9. `_page` without `self._listing_limit.failed()`. Expect `test_a_retried_failure_lets_pages_in_one_at_a_time_until_ten_succeed` to fail on `{2} == {1}`: `_Waits.sleep` never yields, so every page in the window finds the other walker in flight.
 10. `_page` without `self._listing_limit.succeeded()`. Expect the same case to fail on its last line: the cap never climbs back.
 11. The slot moved to wrap the whole `while True:` loop, so it is held through the wait. Expect `test_a_page_waiting_to_ask_again_holds_no_slot` to fail on `set() == {more}`.
 12. The factory's `build` without `listing_concurrency=`. Expect `test_the_deployment_tuning_reaches_the_adapter` to fail on `4 == 3`.
@@ -8801,16 +8801,16 @@ Run the Step 8 command. Expected: PASS.
 
 ```
 # How many units a whole-library walk fetches at once, and the most listing
-# requests it has in flight to a source. A failure that is asked again drops the
-# requests to one, and each ten pages that succeed raise them a step, back to
-# this. 1 is one request at a time.
+# requests it has in flight to a source. An outage or a 429 drops the requests to
+# one, and each ten pages that succeed raise them a step, back to this. 1 is one
+# request at a time.
 USHER_SYNC_WALKERS=4
 # A whole-library walk reads a library's episodes in chunks of this many items,
 # several at once.
 USHER_SYNC_UNIT_MAX_ITEMS=100000
 ```
 
-`web/src/features/operator/Config.settings.ts` — `USHER_SYNC_BATCH_SIZE`'s `about` becomes `'Items per committed batch during a sync walk. A whole-library walk commits whole pages, so its batches can run past this by less than a page.'`. `USHER_SYNC_WALKERS`'s `about` replaces its first three sentences with `How many units a whole-library walk fetches at once, and the most listing requests it has in flight to a source. A failure that is asked again drops the requests to one, and each ten pages that succeed raise them a step, back to this. 1 is one request at a time.`, keeping Task 15's closing sentence of readings. After that entry, with the readings from the fixtures README's "Pages inside one library" row (Task 10):
+`web/src/features/operator/Config.settings.ts` — `USHER_SYNC_BATCH_SIZE`'s `about` becomes `'Items per committed batch during a sync walk. A whole-library walk commits whole pages, so its batches can run past this by less than a page.'`. `USHER_SYNC_WALKERS`'s `about` replaces its first three sentences with `How many units a whole-library walk fetches at once, and the most listing requests it has in flight to a source. An outage or a 429 drops the requests to one, and each ten pages that succeed raise them a step, back to this. 1 is one request at a time.`, keeping Task 15's closing sentence of readings. After that entry, with the readings from the fixtures README's "Pages inside one library" row (Task 10):
 
 ```ts
   {
@@ -11588,7 +11588,7 @@ Write `/var/tmp/ffs-panel-11.json`:
   "id": 11,
   "type": "timeseries",
   "title": "Whole-library walks — listing limit and mean unit duration",
-  "description": "usher.source.listing.concurrency, as usher_source_listing_concurrency_ratio, labelled source: the cap the listing limiter holds now. It reads USHER_SYNC_WALKERS while pages succeed, drops to 1 when a page has to be asked again, and climbs back a step for every ten pages in a row that succeed, so a sawtooth is the backoff working. A line held at 1 means pages keep needing another try, or USHER_SYNC_WALKERS is 1.\n\nusher.sync.unit.duration, as usher_sync_unit_duration_seconds, labelled source and stage: the seconds from a walker's claim of a unit to that unit's last commit, recorded once for each unit that completes. A unit that fails records nothing. **It is plotted as a mean, not a quantile**: the histogram declares no bucket boundaries, so it has the SDK's second-scale defaults, and a quantile over those is not a measurement.\n\n⚠️ **Both series exist only in a process that has walked a source.** The gauge is first written by a listing page and the histogram by a unit's completion, so a quiet server shows no series rather than a zero.",
+  "description": "usher.source.listing.concurrency, as usher_source_listing_concurrency_ratio, labelled source: the cap the listing limiter holds now. It reads USHER_SYNC_WALKERS while pages succeed, drops to 1 on an outage or a 429, and climbs back a step for every ten pages in a row that succeed, so a sawtooth is the backoff working. A line held at 1 means pages keep needing another try, or USHER_SYNC_WALKERS is 1.\n\nusher.sync.unit.duration, as usher_sync_unit_duration_seconds, labelled source and stage: the seconds from a walker's claim of a unit to that unit's last commit, recorded once for each unit that completes. A unit that fails records nothing. **It is plotted as a mean, not a quantile**: the histogram declares no bucket boundaries, so it has the SDK's second-scale defaults, and a quantile over those is not a measurement.\n\n⚠️ **Both series exist only in a process that has walked a source.** The gauge is first written by a listing page and the histogram by a unit's completion, so a quiet server shows no series rather than a zero.",
   "datasource": {"type": "prometheus", "uid": "usher-prometheus"},
   "gridPos": {"h": 8, "w": 24, "x": 0, "y": 32},
   "options": {
