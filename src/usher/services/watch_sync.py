@@ -88,9 +88,9 @@ class _Progress:
     That checkpoint carries `position` too, and regressing *that* is not merely
     a wrong number on a dashboard. `items_seen` reading 0 where the walk merged
     thousands of states is a misreport an operator can discount; `position`
-    reading 0 is an instruction, and the next attempt obeys it by walking the
-    library from page one. So the handler below evolves `progress.run`, or the
-    resume is a restart wearing a checkpoint's name.
+    reading 0 is an instruction, and the next attempt obeys it by starting over
+    from page one. So the handler below evolves `progress.run`, or the resume is
+    a restart wearing a checkpoint's name.
     """
 
     __slots__ = ("run",)
@@ -328,8 +328,8 @@ class WatchStateSyncService:
 
         Does not commit.
         """
-        # One resolve for the batch, never one per state: `watch_state()` yields
-        # one record per item, and a household has one item per file.
+        # One resolve for the batch, never one per state: a first walk yields one
+        # record per item the account has watched, and a delta one per change.
         targets = await self._media_items.resolve_targets(
             source_id, [state.external_id for state in states]
         )

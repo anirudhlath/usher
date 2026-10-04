@@ -281,8 +281,8 @@ class _RecordingWatchSync(WatchStateSyncService):
     """The other half of `_close_gap`, recorded on the same terms.
 
     Without it "the gap-closer *returned*" is unstated: a refusal spelled as
-    an early exit from the item lane alone still walks `watch_state()`, which
-    is the same unbounded upstream walk one method over.
+    an early exit from the item lane alone still walks `watch_state()` -- two
+    filtered listings or a delta, an upstream walk all the same, one method over.
     """
 
     def __init__(

@@ -23,6 +23,9 @@ Versioning is `0.x` while the wire contract may still move —
   again early only queued a second copy of the slowest query. At the defaults,
   a source that accepts connections and then stalls now holds a walk about 20
   minutes before it fails, where it was about 11.
+- **A source's first watch-state walk asks only for what was watched.** It lists
+  played items, then in-progress ones: a few requests, where it used to walk the
+  whole library, which on a million-item library took most of a day.
 - **`USHER_PUSH_STALE_AFTER_SECONDS` defaults to 300, up from 90.** An idle
   library's push channel routinely went longer than 90 s between messages, and
   every such gap cost a reconnect. `usher push --probe` listens for one window,

@@ -146,13 +146,12 @@ class PushApplyService:
     async def _invalidate_rows(self, user_id: uuid.UUID) -> None:
         """Drop this household's watch-state rows, and say which to refetch.
 
-        The nightly walk merges the whole library's states and invalidates
-        *nothing*: one invalidation per merged row is the fan-out per row per
-        night that PRD 07 already refuses for `watchstate.updated`, and the
-        walk's changes reach the screen through the 30 s screen TTL and a demand
-        read -- a walk that finishes at 04:00 is on the screen by 04:00:30. Here
-        the unit is one pushed event, whose slug set is `WATCH_STATE_ROWS` and is
-        fixed.
+        The nightly walk merges states in bulk and invalidates *nothing*: one
+        invalidation per merged row is the fan-out per row per night that PRD 07
+        already refuses for `watchstate.updated`, and the walk's changes reach
+        the screen through the 30 s screen TTL and a demand read -- a walk that
+        finishes at 04:00 is on the screen by 04:00:30. Here the unit is one
+        pushed event, whose slug set is `WATCH_STATE_ROWS` and is fixed.
 
         Guarded on `rows_written` for the reason the publish beside it is: a
         merge refused by "latest `updated_at` wins" is the source echoing back a

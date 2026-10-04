@@ -823,3 +823,52 @@ async def test_a_capped_limit_serves_fewer_than_were_asked_for(driver: _Driver) 
     )
     assert len(body["Items"]) == 2
     assert body["TotalRecordCount"] == 3
+
+
+# --- Filters ---------------------------------------------------------------
+
+
+def _given_watched(driver: _Driver) -> None:
+    """Four items: played, in progress, both, and untouched."""
+    for name, state in (
+        ("played", (0, True)),
+        ("resuming", (640, False)),
+        ("both", (90, True)),
+        ("untouched", None),
+    ):
+        driver.server.add_item(replace(MOVIE, external_id=name, name=name), T0)
+        if state is not None:
+            position, played = state
+            driver.server.set_watch_state(
+                SourceWatchState(external_id=name, position_seconds=position, played=played)
+            )
+
+
+async def _filtered(driver: _Driver, filters: str, **paging: str) -> dict[str, Any]:
+    # A page wide enough for every item unless a case cuts one, because the fake's
+    # default page of two ends an unfiltered listing at exactly the two played items.
+    params = {"Recursive": "true", "Filters": filters, "SortBy": "SortName", "Limit": "10"}
+    return await driver.session.json_body(
+        "GET", f"/Users/{USER_ID}/Items", params=params | paging, op="list"
+    )
+
+
+async def test_a_played_filter_lists_only_played_items(driver: _Driver) -> None:
+    _given_watched(driver)
+    body = await _filtered(driver, "IsPlayed")
+    assert [entry["Id"] for entry in body["Items"]] == ["both", "played"]
+
+
+async def test_a_resumable_filter_lists_every_item_with_a_position_played_or_not(
+    driver: _Driver,
+) -> None:
+    _given_watched(driver)
+    body = await _filtered(driver, "IsResumable")
+    assert [entry["Id"] for entry in body["Items"]] == ["both", "resuming"]
+
+
+async def test_a_filter_applies_before_the_page_is_cut(driver: _Driver) -> None:
+    _given_watched(driver)
+    body = await _filtered(driver, "IsPlayed", StartIndex="1", Limit="1")
+    assert [entry["Id"] for entry in body["Items"]] == ["played"]
+    assert body["TotalRecordCount"] == 2

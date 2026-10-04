@@ -199,7 +199,7 @@ class WatchStateRepositoryContract:
 
         Over-correcting the two cases above into "play_count is never written from
         a merge" makes a reset impossible to propagate -- the same correctness bug
-        as filtering all-zero states out of a walk.
+        as filtering all-zero states out of a delta walk.
         """
         await repository.merge_from_source(
             [merge(user_id, title_id, played=True, play_count=7, last_played_at=LAST_PLAYED)]
@@ -769,11 +769,11 @@ class WatchStateRepositoryInProgressContract:
         """`NOT played AND position_seconds > 0`, both halves.
 
         A state at `position_seconds = 0` and `played = false` is a title the
-        source knows about and nobody has started -- which on a full walk is
-        most of the library. The wrong implementation this kills is
-        `WHERE NOT played` alone, which returns the household's entire
-        unwatched catalog in physical order and satisfies every
-        `len(rows) > 0` assertion anyone will ever write about it.
+        source knows about and nobody has started -- a delta writes one for
+        every reset it reports. The wrong implementation this kills is
+        `WHERE NOT played` alone, which returns those rows too, in physical
+        order, and satisfies every `len(rows) > 0` assertion anyone will ever
+        write about it.
         """
         await _seed_progress(repository, user_id, title_id, last_played_at=LAST_PLAYED)
         await _seed_progress(

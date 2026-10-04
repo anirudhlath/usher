@@ -531,8 +531,8 @@ async def test_watch_state_survives_a_walk_that_cannot_report_history(
 ) -> None:
     """A backfilled play count survives a later walk that cannot report history.
 
-    A backfill records `play_count = 7`; a full nightly watch-state walk then runs
-    over the same item, through the real `EmbyAdapter` against a `FakeEmbyServer`
+    A backfill records `play_count = 7`; the source's first watch-state walk then lists
+    the same item as played, through the real `EmbyAdapter` against a `FakeEmbyServer`
     whose *listing* omits play history exactly as Emby does, and the count is still 7
     afterwards. Six layers can each break this on their own -- the adapter's mapper,
     the port DTO's `int | None`, `WatchStateSyncService._merge_for`, the
@@ -670,9 +670,10 @@ async def test_an_episodes_watch_state_lands_on_the_episode_not_the_series(
         positions.append(stored.position_seconds)
     assert sorted(positions) == [120, 240], "two episodes, two rows, not one merged row"
 
-    # The series item yields a state of its own (Emby reports one for every
-    # item), and it must be a *separate* row: collapsing an episode onto its
-    # series' `title_id` would merge a whole show's positions into this one.
+    # The series item holds no state, so this first walk lists nothing for it,
+    # and a row for it must never carry an episode's position: collapsing an
+    # episode onto its series' `title_id` would merge a whole show's positions
+    # into this one.
     series = await media_items.get_by_external_id(source.id, "series-1")
     assert series is not None and series.title_id is not None
     series_state = await watch_states.get_for_title(user_id, series.title_id)

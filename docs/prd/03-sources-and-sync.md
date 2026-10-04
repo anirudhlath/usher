@@ -194,9 +194,11 @@ with its own cursor.
 **The watch lane is resumable.** A run checkpoints its position on
 `sync_runs.position`, and the next attempt reclaims that same row and resumes
 there, so a failure that outlasts a page's retries costs the page in flight
-rather than the whole walk. 🔶 Until a source has completed one `watch_state` run, its watch lane has
-no cursor and its next run walks the whole library; nothing schedules that
-first walk.
+rather than the whole walk.
+**Until a source has completed one `watch_state` run, its watch lane has no
+cursor**, and its next run asks the source only for what the account has played
+or holds a resume position in — two filtered listings, a few requests on most
+libraries — and merges nothing else. Nothing schedules that first walk.
 
 **Each batch is committed with the run's counters**, and a `sync_runs` row an
 operator can watch exists before the walk starts rather than after it finishes.

@@ -399,7 +399,7 @@ def test_source_watch_state_still_carries_a_reported_zero() -> None:
 
     Over-correcting into "play_count is never reported" would make a reset
     impossible to propagate -- the same correctness bug as filtering all-zero
-    states out of a walk.
+    states out of a delta walk.
     """
     state = SourceWatchState(external_id="movie-1", position_seconds=0, played=False, play_count=0)
     assert state.play_count == 0

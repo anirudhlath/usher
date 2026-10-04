@@ -13,7 +13,6 @@ paths:
 
 # Emby, the push lane, and the ingest pipeline
 
-Rules for this subsystem; the docstrings named below hold the detail.
 `ReconcileService` walks the source → `IngestService` writes `media_items` →
 `MatchService` runs the ladder → `WatchStateSyncService` merges watch state.
 Beside it `EmbyPushChannel` → `PushSupervisor` → `PushApplyService` run the
@@ -64,8 +63,7 @@ says nothing about a source left out of step by a parked write-back.
   whole contract suite passed against a write-back that had never worked.
 - **That body must name `Played` even when `Played` is not what is changing** —
   it takes the DTO default and a position-only body unplays a played item.
-  (`PlayCount` and `LastPlayedDate` survive the same omission; `Played` does
-  not.)
+  (`PlayCount` and `LastPlayedDate` survive the same omission.)
 - **`DELETE /Users/{user}/PlayedItems/{item}` is destructive beyond its name**:
   it resets `PlayCount`, clears `LastPlayedDate` *and* a non-zero resume
   position, so report unplayed through `UserData` instead. `POST` to it *is* how
@@ -123,10 +121,12 @@ and **a DELTA with no completed item-lane run has no `since`, so
 `cursored`, closing a gap only when a completed walk gives it a `since` (#9).
 ⚠️ **The bound is a refusal rather than a cap on purpose**: a truncated walk
 records `COMPLETED`, so everything it never reached is skipped by every later
-delta, permanently. ⚠️ **And that guard reads the item lane's cursor only, while
-`_close_gap` also runs `watch.sync(...)`** (#41): a source with completed delta
-runs and no completed `watch_state` run passes it, then walks the whole library
-on the watch half for ~11 hours, and **neither log line names it**.
+delta, permanently.
+⚠️ **And that guard reads the item lane's cursor only, while `_close_gap` also
+runs `watch.sync(...)`** (#41): a source with completed delta runs and no
+completed `watch_state` run passes it and runs the watch lane's first walk —
+two filtered listings (`IsPlayed`, then `IsResumable`, which overlap) — and
+**neither log line names it**.
 
 ## The match ladder
 

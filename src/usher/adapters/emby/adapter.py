@@ -74,6 +74,10 @@ ITEM_FIELDS = (
 LIBRARY_SINCE_PARAM = "MinDateLastSaved"
 USER_DATA_SINCE_PARAM = "MinDateLastSavedForUser"
 
+# A first watch walk asks only for what the account has watched: played items,
+# then items holding a resume position. The two overlap.
+FIRST_WALK_FILTERS = ("IsPlayed", "IsResumable")
+
 # Two keys, because `StartIndex` paging reads a window out of an order the
 # server recomputes for every request and `DateCreated` alone is not a total
 # order. Emby does apply the second key.
@@ -139,7 +143,14 @@ def _version_of(body: Mapping[str, Any]) -> str | None:
     return version if isinstance(version, str) and version else None
 
 
-def _listing_query(since_param: str, since: AwareDatetime | None) -> dict[str, str]:
+def _listed_state(payload: dict[str, Any], user_id: str) -> SourceWatchState | None:
+    # play_history_is_trustworthy=False: this is the listing route.
+    return to_watch_state(payload, source_user_id=user_id, play_history_is_trustworthy=False)
+
+
+def _listing_query(
+    since_param: str, since: AwareDatetime | None, *, filters: str | None = None
+) -> dict[str, str]:
     """A listing's parameters, less the paging `_walk` adds to each request."""
     query = {
         "Recursive": "true",
@@ -150,6 +161,8 @@ def _listing_query(since_param: str, since: AwareDatetime | None) -> dict[str, s
     }
     if since is not None:
         query[since_param] = emby_datetime(since)
+    if filters is not None:
+        query["Filters"] = filters
     return query
 
 
@@ -479,22 +492,42 @@ class EmbyAdapter(SourceAdapter):
     def watch_state(
         self, since: AwareDatetime | None = None, *, start_index: int = 0
     ) -> AsyncIterator[SourceWatchState]:
-        """Walk this user's watch state."""
+        """A delta since `since`; with none, the account's played and in-progress items."""
         return self._watch_state(since, start_index)
 
     async def _watch_state(
         self, since: AwareDatetime | None, start_index: int
     ) -> AsyncIterator[SourceWatchState]:
         user_id = await self._session.user_id()
-        query = _listing_query(USER_DATA_SINCE_PARAM, since)
-        async with aclosing(self._walk(query, start_index=start_index)) as payloads:
-            async for payload in payloads:
-                # play_history_is_trustworthy=False: this is the listing route.
-                state = to_watch_state(
-                    payload, source_user_id=user_id, play_history_is_trustworthy=False
-                )
-                if state is not None:
+        if since is not None:
+            query = _listing_query(USER_DATA_SINCE_PARAM, since)
+            async with aclosing(self._walk(query, start_index=start_index)) as payloads:
+                async for payload in payloads:
+                    state = _listed_state(payload, user_id)
+                    if state is not None:
+                        yield state
+            return
+        # A resumed first walk starts its first listing at `start_index` and its
+        # second at 0, which keeps the port's promise.
+        yielded: set[str] = set()
+        for number, filters in enumerate(FIRST_WALK_FILTERS):
+            query = _listing_query(USER_DATA_SINCE_PARAM, None, filters=filters)
+            unfiltered = False
+            walk = self._walk(query, start_index=start_index if number == 0 else 0)
+            async with aclosing(walk) as payloads:
+                async for payload in payloads:
+                    state = _listed_state(payload, user_id)
+                    if state is None or state.external_id in yielded:
+                        continue
+                    if not state.played and state.position_seconds <= 0:
+                        unfiltered = True
+                        continue
+                    yielded.add(state.external_id)
                     yield state
+            if unfiltered:
+                # The server ignored `Filters` and listed everything, resume
+                # positions included, so a second walk would only repeat it.
+                return
 
     async def get_watch_state(self, external_id: str) -> SourceWatchState | None:
         """Authoritative watch state, from the route carrying the play history.

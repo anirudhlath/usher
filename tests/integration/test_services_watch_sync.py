@@ -24,7 +24,7 @@ from usher.db.repositories.watch_state import PostgresWatchStateRepository
 from usher.domain.enums import SourceKind, TitleKind
 from usher.domain.ids import new_id
 from usher.domain.source import Source
-from usher.domain.sync import SyncRunStatus
+from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus
 from usher.domain.title import Title
 from usher.ports.ingest import MediaItemUpsert
 from usher.ports.source import SourceItem, SourceItemKind, SourceWatchState
@@ -287,6 +287,15 @@ async def test_one_batch_keeps_an_absent_count_and_writes_a_reported_zero(
     something played impossible to propagate; `COALESCE(count, 0)` writes
     the reset and erases the 7. Only reading each row's own value does both.
     """
+    await PostgresSyncRunRepository(session).add(
+        SyncRun(
+            source_id=source.id,
+            kind=SyncRunKind.WATCH_STATE,
+            status=SyncRunStatus.COMPLETED,
+            started_at=RUN_AT,
+            finished_at=RUN_AT,
+        )
+    )
     adapter = _LossyAdapter(source, blind_to={"movie-1"})
     kept = await _given_matched_movie(session, media_items, source, "movie-1")
     reset = await _given_matched_movie(session, media_items, source, "movie-2")
@@ -444,7 +453,8 @@ async def test_a_batch_of_states_costs_a_bounded_number_of_statements(
     """The scale property, against real SQL rather than a fake's call counter.
 
     20 states and 200 must cost the same number of statements: a per-state resolve or a
-    per-state merge is one round trip per row of the library, every walk.
+    per-state merge is one round trip per watched item on a first walk, and one per
+    change on every delta.
 
     Not an exact number -- the staged `COPY` path issues DDL and a
     `SAVEPOINT` per merge, and pinning the total would break on any

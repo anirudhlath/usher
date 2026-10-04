@@ -52,10 +52,10 @@ class LibraryGenres:
 class TasteRepository(ABC):
     """`user_taste` — the per-user centroid, invalidated by fingerprint.
 
-    Nothing invalidates this on watch-state change. The nightly walk merges a
-    whole library's worth of watch states, so one invalidation per merged row
-    is a million invalidations a night for at most one useful recomputation
-    per user. The merge path writes nothing here and does not know it exists.
+    Nothing invalidates this on watch-state change. A walk merges watch states
+    in bulk, so one invalidation per merged row is an invalidation per state
+    for at most one useful recomputation per user. The merge path writes
+    nothing here and does not know it exists.
 
     Derived state carries its fingerprint instead: the stored row holds the
     `max(updated_at)` of the watch states it was computed from, and a demand

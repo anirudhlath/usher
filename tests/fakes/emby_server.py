@@ -385,11 +385,14 @@ class FakeEmbyServer:
         looks like from the outside.
         """
         since = params.get("MinDateLastSaved") or params.get("MinDateLastSavedForUser")
+        wanted = {name for name in (params.get("Filters") or "").split(",") if name}
         fields = [field for field in (params.get("SortBy") or "").split(",") if field]
         descending = (params.get("SortOrder") or "Ascending").lower().startswith("desc")
         tied: dict[tuple[str, ...], list[str]] = {}
         for external_id, (item, changed_at) in self._items.items():
             if since is not None and _stamp(changed_at) < since:
+                continue
+            if not self._passes(external_id, wanted):
                 continue
             key = tuple(_sort_value(item, field) for field in fields)
             tied.setdefault(key, []).append(external_id)
@@ -437,6 +440,17 @@ class FakeEmbyServer:
         return self._states.get(external_id) or SourceWatchState(
             external_id=external_id, position_seconds=0, played=False, play_count=0
         )
+
+    def _passes(self, external_id: str, filters: set[str]) -> bool:
+        """`Filters`, applied before the page is cut, as the live server does.
+
+        `IsPlayed` is the played flag; `IsResumable` is a non-zero resume position,
+        played or not. A filter this fake does not model filters nothing.
+        """
+        state = self._state_of(external_id)
+        if "IsPlayed" in filters and not state.played:
+            return False
+        return not ("IsResumable" in filters and state.position_seconds <= 0)
 
     def _write_user_data(self, request: httpx.Request, external_id: str) -> httpx.Response:
         """`POST /Users/{user}/Items/{item}/UserData` -- a resume position, no session.

@@ -305,7 +305,10 @@ class FakeSourceAdapter(SourceAdapter):
         await self._ready()
         yielded = 0
         skipped = 0
-        for external_id in list(self._items):
+        # With no `since`, the first walk's shape: played items, then in-progress
+        # ones, and nothing holding a default state.
+        candidates = list(self._items) if since is not None else self._watched()
+        for external_id in candidates:
             if since is not None and self._changed_at[external_id] < since:
                 continue
             # The skip comes *after* the filter, because `start_index` is an offset into
@@ -318,13 +321,23 @@ class FakeSourceAdapter(SourceAdapter):
                 continue
             if self._fail_after is not None and yielded >= self._fail_after:
                 raise PortUnavailable("source went away mid-walk")
-            # An item with no recorded state yields an all-zero state rather
-            # than being skipped -- see the contract's
-            # test_watch_state_emits_a_zero_state_rather_than_skipping_it.
+            # A delta yields an all-zero state for an item with none recorded -- see
+            # the contract's test_a_delta_walk_emits_a_zero_state_rather_than_skipping_it.
             yield self._states.get(external_id) or SourceWatchState(
                 external_id=external_id, position_seconds=0, played=False
             )
             yielded += 1
+
+    def _watched(self) -> list[str]:
+        """A first walk's order: played items, then in-progress ones not played."""
+        states = [(external_id, self._states.get(external_id)) for external_id in self._items]
+        played = [external_id for external_id, state in states if state and state.played]
+        resuming = [
+            external_id
+            for external_id, state in states
+            if state and not state.played and state.position_seconds > 0
+        ]
+        return played + resuming
 
     async def get_watch_state(self, external_id: str) -> SourceWatchState | None:
         """Authoritative, which for a fake means "the same thing the walk returns".

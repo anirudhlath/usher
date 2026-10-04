@@ -315,7 +315,18 @@ class SourceAdapter(ABC):
     def watch_state(
         self, since: AwareDatetime | None = None, *, start_index: int = 0
     ) -> AsyncIterator[SourceWatchState]:
-        """Watch state from the source, optionally since a cursor."""
+        """Watch state: a delta since `since`, or with none the account's watched items.
+
+        With `since`, every item whose watch state changed since then, an all-zero
+        state included -- un-marking something played *is* one. With no `since`,
+        every **non-default** state, meaning played or holding a resume position,
+        and nothing else; an item it does not yield is not asserted unplayed.
+
+        `start_index` counts what this walk yields, never rows of the source's
+        unfiltered set. A resumed walk may repeat a record. A record that leaves
+        the set between attempts shifts later ones behind the resume point, and
+        no walk yields those until their own state changes.
+        """
 
     @abstractmethod
     async def get_watch_state(self, external_id: str) -> SourceWatchState | None:
