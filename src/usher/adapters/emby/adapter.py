@@ -426,7 +426,9 @@ class EmbyAdapter(SourceAdapter):
                 if items:
                     yield UnitPage(items, resume_at)
 
-    async def _page(self, path: str, params: Mapping[str, str], start: int) -> dict[str, Any]:
+    async def _page(
+        self, path: str, params: Mapping[str, str], start: int, *, op: str = "list"
+    ) -> dict[str, Any]:
         """One page of a walk, asked for again while its failure is one a wait can fix.
 
         That is an outage -- a 5xx, a 408, a refused or dropped connection, a timeout -- or
@@ -435,7 +437,8 @@ class EmbyAdapter(SourceAdapter):
         listing would be the same answer next time, a rejected credential needs an
         operator, and a closed adapter -- which raises `PortUnavailable` too -- is shutting
         down. Giving up raises `PortUnavailable` naming the attempts, whatever the last
-        failure was.
+        failure was. `op` labels the request's span and duration, so a count or a views
+        read is not timed as a listing page.
         """
         attempts = len(PAGE_RETRY_WAITS) + 1
         first_failure: float | None = None
@@ -444,7 +447,7 @@ class EmbyAdapter(SourceAdapter):
             attempt += 1
             try:
                 return await self._session.json_body(
-                    "GET", path, params=params, op="list", read_timeout=LISTING_READ_SECONDS
+                    "GET", path, params=params, op=op, read_timeout=LISTING_READ_SECONDS
                 )
             except RequestRefused:
                 raise
@@ -542,10 +545,17 @@ class EmbyAdapter(SourceAdapter):
         return self._library_unit(unit, start_index)
 
     async def _library_unit(self, unit: LibraryUnit, start_index: int) -> AsyncGenerator[UnitPage]:
-        # A library gone since the plan was made has nothing left to walk, and its
-        # id is never sent: a server can answer a `ParentId` it does not know with
-        # the whole library.
+        # A library gone before this adapter first read the views has nothing left to
+        # walk, and its id is not sent: a server can answer a `ParentId` it does not
+        # know with the whole library. A unit never reads the views again, so one
+        # removed after that read is still asked for.
         if unit.view_id not in await self._known_libraries():
+            logger.warning(
+                "{source} no longer lists the library behind walk unit {key!r}; "
+                "ending the unit empty",
+                source=self._source.name,
+                key=unit.key,
+            )
             return
         query = {
             **_listing_query(LIBRARY_SINCE_PARAM, None),
@@ -563,7 +573,7 @@ class EmbyAdapter(SourceAdapter):
     async def _views(self) -> list[tuple[str, str]]:
         """The account's libraries, as `(id, name)`."""
         user_id = await self._session.user_id()
-        body = await self._page(f"/Users/{_segment(user_id)}/Views", {}, 0)
+        body = await self._page(f"/Users/{_segment(user_id)}/Views", {}, 0, op="views")
         entries = body.get("Items")
         if not isinstance(entries, list):
             raise PortDataMalformed("Emby's view listing carried no Items array")
@@ -593,7 +603,7 @@ class EmbyAdapter(SourceAdapter):
         }
         if view_id is not None:
             params["ParentId"] = view_id
-        body = await self._page(await self._items_path(), params, 0)
+        body = await self._page(await self._items_path(), params, 0, op="count")
         total = body.get("TotalRecordCount")
         # A count the server left out is not a count of nothing: a source total
         # read as zero would pass every coverage check.

@@ -3266,6 +3266,32 @@ async def test_a_chunk_resumed_at_its_stop_asks_for_nothing() -> None:
     assert _listings(seen) == []
 
 
+async def test_a_chunk_above_zero_starts_its_walk_at_its_lower_bound() -> None:
+    """Chunk 3 to 6 asks first at `StartIndex=3`, so it re-reads no chunk before it.
+
+    The library's seven episodes end inside the chunk's reach past 6, so it reads to the end.
+    """
+    server = FakeEmbyServer()
+    shows = _library(
+        server,
+        2,
+        "Shows",
+        [_series(0), *(_episode(index) for index in range(7))],
+        collection_type="tvshows",
+    )
+    adapter, seen = _recorded(server)
+    try:
+        read = {
+            item.external_id
+            async for page in adapter.list_unit(f"episodes:{shows}:3:6")
+            for item in page.items
+        }
+    finally:
+        await adapter.aclose()
+    assert int(_listings(seen)[0].url.params["StartIndex"]) == 3
+    assert read == {f"episode-{index:03d}" for index in range(3, 7)}
+
+
 async def test_a_page_s_resume_point_is_the_next_request_s_start_reach_back_included() -> None:
     """Resuming there re-reads the page's tail, so a deletion between attempts skips nothing."""
     server = FakeEmbyServer()
@@ -3385,6 +3411,38 @@ async def test_a_library_removed_between_attempts_ends_its_unit_empty() -> None:
     assert {request.url.params.get("ParentId") for request in _listings(seen)} == {films}
 
 
+async def test_a_unit_whose_library_is_gone_ends_with_a_warning_naming_it() -> None:
+    """The full walk's sweep retracts what an empty unit never listed, so the log says why.
+
+    The control: a library still listed walks without a word.
+    """
+    server = FakeEmbyServer()
+    films = _library(server, 1, "Films", [_movie(0)])
+    shows = _library(server, 2, "Shows", [_series(0)], collection_type="tvshows")
+    server.remove_view(shows)
+    lines: list[str] = []
+    handle = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        adapter = _adapter(server)
+        try:
+            gone = [page async for page in adapter.list_unit(f"episodes:{shows}:0:")]
+            kept = [
+                item.external_id
+                async for page in adapter.list_unit(f"titles:{films}")
+                for item in page.items
+            ]
+        finally:
+            await adapter.aclose()
+    finally:
+        logger.remove(handle)
+    assert gone == []
+    assert kept == ["movie-0"]
+    assert [line.rstrip("\n") for line in lines] == [
+        f"Living Room Emby no longer lists the library behind walk unit 'episodes:{shows}:0:'; "
+        "ending the unit empty"
+    ]
+
+
 async def test_walkers_resuming_together_read_the_libraries_once() -> None:
     server = FakeEmbyServer()
     films = _library(server, 1, "Films", [_movie(0)])
@@ -3445,6 +3503,44 @@ async def test_a_count_without_a_total_fails_the_plan() -> None:
             await adapter.plan_walk()
     finally:
         await adapter.aclose()
+
+
+async def test_a_plan_s_views_read_and_counts_carry_their_own_operation_labels() -> None:
+    """The request metric buckets by `op`, and neither is a listing page; the pages keep `list`.
+
+    A count asks for `Limit=0` and a total, and timed as `list` it would sit in the
+    same bucket as pages of a thousand items.
+    """
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    trace.set_tracer_provider(provider)
+
+    def labels() -> list[object]:
+        return [
+            span.attributes["usher.op"]
+            for span in exporter.get_finished_spans()
+            if span.name == "source.request" and span.attributes is not None
+        ]
+
+    server = FakeEmbyServer()
+    films = _library(server, 1, "Films", [_movie(0)])
+    adapter = _adapter(server)
+    try:
+        await adapter.plan_walk()
+        planning = labels()
+        walked = [
+            item.external_id
+            async for page in adapter.list_unit(f"titles:{films}")
+            for item in page.items
+        ]
+        listing = labels()[len(planning) :]
+    finally:
+        await adapter.aclose()
+    assert walked == ["movie-0"], "the premise: the unit listed a page"
+    assert planning == ["views", "count", "count"]
+    assert listing
+    assert set(listing) == {"list"}
 
 
 # --- the redacted request path ---------------------------------------------

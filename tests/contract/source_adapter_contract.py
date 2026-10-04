@@ -233,6 +233,7 @@ class SourceAdapterContract:
         ) as pages:
             async for page in pages:
                 rest.update(item.external_id for item in page.items)
+        assert first.items[0].external_id not in rest, "the resume started over"
         seen = {item.external_id for item in first.items} | rest
         assert seen == {f"filler-{index}" for index in range(7)}
 
