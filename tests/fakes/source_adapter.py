@@ -296,7 +296,7 @@ class FakeSourceAdapter(SourceAdapter):
             return pages_of(self._walk_items(None), start_index=start_index, size=self.page_size)
         name = key.removeprefix("library:")
         if name == key or name not in self._libraries:
-            raise PortDataMalformed(f"no walk unit {key!r} in this source's plan")
+            raise PortDataMalformed(f"no plan of this source's could name walk unit {key!r}")
         return pages_of(self._walk_library(name), start_index=start_index, size=self.page_size)
 
     async def _walk_library(self, name: str) -> AsyncIterator[SourceItem]:

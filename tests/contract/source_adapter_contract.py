@@ -202,7 +202,7 @@ class SourceAdapterContract:
                     walked.update(item.external_id for item in page.items)
         assert walked == whole
 
-    async def test_a_unit_the_plan_never_named_is_refused(self, harness: SourceHarness) -> None:
+    async def test_a_key_no_plan_could_name_is_refused(self, harness: SourceHarness) -> None:
         """A key no plan of this adapter's could name raises rather than walking nothing.
 
         An empty unit reads to the writer as a unit that completed, and a full walk

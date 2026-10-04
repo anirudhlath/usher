@@ -466,7 +466,7 @@ class SourceAdapter(ABC):
         raises `PortDataMalformed`; a key from an earlier plan stays walkable.
         """
         if key != DEFAULT_UNIT_KEY:
-            raise PortDataMalformed(f"no walk unit {key!r} in this adapter's plan")
+            raise PortDataMalformed(f"no plan of this adapter's could name walk unit {key!r}")
         return pages_of(self.list_items(None), start_index=start_index)
 
     async def probe_push(self, *, timeout_seconds: float = 15.0) -> PushProbe:

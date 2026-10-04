@@ -773,7 +773,7 @@ async def test_the_default_unit_is_list_items_in_pages() -> None:
     assert pages == [(["m1", "m2"], 3)]
 
 
-def test_the_default_unit_refuses_a_key_it_never_planned() -> None:
+def test_the_default_unit_refuses_a_key_no_plan_could_name() -> None:
     with pytest.raises(PortDataMalformed):
         SourceAdapter.list_unit(_fake(), "library:Films")
 
@@ -831,5 +831,14 @@ async def test_the_fake_refuses_a_library_it_was_never_given() -> None:
     _seed(adapter, "m0", libraries=("Films",))
     with pytest.raises(PortDataMalformed):
         async with aclosing(adapter.list_unit("library:Nope")) as pages:
+            async for _ in pages:
+                pass
+
+
+async def test_the_fake_refuses_a_library_named_without_its_unit_prefix() -> None:
+    adapter = _fake()
+    _seed(adapter, "m0", libraries=("Films",))
+    with pytest.raises(PortDataMalformed):
+        async with aclosing(adapter.list_unit("Films")) as pages:
             async for _ in pages:
                 pass
