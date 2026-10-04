@@ -8,13 +8,13 @@
 
 **Tech Stack:** Python 3.13, asyncio, httpx (`MockTransport` fakes), SQLAlchemy 2 async + asyncpg, Alembic, pydantic domain models, OpenTelemetry metrics, pytest (+ testcontainers `pgvector/pgvector:pg17`), the React console's settings catalogue (`web/`).
 
-**Spec:** `docs/specs/2026-10-01-fast-first-sync-design.md`. Read it beside this plan; this plan argues from it and departs from its letter in seventeen places, each called out where it happens. Five are in Phase 1: a short page judged against the longest page served in Task 2; the overlap clamp, the drained-tail rule and a shift judged against the whole previous page in Task 3; and an already-`FAILED` first walk keeping its own error in Task 7. Twelve are in Phase 2, listed at its head.
+**Spec:** `docs/specs/2026-10-01-fast-first-sync-design.md`. Read it beside this plan; this plan argues from it and departs from its letter in eighteen places, each called out where it happens. Six are in Phase 1: a short page judged against the longest page served in Task 2; the overlap clamp, the drained-tail rule and a shift judged against the whole previous page in Task 3; a listing read that keeps a client budget longer than 120 s in Task 5; and an already-`FAILED` first walk keeping its own error in Task 7. Twelve are in Phase 2, listed at its head.
 
 ## Global Constraints
 
 - `USHER_SOURCE_PAGE_SIZE` defaults to **1,000**, up from 200; the existing cap of 1,000 stays.
 - `USHER_SOURCE_REQUESTS_PER_SECOND` keeps its **0.4** default. Nothing in this plan moves it.
-- `PAGE_OVERLAP = 50`. A listing page's read timeout is **120 s**; every other request keeps the adapter's `USHER_SOURCE_TIMEOUT_SECONDS` (30 s).
+- `PAGE_OVERLAP = 50`. A listing page's read timeout is **120 s**, or the client's when that is longer (Task 5's departure); every other request keeps the adapter's `USHER_SOURCE_TIMEOUT_SECONDS` (30 s).
 - A superseded first watch walk's `error` is exactly `superseded: a first watch walk restarts`.
 - Phase 2 settings: `USHER_SYNC_WALKERS` default **4** (1 restores one request at a time); `USHER_SYNC_UNIT_MAX_ITEMS` default **100,000**.
 - Phase 2 timings: a run whose `heartbeat_at` is older than **10 minutes** is stale; the writer heartbeats on every commit and at least **once a minute** while it waits on the queue.
@@ -1581,15 +1581,17 @@ git commit -m "emby: read one page ahead while the walk writes the current one"
 
 Spec §1.5. Listing pages get a 120 s read timeout through httpx's per-request `timeout=`; every other call keeps the adapter's 30 s. `failure_detail` already reports the budget a request ran under, so a listing timeout names 120 s.
 
+**One departure from the spec's letter: 120 s is a floor.** A client whose own read budget is longer — an operator who set `USHER_SOURCE_TIMEOUT_SECONDS` above 120 — keeps it for listing pages too, because the case for the budget, that a deep page outlasts it and asking again early only queues a second copy of the slowest query, is stronger there, not weaker. At every default a listing reads for exactly 120 s, and a client with no read limit keeps none. Two session cases below fail without it.
+
 **Files:**
 - Modify: `src/usher/adapters/emby/session.py` (`_send`, `request`, `ok`, `json_body`, a new `_timeout`)
-- Modify: `src/usher/adapters/emby/adapter.py` (`LISTING_READ_SECONDS`, `_page`)
+- Modify: `src/usher/adapters/emby/adapter.py` (`LISTING_READ_SECONDS`, `_page`, `PAGE_RETRY_WAITS`'s comment)
 - Modify: `.env.example`, `web/src/features/operator/Config.settings.ts` (the timeout's description)
-- Test: `tests/unit/test_adapters_emby_adapter.py`, `tests/unit/test_adapters_emby_session.py`
-- Modify: `docs/prd/03-sources-and-sync.md`, `CHANGELOG.md`
+- Test: `tests/unit/test_adapters_emby_adapter.py`, `tests/unit/test_adapters_emby_session.py`, `tests/unit/test_cli_errors.py` (a sample error)
+- Modify: `docs/prd/03-sources-and-sync.md`, `docs/prd/08-operations.md`, `CHANGELOG.md`, `.claude/rules/emby-push-and-ingest.md`
 
 **Interfaces:**
-- Produces: `EmbySession.json_body(method, path, *, params=None, payload=None, op, read_timeout: float | None = None)`, and the same keyword on `ok` and `request`. `None` keeps the client's budget.
+- Produces: `EmbySession.json_body(method, path, *, params=None, payload=None, op, read_timeout: float | None = None)`, and the same keyword on `ok` and `request`. `None` keeps the client's budget, and a number only ever lengthens its read phase: the request reads for the longer of the two.
 - Produces: `LISTING_READ_SECONDS = 120.0` in `adapter.py`. Phase 2's views, counts and seed requests (Tasks 13–14) use it too.
 
 - [ ] **Step 1: Write the failing tests**
@@ -1601,7 +1603,10 @@ async def test_a_listing_page_may_take_two_minutes_to_read_and_nothing_else_may(
     """A deep page of a big library outlasts the 30 s every other request gets.
 
     Read off each request's `timeout` extension, which is what httpx enforces and
-    what `failure_detail` reports. Only the read phase moves.
+    what `failure_detail` reports. Only the read phase moves. Every call site in the
+    adapter that sends a request is reached -- `verify`'s three, the walks, `_fetch`
+    through `get_item`, and both of `push_watch_state`'s writes -- so a listing's
+    budget reaching any of them reads 120 here.
     """
     server = FakeEmbyServer()
     server.add_item(_movie(0), T0)
@@ -1616,9 +1621,13 @@ async def test_a_listing_page_may_take_two_minutes_to_read_and_nothing_else_may(
     )
     adapter = EmbyAdapter(SOURCE, CREDENTIALS, client=client)
     try:
+        await adapter.verify()
         _ = [item async for item in adapter.list_items()]
         _ = [state async for state in adapter.watch_state(since=T0)]
         await adapter.get_item("movie-0")
+        await adapter.push_watch_state(
+            "movie-0", WatchStateUpdate(position_seconds=600, played=True)
+        )
     finally:
         await adapter.aclose()
     budgets = {
@@ -1627,8 +1636,13 @@ async def test_a_listing_page_may_take_two_minutes_to_read_and_nothing_else_may(
     }
     assert budgets == {
         ("POST", "/Users/AuthenticateByName", 30.0),
+        ("GET", "/System/Info/Public", 30.0),
+        ("GET", "/System/Info", 30.0),
+        ("GET", "/Users/{user_id}", 30.0),
         ("GET", "/Users/{user_id}/Items", 120.0),
         ("GET", "/Users/{user_id}/Items/{item_id}", 30.0),
+        ("POST", "/Users/{user_id}/Items/{item_id}/UserData", 30.0),
+        ("POST", "/Users/{user_id}/PlayedItems/{item_id}", 30.0),
     }
     listing = next(request for request in captured if request.url.path.endswith("/Items"))
     assert listing.extensions["timeout"] == {
@@ -1661,22 +1675,30 @@ async def test_a_listing_that_times_out_says_it_had_two_minutes() -> None:
 In `tests/unit/test_adapters_emby_session.py`, let `_session` take a client, so a case can watch what goes out — its first statement becomes `client = client or httpx.AsyncClient(transport=server.transport(), base_url="https://emby.invalid")`, with `client: httpx.AsyncClient | None = None` added after `clock` in its keyword-only parameters. Add a spying client builder after it:
 
 ```python
-def _spied(server: FakeEmbyServer, captured: list[httpx.Request]) -> httpx.AsyncClient:
-    """A client over `server` that records every request, with a 30 s budget throughout."""
+def _spied(
+    server: FakeEmbyServer,
+    captured: list[httpx.Request],
+    *,
+    timeout: httpx.Timeout | float = 30.0,
+) -> httpx.AsyncClient:
+    """A client over `server` that records every request, with a 30 s budget throughout.
+
+    `timeout` replaces that budget, for a case about a client configured otherwise.
+    """
 
     def spy(request: httpx.Request) -> httpx.Response:
         captured.append(request)
         return server.handle(request)
 
     return httpx.AsyncClient(
-        transport=httpx.MockTransport(spy), base_url="https://emby.invalid", timeout=30.0
+        transport=httpx.MockTransport(spy), base_url="https://emby.invalid", timeout=timeout
     )
 ```
 
 Then append:
 
 ```python
-async def test_a_read_budget_replaces_only_the_read_phase() -> None:
+async def test_a_read_budget_lengthens_only_the_read_phase() -> None:
     server = FakeEmbyServer()
     captured: list[httpx.Request] = []
     session, client = _session(server, client=_spied(server, captured))
@@ -1685,8 +1707,38 @@ async def test_a_read_budget_replaces_only_the_read_phase() -> None:
         await session.json_body("GET", SYSTEM_INFO_PATH, op="info")
     finally:
         await client.aclose()
-    reads = [r.extensions["timeout"]["read"] for r in captured if r.url.path == SYSTEM_INFO_PATH]
-    assert reads == [120.0, 30.0]
+    budgets = [r.extensions["timeout"] for r in captured if r.url.path == SYSTEM_INFO_PATH]
+    assert budgets == [
+        {"connect": 30.0, "read": 120.0, "write": 30.0, "pool": 30.0},
+        {"connect": 30.0, "read": 30.0, "write": 30.0, "pool": 30.0},
+    ]
+
+
+async def test_a_read_budget_never_shortens_a_client_read_that_is_longer() -> None:
+    """A named read budget is a floor: an operator who set 300 s keeps 300 s."""
+    server = FakeEmbyServer()
+    captured: list[httpx.Request] = []
+    session, client = _session(server, client=_spied(server, captured, timeout=300.0))
+    try:
+        await session.json_body("GET", SYSTEM_INFO_PATH, op="info", read_timeout=120.0)
+    finally:
+        await client.aclose()
+    budgets = [r.extensions["timeout"] for r in captured if r.url.path == SYSTEM_INFO_PATH]
+    assert budgets == [{"connect": 300.0, "read": 300.0, "write": 300.0, "pool": 300.0}]
+
+
+async def test_a_client_with_no_read_limit_keeps_none_under_a_read_budget() -> None:
+    """No read limit is longer than any budget a caller can name."""
+    server = FakeEmbyServer()
+    captured: list[httpx.Request] = []
+    unlimited = httpx.Timeout(30.0, read=None)
+    session, client = _session(server, client=_spied(server, captured, timeout=unlimited))
+    try:
+        await session.json_body("GET", SYSTEM_INFO_PATH, op="info", read_timeout=120.0)
+    finally:
+        await client.aclose()
+    budgets = [r.extensions["timeout"] for r in captured if r.url.path == SYSTEM_INFO_PATH]
+    assert budgets == [{"connect": 30.0, "read": None, "write": 30.0, "pool": 30.0}]
 ```
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_adapters_emby_adapter.py tests/unit/test_adapters_emby_session.py -k "two_minutes or read_budget"`
@@ -1698,11 +1750,19 @@ In `src/usher/adapters/emby/session.py`, add to `EmbySession`:
 
 ```python
     def _timeout(self, read: float | None) -> httpx.Timeout:
-        """The client's budget, with the read phase replaced when a caller names one."""
+        """The client's budget, whose read phase a named read budget only ever lengthens.
+
+        A client with no read limit keeps none, and the other three phases are always
+        the client's.
+        """
         base = self._client.timeout
         if read is None:
             return base
-        return httpx.Timeout(connect=base.connect, read=read, write=base.write, pool=base.pool)
+        if base.read is None:
+            return base
+        return httpx.Timeout(
+            connect=base.connect, read=max(read, base.read), write=base.write, pool=base.pool
+        )
 ```
 
 Give `_send` a `read_timeout: float | None = None` keyword and build the request with it:
@@ -1718,14 +1778,15 @@ Give `_send` a `read_timeout: float | None = None` keyword and build the request
             )
 ```
 
-Give `request`, `ok` and `json_body` the same keyword (`read_timeout: float | None = None`, after `op`), passing it down: `request` hands it to **both** of its `_send` calls (the first attempt and the one after re-authenticating), `ok` to `request`, `json_body` to `ok`.
+Give `request`, `ok` and `json_body` the same keyword (`read_timeout: float | None = None`, after `op`), passing it down: `request` hands it to **both** of its `_send` calls (the first attempt and the one after re-authenticating), `ok` to `request`, `json_body` to `ok`. `request`'s docstring says `read_timeout` can lengthen the client's read budget for the request, never shorten it, since the name alone reads like an exact budget.
 
 In `src/usher/adapters/emby/adapter.py`, beside `PAGE_RETRY_WAITS`:
 
 ```python
-# A listing page's read budget, where every other request keeps the client's.
-# A timed-out request does not stop the server's query, so asking again early
-# only adds a second copy of the slowest query there is.
+# A listing page may read for this long, or for the client's budget if that is longer;
+# every other request keeps the client's. A timed-out request does not stop the
+# server's query, so asking again early only adds a second copy of the slowest query
+# there is.
 LISTING_READ_SECONDS = 120.0
 ```
 
@@ -1737,11 +1798,13 @@ and in `_page`:
                 )
 ```
 
+`PAGE_RETRY_WAITS`'s comment says "about eight minutes of waits across six attempts": the waits are eight minutes, and the attempts between them now take up to 120 s each.
+
 Run the Step 1 command. Expected: PASS.
 
 - [ ] **Step 3: Plant and verify**
 
-1. In `_timeout`, return `base` unconditionally. Expect both new adapter cases and the session case to fail.
+1. In `_timeout`, return `base` unconditionally. Expect both new adapter cases and `test_a_read_budget_lengthens_only_the_read_phase` to fail.
 2. In `request`, pass `read_timeout` to the first `_send` only. Add this case to `test_adapters_emby_session.py` first, then plant:
 
 ```python
@@ -1761,50 +1824,96 @@ async def test_a_re_authenticated_request_keeps_its_read_budget() -> None:
 
 Expect it to fail under the plant on its message.
 
+3. In `_timeout`, `read=read` in place of the `max`. Expect `test_a_read_budget_never_shortens_a_client_read_that_is_longer` to fail.
+4. In `_timeout`, drop the no-limit guard and take `max(read, base.read or 0.0)`. Expect `test_a_client_with_no_read_limit_keeps_none_under_a_read_budget` to fail.
+5. In `_timeout`, `httpx.Timeout(read)` in place of the four-phase build. Expect `test_a_read_budget_lengthens_only_the_read_phase` to fail.
+6. Pass `read_timeout=LISTING_READ_SECONDS` on `verify`'s `/System/Info` request, then on `push_watch_state`'s PlayedItems POST. Expect `test_a_listing_page_may_take_two_minutes_to_read_and_nothing_else_may` to fail under each.
+
 - [ ] **Step 4: Say it where the timeout is described**
+
+At the defaults, a page whose every attempt connects and then stalls now holds a walk for six reads of 120 s and 465 s of waits, about 20 minutes, where 30 s reads held it about 11. So every sentence that said a timed-out page holds a walk "about eight minutes" says this instead. A 5xx or a refused connection still fails fast, so the older CHANGELOG bullet about outages stays as it is. `composition.py` builds the TMDb client from the same setting, so both descriptions of it name TMDb.
 
 `.env.example`, above `USHER_SOURCE_TIMEOUT_SECONDS=30`:
 
 ```
-# Seconds one request to a source may take before it is a failure. A library
-# listing page gets 120 s to read whatever this says.
+# Seconds one request to a source, or to TMDb, may take before it is a failure.
+# A library listing page gets 120 s to read, or this setting if it is longer.
 ```
 
 `web/src/features/operator/Config.settings.ts`, the `USHER_SOURCE_TIMEOUT_SECONDS` entry's `about`:
 
 ```ts
     about:
-      'How long one request to a media server may take before it is a failure. A library listing page gets 120 s to read.',
+      'How long one request to a media server, or to TMDb, may take before it is a failure. A library listing page gets 120 s to read, or this setting if it is longer.',
 ```
 
-`docs/prd/03-sources-and-sync.md`, "Walking the library", the retry bullet gains a sentence after its first:
+`docs/prd/03-sources-and-sync.md`, "Walking the library", the retry bullet becomes:
 
 ```markdown
-  A listing page has 120 s to arrive before that counts as a timeout; every
-  other request has `USHER_SOURCE_TIMEOUT_SECONDS` (default 30).
+- **A page that fails as unreachable is asked for again** — a 5xx, a 408, a
+  refused or dropped connection, a timeout — after 15, 30, 60, 120 and 240 s,
+  about eight minutes of waiting. A listing page has 120 s to answer once
+  connected, or `USHER_SOURCE_TIMEOUT_SECONDS` (default 30) if that is longer,
+  so at the defaults a page whose every attempt connects and then stalls holds
+  the walk about 20 minutes. Connecting, and every other request, has
+  `USHER_SOURCE_TIMEOUT_SECONDS`. A 429 is asked for again on the same schedule,
+  waiting out its `Retry-After` when that is longer, up to 240 s a time. The
+  sixth failure ends the walk, and its error says how many attempts it made over
+  how long; each page gets its own six. Any other 4xx, an answer that is not a
+  listing, a rejected credential and a closed adapter fail at once.
+```
+
+`docs/prd/08-operations.md`, the "Source unreachable" row becomes:
+
+```markdown
+| Source unreachable | Catalog fully browsable. Playback → 503 `source_unavailable`. Availability goes stale, not wrong. A walk in progress waits out about eight minutes of it on the page it hit before failing, or, at the defaults, about 20 when the source accepts connections and then stalls ([03](03-sources-and-sync.md)) |
+```
+
+`.claude/rules/emby-push-and-ingest.md`, the "Nor may a blip" bullet becomes:
+
+```markdown
+- **Nor may a blip: `EmbyAdapter._page` retries an outage or a 429** through
+  eight minutes of waits, as a failed item walk restarts from the top — never a
+  `RequestRefused`, the 4xx `EmbySession.ok` still reports as `PortUnavailable`.
+  A test that fails a walk on purpose injects `sleep=instant_sleep`
+  (`tests/fakes/emby_harness.py`), or it sits through those minutes as a hang.
 ```
 
 `CHANGELOG.md`, `### Changed`:
 
 ```markdown
 - **A library listing page may take 120 s**, where every other request still
-  gets `USHER_SOURCE_TIMEOUT_SECONDS`. Deep pages of a large library outlast
-  30 s, and asking again early only queued a second copy of the slowest query.
+  gets `USHER_SOURCE_TIMEOUT_SECONDS`; a timeout set longer than 120 s applies
+  to listing pages too. Deep pages of a large library outlast 30 s, and asking
+  again early only queued a second copy of the slowest query. At the defaults,
+  a source that accepts connections and then stalls now holds a walk about 20
+  minutes before it fails, where it was about 11.
+```
+
+`tests/unit/test_cli_errors.py`, the sample `sync_runs.error` in `test_a_failed_watch_lane_is_a_non_zero_exit_without_the_retraction_hint` reads as a listing timeout now does. 1065 s is five more reads of 120 s and the 465 s of waits, timed from the first failure:
+
+```python
+error=(
+    "GET /Users/{user_id}/Items failed: ReadTimeout after 120.0s (read budget) "
+    "(gave up after 6 attempts over 1065s)"
+),
 ```
 
 - [ ] **Step 5: Run the suites and the console gate**
 
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_adapters_emby_adapter.py tests/unit/test_adapters_emby_session.py tests/unit/test_adapters_emby_contract.py tests/unit/test_console_settings_catalogue.py`
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_adapters_emby_adapter.py tests/unit/test_adapters_emby_session.py tests/unit/test_adapters_emby_contract.py tests/unit/test_console_settings_catalogue.py tests/unit/test_cli_errors.py`
 Expected: PASS.
-Run: `cd web && npm run verify`
-Expected: PASS.
+Run, from `web/` in one command: `npm run verify && npm run e2e && npm run e2e:visual`
+Expected: PASS, with no snapshot written.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add src/usher/adapters/emby/session.py src/usher/adapters/emby/adapter.py .env.example \
   web/src/features/operator/Config.settings.ts tests/unit/test_adapters_emby_adapter.py \
-  tests/unit/test_adapters_emby_session.py docs/prd/03-sources-and-sync.md CHANGELOG.md
+  tests/unit/test_adapters_emby_session.py tests/unit/test_cli_errors.py \
+  docs/prd/03-sources-and-sync.md docs/prd/08-operations.md CHANGELOG.md \
+  .claude/rules/emby-push-and-ingest.md
 git commit -m "emby: give a listing page 120 s to read, and every other request 30"
 ```
 
@@ -2581,7 +2690,7 @@ In `docs/plans/progress.md`, this plan's table: Tasks 1–8 → `✅ landed (PR 
 git push -u origin feat/fast-first-sync
 ```
 
-Open the PR against `main` titled `A first sync that pages faster and asks only for what was watched`. Follow the repository's PR template if one exists. The body states what Phase 1 changes for an operator, the gate results with counts, the five departures from the spec's letter, and that Phase 2 follows in a separate PR. It ends with:
+Open the PR against `main` titled `A first sync that pages faster and asks only for what was watched`. Follow the repository's PR template if one exists. The body states what Phase 1 changes for an operator, the gate results with counts, the six departures from the spec's letter, and that Phase 2 follows in a separate PR. It ends with:
 
 ```
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
