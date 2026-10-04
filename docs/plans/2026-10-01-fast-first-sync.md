@@ -2443,6 +2443,8 @@ Spec §1.6, last part. If `latest_incomplete_run` returns a run whose `cursor_at
 **Files:**
 - Modify: `src/usher/services/watch_sync.py` (`SUPERSEDED_ERROR`, `sync`, a new `_supersede`)
 - Modify: `src/usher/adapters/emby/adapter.py` (the first walk's comment), `README.md` (an interrupted first sync)
+- Modify: `tests/contract/sync_run_repository_contract.py` (the overtaken-walk case, now a delta)
+- Modify: wherever this makes prose false — the `sync` comment, the docstrings in `src/usher/ports/repository/sync.py` and `src/usher/db/models/sync.py`, and `docs/prd/09-roadmap.md`, which called the lane resumable without qualification
 - Test: `tests/unit/test_services_watch_sync.py`, `tests/integration/test_services_watch_sync.py`
 - Modify: `docs/prd/03-sources-and-sync.md`, `CHANGELOG.md`, `.claude/rules/emby-push-and-ingest.md`
 
@@ -2458,7 +2460,7 @@ Append to the resume section of `tests/unit/test_services_watch_sync.py`:
 async def test_an_unfinished_first_walk_is_superseded_rather_than_resumed(
     fixture: _Fixture,
 ) -> None:
-    """A first walk is a few hundred states; an old one's position would skip them all.
+    """A first walk is a few hundred states; an old position would skip its played listing.
 
     `save` only raises `position`, so the old row cannot be reset: it is closed
     `FAILED`, and a fresh run walks from the start.
@@ -2560,7 +2562,7 @@ async def test_an_unfinished_first_walk_is_closed_and_a_fresh_one_runs(
 ```
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_services_watch_sync.py tests/integration/test_services_watch_sync.py -k "superseded or already_failed or closed_and_a_fresh"`
-Expected: FAIL — `assert run.id != abandoned.id` on each: the cursorless row is resumed.
+Expected: FAIL on each, because the cursorless row is resumed: the unit cases on `assert run.id != abandoned.id`, and the integration case a line earlier, on `adapter.resumed_from == [0]`.
 
 - [ ] **Step 2: Supersede**
 
@@ -2587,9 +2589,9 @@ and add to the class:
         """Close an unfinished first walk instead of resuming it.
 
         A first walk is a few hundred states, so its position means nothing to the
-        next one, and an old-style walk's 300,000 would skip all of them. `save`
-        only ever raises `position`, so the row is closed rather than reset. One
-        already `FAILED` is closed already, and keeps its own error.
+        next one, and an old-style walk's 300,000 would skip its whole played
+        listing. `save` only ever raises `position`, so the row is closed rather
+        than reset. One already `FAILED` is closed already, and keeps its own error.
         """
         if run.status is SyncRunStatus.RUNNING:
             await self._runs.save(
@@ -2622,6 +2624,8 @@ duplicate nothing; the watch-state walk asks only for what was watched, so it is
 the short one.
 ```
 
+`tests/contract/sync_run_repository_contract.py`: `test_an_overtaken_walk_cannot_un_complete_the_run_that_overtook_it` seeds its run with `cursor_at=EARLIER - timedelta(days=1)`. A cursorless `RUNNING` row is now superseded, not reclaimed, so the reclaim race the case pins exists only for a delta; its docstring says so, and its assertions stand.
+
 Run the Step 3 command. Expected: PASS.
 
 - [ ] **Step 5: Plant and verify**
@@ -2652,10 +2656,11 @@ again. Nothing schedules it.
 ```markdown
 - **An unfinished first watch-state walk starts again rather than resuming.**
   Its position counted the old whole-library walk, so resuming it would skip
-  every watched item; its row is closed `failed` as superseded.
+  every played item that is not also in progress; its row is closed `failed`
+  as superseded.
 ```
 
-`.claude/rules/emby-push-and-ingest.md`, append to the sentence Task 6 wrote:
+`.claude/rules/emby-push-and-ingest.md`, append to the sentence Task 6 wrote, cutting as many stale or duplicated lines elsewhere in the file so it does not grow:
 
 ```markdown
 An unfinished first walk is superseded, never resumed (`SUPERSEDED_ERROR`):
@@ -2667,7 +2672,9 @@ An unfinished first walk is superseded, never resumed (`SUPERSEDED_ERROR`):
 ```bash
 git add src/usher/services/watch_sync.py tests/unit/test_services_watch_sync.py \
   tests/integration/test_services_watch_sync.py docs/prd/03-sources-and-sync.md CHANGELOG.md \
-  .claude/rules/emby-push-and-ingest.md src/usher/adapters/emby/adapter.py README.md
+  .claude/rules/emby-push-and-ingest.md src/usher/adapters/emby/adapter.py README.md \
+  tests/contract/sync_run_repository_contract.py src/usher/ports/repository/sync.py \
+  src/usher/db/models/sync.py docs/prd/09-roadmap.md
 git commit -m "watch: supersede an unfinished first walk instead of resuming it"
 ```
 
