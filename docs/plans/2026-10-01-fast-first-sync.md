@@ -1938,9 +1938,10 @@ The fake adapter changes shape with the port, which is what breaks eight watch-s
 - Modify: `tests/contract/source_adapter_contract.py`
 - Modify: `tests/unit/test_adapters_emby_contract.py` (the contract's case count)
 - Modify: `tests/unit/test_adapters_emby_adapter.py`, `tests/unit/test_fakes_emby_server.py`
-- Modify: `tests/unit/test_services_watch_sync.py` (`_Fixture.given_completed_walk` and eight cases)
+- Modify: `tests/unit/test_services_watch_sync.py` (`_Fixture.given_completed_walk`, eight cases, and the four resume cases that seed a run)
 - Modify: `tests/integration/test_services_watch_sync.py` (one case)
 - Modify: `docs/prd/03-sources-and-sync.md`, `CHANGELOG.md`, `.claude/rules/emby-push-and-ingest.md`
+- Modify: wherever this makes prose false. A watch walk no longer yields a record per library item, and dropping a zero state is a bug only in a delta; fifteen more files said otherwise: `src/usher/ports/repository/{media_item,sync,taste}.py`, `src/usher/services/{push,watch_sync}.py`, `tests/contract/{episode,media_item,sync_run,watch_state}_repository_contract.py`, `tests/integration/{test_ingest_end_to_end,test_watch_state_repository}.py`, `tests/unit/{test_api_lanes,test_ports_source,test_services_push}.py` and `docs/prd/09-roadmap.md`
 
 **Interfaces:**
 - Consumes: Task 2's `_listing_query`, Task 4's `aclosing` shape.
@@ -2234,8 +2235,7 @@ Replace `watch_state` and `_watch_state`:
                         yield state
             return
         # A resumed first walk starts its first listing at `start_index` and its
-        # second at 0. `WatchStateSyncService` never resumes one -- it starts
-        # again -- so this only keeps the port's promise.
+        # second at 0, which keeps the port's promise.
         yielded: set[str] = set()
         for number, filters in enumerate(FIRST_WALK_FILTERS):
             query = _listing_query(USER_DATA_SINCE_PARAM, None, filters=filters)
@@ -2270,7 +2270,7 @@ Replace `watch_state` and `_watch_state`:
         `start_index` counts what this walk yields, never rows of the source's
         unfiltered set. A resumed walk may repeat a record. A record that leaves
         the set between attempts shifts later ones behind the resume point, and
-        the next delta reads them.
+        no walk yields those until their own state changes.
         """
 ```
 
@@ -2321,21 +2321,23 @@ Replace `watch_state` and `_watch_state`:
 - [ ] **Step 6: Run the contract and adapter suites**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_adapters_emby_contract.py tests/unit/test_source_adapter_contract.py tests/unit/test_adapters_emby_adapter.py tests/unit/test_fakes_emby_server.py`
-Expected: FAIL in `tests/unit/test_adapters_emby_adapter.py` only, on cases that walk a first walk and mean a delta: `test_a_watch_state_walk_resumes_from_the_start_index_it_is_given`, `test_a_resumed_watch_state_walk_re_yields_what_it_dropped`, and the `watch_state` parametrisations of `test_a_page_that_fails_transiently_is_asked_for_again` and `test_a_page_that_keeps_failing_ends_the_walk_on_the_sixth_attempt`.
+Expected: FAIL in `tests/unit/test_adapters_emby_adapter.py` only, on cases that walk a first walk and mean a delta: `test_a_watch_state_walk_resumes_from_the_start_index_it_is_given`, `test_a_resumed_watch_state_walk_re_yields_what_it_dropped`, and the `watch_state` parametrisations of `test_a_page_that_fails_transiently_is_asked_for_again` and `test_a_page_that_keeps_failing_ends_the_walk_on_the_sixth_attempt`, and any of the further cases Step 7 converts.
 
 - [ ] **Step 7: Make those four cases the deltas they describe**
 
 - `test_a_watch_state_walk_resumes_from_the_start_index_it_is_given`: `adapter.watch_state(T0, start_index=50_000)`, and its docstring's first line becomes `A resumed delta asks Emby for the page it stopped at rather than for page one.`
 - `test_a_resumed_watch_state_walk_re_yields_what_it_dropped`: `adapter.watch_state(T0)` and `adapter.watch_state(T0, start_index=len(first))`.
 - `test_a_page_that_fails_transiently_is_asked_for_again` and `test_a_page_that_keeps_failing_ends_the_walk_on_the_sixth_attempt`: `getattr(adapter, walk)(T0)`.
-- `_FlakyLibrary`'s docstring, first paragraph: `Every entry carries UserData, so a watch-state delta yields all three too; a first walk would list played items only.`
+- `test_watch_state_is_attributed_to_the_authenticated_user`, `test_the_walk_reports_absent_play_history`, `test_reporting_a_position_does_not_reach_the_played_route` and `test_every_path_this_adapter_issues_redacts_to_a_route_with_no_identifier`: each walk passes `T0`, since each walks items the first walk would drop.
+- `tests/contract/source_adapter_contract.py`: `test_watch_state_reports_position_and_played`, `test_a_walk_never_reports_play_history_it_cannot_know` and `test_watch_state_reports_a_played_item` are parametrised over `since` in `(None, T0)`, ids `first-walk` and `delta`, so both walks must report a state alike. The method count stays 52.
+- `_FlakyLibrary`'s docstring, first paragraph: ``Every entry carries a default `UserData`, so a watch-state delta yields all three; a first walk would yield none.``
 
 Run the Step 6 command. Expected: PASS.
 
 - [ ] **Step 8: Repair the watch-sync cases that meant a delta**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_services_watch_sync.py`
-Expected: FAIL on exactly `test_a_source_that_reports_a_zero_has_its_zero_written`, `test_a_walk_still_reports_the_same_counters_after_the_split`, `test_a_failed_walk_is_resumed_from_the_position_it_committed`, `test_the_position_advances_per_committed_batch`, `test_a_failed_walk_keeps_the_position_it_reached` and `test_each_failed_attempt_resumes_further_in_than_the_last`. Each walks a first walk over items with no state. (Two more seed cursorless runs and still pass until Task 7.) If the failing set differs, stop and find out why before editing.
+Expected: FAIL on exactly `test_a_source_that_reports_a_zero_has_its_zero_written`, `test_a_walk_still_reports_the_same_counters_after_the_split`, `test_a_failed_walk_is_resumed_from_the_position_it_committed`, `test_the_position_advances_per_committed_batch`, `test_a_failed_walk_keeps_the_position_it_reached` and `test_each_failed_attempt_resumes_further_in_than_the_last`, each a first walk over items with no state; and `test_the_resume_point_is_the_position_and_not_the_counter`, `test_a_running_run_left_by_a_killed_process_is_reclaimed_not_orphaned` and `test_a_resumed_attempt_merges_at_its_own_start_not_the_reclaimed_runs`, each a reclaimed cursorless run that now resumes as a first walk over items with no state. If the failing set differs, stop and find out why before editing.
 
 Add to `_Fixture`, after `given_matched`:
 
@@ -2353,7 +2355,13 @@ Add to `_Fixture`, after `given_matched`:
         )
 ```
 
-Call `await fixture.given_completed_walk()` (or `fixture_batched.`, matching the case's fixture) as the first line of each of the six cases. In `test_a_source_that_reports_a_zero_has_its_zero_written`'s docstring, `filtering zero states out of a walk` becomes `filtering zero states out of a delta walk`.
+Call `await fixture.given_completed_walk()` (or `fixture_batched.`, matching the case's fixture) as the first line of each of the six cases, and of `test_an_unplayed_item_is_not_enqueued_for_backfill`, which otherwise passes with nothing walked. In `test_a_source_that_reports_a_zero_has_its_zero_written`'s docstring, `filtering zero states out of a walk` becomes `filtering zero states out of a delta walk`.
+
+The four cases that seed an unfinished run mean a resumed delta, so they become one, which is also what Task 7's supersede needs of them: add `cursor_at=T0,` to the `SyncRun(...)` seed of `test_the_resume_point_is_the_position_and_not_the_counter`, `test_a_running_run_left_by_a_killed_process_is_reclaimed_not_orphaned`, `test_a_resumed_attempt_merges_at_its_own_start_not_the_reclaimed_runs` and `test_the_span_records_the_page_the_walk_resumed_from`. Each walks items seeded at `T0`, which a delta since `T0` includes. Rename the section comment above `test_a_failed_walk_is_resumed_from_the_position_it_committed` to:
+
+```python
+# -- the resume, which keeps a long delta from starting over ------------------
+```
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_services_watch_sync.py`
 Expected: PASS.
@@ -2434,6 +2442,7 @@ Spec §1.6, last part. If `latest_incomplete_run` returns a run whose `cursor_at
 
 **Files:**
 - Modify: `src/usher/services/watch_sync.py` (`SUPERSEDED_ERROR`, `sync`, a new `_supersede`)
+- Modify: `src/usher/adapters/emby/adapter.py` (the first walk's comment), `README.md` (an interrupted first sync)
 - Test: `tests/unit/test_services_watch_sync.py`, `tests/integration/test_services_watch_sync.py`
 - Modify: `docs/prd/03-sources-and-sync.md`, `CHANGELOG.md`, `.claude/rules/emby-push-and-ingest.md`
 
@@ -2593,14 +2602,24 @@ The supersede save shares the fresh run's commit, so the two rows change togethe
 - [ ] **Step 3: Run the watch-sync suites**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_services_watch_sync.py tests/integration/test_services_watch_sync.py`
-Expected: the three new cases PASS, and four resume cases FAIL — `test_the_resume_point_is_the_position_and_not_the_counter`, `test_a_running_run_left_by_a_killed_process_is_reclaimed_not_orphaned`, `test_a_resumed_attempt_merges_at_its_own_start_not_the_reclaimed_runs`, `test_the_span_records_the_page_the_walk_resumed_from`. Each seeds a cursorless run and means a resumed delta.
+Expected: PASS. The four resume cases that seed an unfinished run have been deltas since Task 6, so the supersede leaves them alone.
 
-- [ ] **Step 4: Make the four resume cases deltas**
+- [ ] **Step 4: Say what the supersede makes true**
 
-Add `cursor_at=T0,` to the `SyncRun(...)` each of the four seeds. Each walks items seeded at `T0`, which a delta since `T0` includes. Rename the section comment above `test_a_failed_walk_is_resumed_from_the_position_it_committed` to:
+In `src/usher/adapters/emby/adapter.py`, the first walk's comment in `_watch_state` gets back the clause Task 6 left out, which is true now:
 
 ```python
-# -- the resume, which keeps a long delta from starting over ------------------
+        # A resumed first walk starts its first listing at `start_index` and its
+        # second at 0. `WatchStateSyncService` never resumes one -- it starts
+        # again -- so this only keeps the port's promise.
+```
+
+`README.md`, quickstart step 4: the sentence on an interrupted sync becomes, rewrapped:
+
+```markdown
+If it's interrupted, run it again. Both walks start over from the beginning and
+duplicate nothing; the watch-state walk asks only for what was watched, so it is
+the short one.
 ```
 
 Run the Step 3 command. Expected: PASS.
@@ -2648,7 +2667,7 @@ An unfinished first walk is superseded, never resumed (`SUPERSEDED_ERROR`):
 ```bash
 git add src/usher/services/watch_sync.py tests/unit/test_services_watch_sync.py \
   tests/integration/test_services_watch_sync.py docs/prd/03-sources-and-sync.md CHANGELOG.md \
-  .claude/rules/emby-push-and-ingest.md
+  .claude/rules/emby-push-and-ingest.md src/usher/adapters/emby/adapter.py README.md
 git commit -m "watch: supersede an unfinished first walk instead of resuming it"
 ```
 
