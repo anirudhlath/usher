@@ -194,6 +194,8 @@ class FakeEmbyServer:
         # ids placed in it, in placement order.
         self._views: dict[str, tuple[str, str | None]] = {}
         self._placed: dict[str, list[str]] = {}
+        # The episodes `/Shows/NextUp` answers, in the order it answers them.
+        self._next_up: list[str] = []
         self._unplayed_episodes: dict[str, int] = {}
         self._sessions = 0
         self._session_token: str | None = None
@@ -258,6 +260,10 @@ class FakeEmbyServer:
             placed = self._placed[view_id]
             if external_id not in placed:
                 placed.append(external_id)
+
+    def set_next_up(self, *external_ids: str) -> None:
+        """What `/Shows/NextUp` answers: seeded episodes, in this order."""
+        self._next_up = list(external_ids)
 
     def set_watch_state(self, state: SourceWatchState) -> None:
         self._states[state.external_id] = state
@@ -358,6 +364,8 @@ class FakeEmbyServer:
         user_match = _USER.match(path)
         if request.method == "GET" and user_match:
             return self._user(user_match.group("user"))
+        if request.method == "GET" and path == "/Shows/NextUp":
+            return self._list_next_up(request)
         if request.method == "GET" and _VIEWS.match(path):
             return self._list_views()
         if request.method == "GET" and _ITEMS.match(path):
@@ -433,6 +441,7 @@ class FakeEmbyServer:
         since = params.get("MinDateLastSaved") or params.get("MinDateLastSavedForUser")
         wanted = {name for name in (params.get("Filters") or "").split(",") if name}
         parent = params.get("ParentId")
+        ids = {external_id for external_id in (params.get("Ids") or "").split(",") if external_id}
         # A `ParentId` no view carries filters nothing: the worst answer a server can
         # give, and the one the adapter must never provoke.
         placed = set(self._placed[parent]) if parent in self._placed else None
@@ -448,6 +457,8 @@ class FakeEmbyServer:
             if placed is not None and external_id not in placed:
                 continue
             if types and _TYPE_NAMES.get(item.kind) not in types:
+                continue
+            if ids and external_id not in ids:
                 continue
             key = tuple(_sort_value(item, field) for field in fields)
             tied.setdefault(key, []).append(external_id)
@@ -491,6 +502,28 @@ class FakeEmbyServer:
                 entry["CollectionType"] = collection_type
             entries.append(entry)
         return httpx.Response(200, json={"Items": entries, "TotalRecordCount": len(entries)})
+
+    def _list_next_up(self, request: httpx.Request) -> httpx.Response:
+        """`GET /Shows/NextUp`, cut and counted the way `_list` is.
+
+        Stricter than the real server may be, deliberately: a request naming no
+        user is refused, because the adapter must say whose next-up it means.
+        """
+        params = request.url.params
+        if params.get("UserId") != USER_ID:
+            return httpx.Response(400, json={"Error": "UserId is required"})
+        listed = [external_id for external_id in self._next_up if external_id in self._items]
+        start = int(params.get("StartIndex", "0"))
+        limit = int(params.get("Limit", str(self.page_size)))
+        counted = (params.get("EnableTotalRecordCount") or "true").lower() != "false"
+        page = listed[start : start + limit]
+        return httpx.Response(
+            200,
+            json={
+                "Items": [self._payload(external_id, for_listing=True) for external_id in page],
+                "TotalRecordCount": len(listed) if counted else 0,
+            },
+        )
 
     def _one(self, external_id: str) -> httpx.Response:
         if external_id not in self._items:

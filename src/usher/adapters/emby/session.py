@@ -61,6 +61,7 @@ _ROUTE_WORDS: frozenset[str] = frozenset(
         "Info",
         "Public",
         "Views",
+        "NextUp",
     }
 )
 

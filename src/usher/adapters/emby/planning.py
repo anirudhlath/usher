@@ -7,6 +7,10 @@ from usher.domain.sync import WalkStage
 
 _OFFSET = re.compile(r"[0-9]+")
 
+#: The unit holding what the account is watching. It is no library's, so
+#: `parse_unit_key` refuses it.
+SEED_KEY = "seed"
+
 
 @dataclass(frozen=True, slots=True)
 class LibraryUnit:

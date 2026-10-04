@@ -975,3 +975,49 @@ async def test_include_item_types_lists_only_those_types(driver: _Driver) -> Non
     assert await _listed(driver, IncludeItemTypes="Episode") == ["e0"]
     assert await _listed(driver, IncludeItemTypes="Movie,Series") == ["m0", "s0"]
     assert await _listed(driver, IncludeItemTypes="Movie,Series,Episode") == ["e0", "m0", "s0"]
+
+
+# --- Ids and NextUp ------------------------------------------------------
+
+
+async def test_ids_lists_only_the_named_items(driver: _Driver) -> None:
+    _given_three_movies(driver)
+    assert await _listed(driver, Ids="m0,m2") == ["m0", "m2"]
+
+
+def _given_next_up(driver: _Driver) -> None:
+    driver.server.add_item(
+        SourceItem(external_id="s0", name="S 0", kind=SourceItemKind.SERIES), ADDED_AT
+    )
+    for index in range(3):
+        driver.server.add_item(
+            SourceItem(
+                external_id=f"e{index}",
+                name=f"E {index}",
+                kind=SourceItemKind.EPISODE,
+                series_external_id="s0",
+                season_number=1,
+                episode_number=index + 1,
+            ),
+            ADDED_AT,
+        )
+    driver.server.set_next_up("e2", "e0", "e1")
+
+
+async def test_next_up_lists_its_episodes_in_its_own_order_and_in_pages(driver: _Driver) -> None:
+    _given_next_up(driver)
+    body = await driver.session.json_body(
+        "GET",
+        "/Shows/NextUp",
+        params={"UserId": USER_ID, "StartIndex": "1", "Limit": "1"},
+        op="next_up",
+    )
+    assert [entry["Id"] for entry in body["Items"]] == ["e0"]
+    assert body["TotalRecordCount"] == 3
+
+
+async def test_next_up_refuses_a_request_that_names_no_user(driver: _Driver) -> None:
+    """Stricter than the real server may be, deliberately: the adapter must say whose it means."""
+    _given_next_up(driver)
+    with pytest.raises(PortUnavailable):
+        await driver.session.json_body("GET", "/Shows/NextUp", op="next_up")
