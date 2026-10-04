@@ -11,7 +11,7 @@ Versioning is `0.x` while the wire contract may still move —
 ### Added
 
 - Listing requests to a source are capped at `USHER_SYNC_WALKERS` (default 4)
-  and back off on their own: a failure that is asked again drops the cap to one,
+  and back off on their own: an outage or a 429 drops the cap to one,
   and every ten pages that succeed raise it by one. The gauge
   `usher.source.listing.concurrency` shows the cap.
 

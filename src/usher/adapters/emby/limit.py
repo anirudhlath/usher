@@ -22,10 +22,10 @@ RAISE_AFTER = 10
 class ListingLimit:
     """The cap on listing requests in flight, shared by every walker and read-ahead.
 
-    It starts at its ceiling. A failure that will be asked again drops it to one,
-    and each run of `RAISE_AFTER` successes in a row raises it by one, back up to
-    the ceiling. A page waiting for a slot holds no request; a raise lets a
-    waiter in at once, without anyone leaving.
+    It starts at its ceiling. An outage or a 429 drops it to one, and each run of
+    `RAISE_AFTER` successes in a row raises it by one, back up to the ceiling. A
+    page waiting for a slot holds no request; a raise lets a waiter in at once,
+    without anyone leaving.
     """
 
     def __init__(self, ceiling: int, *, source: str) -> None:
@@ -56,7 +56,7 @@ class ListingLimit:
             self._wake.set()
 
     def failed(self) -> None:
-        """A request failed in a way that is asked again: one at a time from here."""
+        """A request failed as an outage or a 429: one at a time from here."""
         self._limit = 1
         self._streak = 0
         _concurrency.set(self._limit, self._labels)
