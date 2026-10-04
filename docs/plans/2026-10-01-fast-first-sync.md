@@ -3347,7 +3347,7 @@ The clone is scratch. Once its numbers are posted, drop it:
 docker exec usher-postgres-1 dropdb -U usher ffs_first_watch
 ```
 
-Then go on to Phase 2. Task 10, Step 1 marks Phase 1 landed and Task 9 passed in both status tables, as the Phase 2 branch's first commit.
+Then go on to Phase 2. Task 10, Step 1 marks Phase 1 landed and Task 9's first watch walk passed in both status tables, as the Phase 2 branch's first commit; Task 20 marks Task 9 passed once its item walk's number is in.
 
 ---
 
@@ -3371,9 +3371,9 @@ Each is repeated in the task where it happens.
 8. **The seed streams.** Each page is led by the series its episodes need that neither it nor an earlier page holds, fetched by `Ids` there and then. The spec reads every listing first and fetches the series after. (Task 14.)
 9. **A resumed seed starts again; every seed page resumes at 0.** A count into listings that may have changed could skip an item the watch lane is about to look for. (Task 14.)
 10. **The seed is planned only when both watch filters narrow the library, and a fallback plan keeps its seed.** A server that ignored a filter would make the seed a whole-library walk ahead of the real one. (Task 14.)
-11. **The watch lane after the walk reads back to the instant the walk began.** `WatchStateSyncService.sync` takes `since_at_most`. Without it, the run after the seed has moved the cursor past the walk's start, and a state saved meanwhile for an item not yet stored would be skipped. (Task 18.)
+11. **The watch lane after the walk reads back to the instant the walk began.** `WatchStateSyncService.sync` takes `since_at_most`. Without it, the run after the seed has moved the cursor past the walk's start, and a state saved meanwhile for an item not yet stored would be skipped. That run is the after-seed hook's, and the item walk does not beat while it runs, so a hook walk longer than `STALE_AFTER` leaves the item walk looking dead to a second walk: at the default gate, 0.4 requests/s with pages of 1,000 that each add 950 after the first, that is any hook walk of more than about 228,000 watch states (240 pages in 10 minutes), and fewer on a server slower than the gate. (Task 18.)
 12. **A run whose sweep was refused is not resumed.** The next attempt reads the library again, because a resume would re-run the sweep over the same rows and refuse again. (Task 17.)
-13. **The watch lane gets the same liveness as a whole-library walk.** The spec gives the heartbeat to whole-library walks; a watch-state run carries one too, set when it is inserted or reclaimed and on every batch, and a `running` watch run whose heartbeat is younger than 10 minutes refuses a second walk with `WalkRefused` before any write. `usher sync` and a worker job handle that refusal as they handle an item walk's; the push lane's gap-closer logs it and returns, and the after-seed hook reports it and lets the walk go on. (Tasks 17, 18.)
+13. **A watch-state run carries a heartbeat too, and a live one is left alone.** The spec gives the heartbeat to whole-library walks; a watch-state run's is set when it is inserted or reclaimed and on every batch. A `running` watch run whose heartbeat is younger than 10 minutes is another walk's, alive: a second watch run neither supersedes nor resumes it, and runs beside it in a row of its own — a delta from the latest completed cursor, or a filtered first walk when there is none. Nothing is refused, so no caller changes, and the two runs converge: both merge on one key under one conflict rule. (Task 17.)
 
 ### Review Focus (Phase 2)
 
@@ -3402,7 +3402,7 @@ Each is repeated in the task where it happens.
 | `src/usher/adapters/emby/session.py` | `_ROUTE_WORDS` gains `Views`, `NextUp` |
 | `src/usher/adapters/factory.py`, `src/usher/composition.py`, `src/usher/api/deps.py`, `src/usher/config.py` | `unit_max_items`, `listing_concurrency`, `walkers` |
 | `src/usher/services/reconcile.py` | the planned walk: walkers, one writer, the stage barrier, `after_seed`, the heartbeat, `_claim`, `WalkRefused`, the unit histogram |
-| `src/usher/services/watch_sync.py` | the heartbeat and the refusal of a live watch walk; `sync(…, since_at_most=…)` |
+| `src/usher/services/watch_sync.py` | the heartbeat; a run beside a live watch walk, never over it; `sync(…, since_at_most=…)` |
 | `src/usher/services/handlers.py`, `src/usher/cli.py`, `src/usher/api/lanes.py` | `after_seed` and `since_at_most`; what each caller does with `WalkRefused`; `sync-status`'s plan line; the gap-closer's `plan=False` |
 | `src/usher/api/dto/source.py`, `src/usher/api/routers/sources.py`, `web/src/api/schema.d.ts`, `web/src/test/fixtures/admin.ts` | `last_sync` on the status response |
 | `dashboards/03-pipeline.json`, `dashboards/README.md` | panel 11, the listing limit and the mean unit duration, and its section |
@@ -8544,13 +8544,15 @@ Spec §2.5's table, the resume half of §2.6, and §2.7's `started_at`. A whole-
 
 `usher sync` prints the refusal and exits non-zero. The worker's `sync_handler` re-raises it as `PortUnavailable`, so `JobWorker` fails the job as retryable instead of logging a crash, and the queue retries it: a walk whose process died with the job's lease is resumed once its heartbeat goes stale, rather than waiting for someone to ask again. The gap-closer passes `plan=False` (Task 16), so its item walk never claims and is never refused.
 
-**The watch lane gets the same liveness.** `WatchStateSyncService.sync` sets `heartbeat_at`, the column Task 12 added, when it inserts or reclaims its run and with every batch it commits. The save that ends a run moves no heartbeat, as for a whole-library walk: only a `running` row is ever read as live. A `running` newest watch run whose heartbeat is under `STALE_AFTER` old is another process's walk, alive, and `sync` neither supersedes nor resumes it: it raises `WalkRefused` before it writes anything. A `running` watch run with no heartbeat predates `m10g`, and is taken for dead as before. `WalkRefused` stays in `reconcile.py`, and `watch_sync.py` imports it with `STALE_AFTER`: the import contracts let one service import another, `api/lanes.py` sits above both, and nothing `reconcile.py` imports leads back to `watch_sync.py`.
+**The watch lane gets the same heartbeat, and runs beside a live walk instead of over it.** `WatchStateSyncService.sync` sets `heartbeat_at`, the column Task 12 added, when it inserts or reclaims its run and with every batch it commits. The save that ends a run moves no heartbeat, as for a whole-library walk: only a `running` row is ever read as live. A `running` newest watch run whose heartbeat is under `STALE_AFTER` old is another process's walk, alive, and `sync` neither supersedes nor resumes it. It goes on as if no unfinished run existed, in a row of its own: a delta from the latest completed cursor, which Task 18 reads back to `since_at_most`, or a filtered first walk when there is no cursor. A `running` watch run with no heartbeat predates `m10g`, and is taken for dead as before. `watch_sync.py` imports `STALE_AFTER` from `reconcile.py`: the import contracts let one service import another, and nothing `reconcile.py` imports leads back to `watch_sync.py`.
 
-`watch.sync` has three callers in the tree: `usher sync`, `sync_handler` and `LaneSupervisor._close_gap`. Task 18 adds a fourth, the after-seed hook, at the first two. `usher sync` prints a watch-lane refusal and exits non-zero, as for an item walk. `sync_handler` fails the job for a retry, as for an item walk, though the retry walks the job's items again before its watch lane. `_close_gap` logs it and returns: a refusal escaping it would end the source's push lane until the next refresh, and the walk already running, or the one after it, reads what the gap missed. The hook prints or logs it and lets the walk go on, because the watch run after the walk covers it (Task 18).
+**Two watch runs side by side converge.** Both write through `merge_from_source` (`db/repositories/watch_state.py`), which upserts on `(user_id, title_id)` or `(user_id, episode_id)`. Its conflict rule is the `UPDATE`'s `AND ws.updated_at <= d.observed_at`, `updated_at` being what the `BEFORE UPDATE` trigger stamps, the writing transaction's `now()`; its `INSERT` is `ON CONFLICT (user_id, {target}) DO NOTHING`. Two runs that read the same state write the same `position_seconds` and `played`, and `runtime_seconds`, `play_count` and `last_played_at` are COALESCEd, a walk's listing carrying no play history. So whichever write the rule lets land, the row holds the same values. Two residuals stay. A state that changes between the two reads can keep the earlier read: the later run's merges carry its own attempt's start, and a write the earlier run commits after that start outdates them, as a push write landing mid-walk outdates the walk's merge today. And a live run that dies once another has started beside it is never closed: no longer the newest, it is neither superseded nor resumed, and stays `running`.
 
-Neither check is atomic. `_claim` and `sync` each read the newest run and write later, with no lock between, so two walks that start together can both proceed.
+`watch.sync` has three callers in the tree: `usher sync`, `sync_handler` and `LaneSupervisor._close_gap`; Task 18 adds a fourth, the after-seed hook, at the first two. None has anything new to handle from the watch lane: `sync` never refuses, so each gets a run, beside a live one if one is running.
 
-Departures 2, 5, 6, 12 and 13 happen here. **2:** a resumed unit's first page can re-read up to `PAGE_OVERLAP` items its last committed page already counted; the cases below run on the fake, which has no overlap, so they assert nothing counted twice. That overlap is all a resume reaches back, so a resume after more than `PAGE_OVERLAP` deletions ahead of a unit's position misses items, as an in-walk shift does, without the WARNING. **5:** a `failed` run with units resumes whatever its heartbeat says. **6:** a superseded row that is `failed` already keeps its own error. **12:** a run whose sweep was refused is not resumed. Its walk is what the refusal doubts — a library unmounted mid-walk reads exactly like one emptied — so the next attempt reads the library again; a resume would re-run the sweep over the same rows and refuse again. **13:** the watch lane's liveness, above.
+Neither check is atomic. `_claim` reads the newest run and writes later, with no lock between, so two whole-library walks that start together can both proceed. The watch lane's check has the same gap, as today: two watch runs that start together can both close one dead first walk, or both resume one dead delta.
+
+Departures 2, 5, 6, 12 and 13 happen here. **2:** a resumed unit's first page can re-read up to `PAGE_OVERLAP` items its last committed page already counted; the cases below run on the fake, which has no overlap, so they assert nothing counted twice. That overlap is all a resume reaches back, so a resume after more than `PAGE_OVERLAP` deletions ahead of a unit's position misses items, as an in-walk shift does, without the WARNING. **5:** a `failed` run with units resumes whatever its heartbeat says. **6:** a superseded row that is `failed` already keeps its own error. **12:** a run whose sweep was refused is not resumed. Its walk is what the refusal doubts — a library unmounted mid-walk reads exactly like one emptied — so the next attempt reads the library again; a resume would re-run the sweep over the same rows and refuse again. **13:** the watch lane's heartbeat, and its run beside a live one, above.
 
 `tests/integration/test_ingest_end_to_end.py::test_a_walk_that_dies_mid_run_leaves_a_resumable_catalog` now resumes its failed run instead of starting another, and its assertions still hold: the failed attempt held its unit's pages below a batch of 1,000 and committed none, so the resume walks all six items once.
 
@@ -8558,16 +8560,16 @@ Departures 2, 5, 6, 12 and 13 happen here. **2:** a resumed unit's first page ca
 - Modify: `src/usher/services/reconcile.py` (`STALE_AFTER`, `WALK_SUPERSEDED_ERROR`, `WalkRefused`, `reconcile`, `_claim`, `_supersede`, `_walk_plan`)
 - Modify: `src/usher/services/watch_sync.py` (`_now`, `__init__`, `sync`, `_flush`)
 - Modify: `src/usher/ports/repository/sync.py` (two docstrings)
-- Modify: `src/usher/services/handlers.py` (`sync_handler`), `src/usher/cli.py` (`_sync`, `_sync_failed`), `src/usher/api/lanes.py` (`_close_gap`)
+- Modify: `src/usher/services/handlers.py` (`sync_handler`), `src/usher/cli.py` (`_sync`, `_sync_failed`)
 - Modify: `tests/fakes/source_adapter.py` (`unit_starts`)
 - Modify: `docs/prd/02-data-model.md`, `docs/prd/03-sources-and-sync.md`, `CHANGELOG.md`, `docs/guide/command-line.md`, `.claude/rules/emby-push-and-ingest.md`
-- Test: `tests/unit/test_services_reconcile.py`, `tests/unit/test_services_watch_sync.py`, `tests/unit/test_services_handlers.py`, `tests/unit/test_cli.py`, `tests/unit/test_api_lanes.py`, `tests/integration/test_services_reconcile.py`, `tests/integration/test_cli_pipeline.py`
+- Test: `tests/unit/test_services_reconcile.py`, `tests/unit/test_services_watch_sync.py`, `tests/unit/test_services_handlers.py`, `tests/unit/test_cli.py`, `tests/integration/test_services_reconcile.py`, `tests/integration/test_cli_pipeline.py`
 
 **Interfaces:**
-- Consumes: Task 16's `reconcile(…, plan=…)`, `_walk_plan`, `_walk_stage`, `_beat`, the `clock`; `_failed` and `RETRACTION_ERROR_CODE`; Task 12's `units_for`, `save` (it keeps the greater `position` and never rewrites a `completed` row) and `save_unit`; Task 11's `pages_of`, which reaches a unit's `start_index` by reading past the items before it; Task 16's test helpers `_Ticks`, `_Fixture`, `_shelve`; Task 12's `SyncRun.heartbeat_at`; `WatchStateSyncService.sync`'s resume and Task 7's supersede in it; Task 16's `test_the_gap_closer_walks_one_stream_even_unbounded_and_uncursored`, which the gap-closer case below follows.
+- Consumes: Task 16's `reconcile(…, plan=…)`, `_walk_plan`, `_walk_stage`, `_beat`, the `clock`; `_failed` and `RETRACTION_ERROR_CODE`; Task 12's `units_for`, `save` (it keeps the greater `position` and never rewrites a `completed` row) and `save_unit`; Task 11's `pages_of`, which reaches a unit's `start_index` by reading past the items before it; Task 16's test helpers `_Ticks`, `_Fixture`, `_shelve`; Task 12's `SyncRun.heartbeat_at`; `WatchStateSyncService.sync`'s resume and Task 7's supersede in it.
 - Produces (tests): `FakeSourceAdapter.unit_starts: list[tuple[str, int]]`, every `(key, start_index)` `list_unit` was asked for. The journal cannot say where a unit resumed: `pages_of` reads past the items before `start_index`, and `_walk_library` journals each one it yields.
-- Produces: `usher.services.reconcile.STALE_AFTER = timedelta(minutes=10)`, `WALK_SUPERSEDED_ERROR = "superseded: a whole-library walk restarts"` (not `SUPERSEDED_ERROR`, which `watch_sync` already names), `class WalkRefused(Exception)`, which `WatchStateSyncService.sync` raises too; `_claim(source, kind) -> SyncRun | None`; `_walk_plan(…, *, resumed: bool)`; `WatchStateSyncService(…, clock: Callable[[], datetime] = _now)`. Task 18 adds `after_seed` beside `resumed`.
-- Produces (tests): in `tests/unit/test_services_reconcile.py`, `_Fixture(…, clock=None)`, `NOW`, `_Clock(now)` with a settable `.now`, and `_given_walk(fixture, *, heartbeat_at, status=RUNNING, kind=FULL, units=(), error=None)`. Task 19 reuses `_Clock` and `NOW`. In `tests/unit/test_services_watch_sync.py`, its own `NOW` and `_Clock(now, *, step=timedelta(0))`, `_Fixture(…, clock=None)`, and `_given_watch_run(fixture, *, heartbeat_at, status=RUNNING, cursor_at=T0)`.
+- Produces: `usher.services.reconcile.STALE_AFTER = timedelta(minutes=10)`, `WALK_SUPERSEDED_ERROR = "superseded: a whole-library walk restarts"` (not `SUPERSEDED_ERROR`, which `watch_sync` already names), `class WalkRefused(Exception)`; `_claim(source, kind) -> SyncRun | None`; `_walk_plan(…, *, resumed: bool)`; `WatchStateSyncService(…, clock: Callable[[], datetime] = _now)`. Task 18 adds `after_seed` beside `resumed`.
+- Produces (tests): in `tests/unit/test_services_reconcile.py`, `_Fixture(…, clock=None)`, `NOW`, `_Clock(now)` with a settable `.now`, and `_given_walk(fixture, *, heartbeat_at, status=RUNNING, kind=FULL, units=(), error=None)`. Task 19 reuses `_Clock` and `NOW`. In `tests/unit/test_services_watch_sync.py`, its own `NOW` and `_Clock(now, *, step=timedelta(0))`, `_Fixture(…, clock=None)`, and `_given_watch_run(fixture, *, heartbeat_at, status=RUNNING, delta=True)`.
 
 - [ ] **Step 1: Write the failing service tests**
 
@@ -8891,7 +8893,7 @@ async def test_a_failed_whole_library_walk_resumes_in_place_against_real_sql(
     assert (unit.status, unit.position, unit.items_seen) == (SyncRunUnitStatus.COMPLETED, 5, 5)
 ```
 
-`tests/unit/test_services_watch_sync.py` — imports: `from datetime import UTC, datetime, timedelta`; `from usher.services.reconcile import WalkRefused` after the `usher.services.push` import. After `LAST_PLAYED`:
+`tests/unit/test_services_watch_sync.py` — imports: `from datetime import UTC, datetime, timedelta`. After `LAST_PLAYED`:
 
 ```python
 NOW = datetime(2026, 10, 1, 12, tzinfo=UTC)
@@ -8913,7 +8915,7 @@ class _Clock:
 `_Fixture.__init__` takes `clock: _Clock | None = None` after `lossy`, sets `self.clock = clock if clock is not None else _Clock(NOW)` before it builds the service, and passes `clock=self.clock` after `batch_size=batch_size`. A fixed clock changes nothing the existing cases see: none leaves a run `running` and then syncs again. Append to the file:
 
 ```python
-# -- a live watch walk is refused, and neither superseded nor resumed ---------
+# -- a live watch walk is left alone, and a new one runs beside it ----------
 
 
 async def _given_watch_run(
@@ -8921,58 +8923,92 @@ async def _given_watch_run(
     *,
     heartbeat_at: datetime | None,
     status: SyncRunStatus = SyncRunStatus.RUNNING,
-    cursor_at: datetime | None = T0,
+    delta: bool = True,
 ) -> SyncRun:
-    """An unfinished watch run two states in, as another process left it, live or dead."""
+    """An unfinished watch run two states in, as another process left it, live or dead.
+
+    A delta's cursor is a walk this stores first, completed at `T0`; a first walk has
+    none. The run starts an hour after `T0`, so it is the newest.
+    """
+    if delta:
+        await fixture.given_completed_walk(at=T0)
     run = SyncRun(
         source_id=fixture.source.id,
         kind=SyncRunKind.WATCH_STATE,
         status=status,
-        cursor_at=cursor_at,
+        cursor_at=T0 if delta else None,
         position=2,
         items_seen=2,
         heartbeat_at=heartbeat_at,
-        started_at=T0,
+        started_at=T0 + timedelta(hours=1),
     )
     await fixture.runs.add(run)
     return run
 
 
-@pytest.mark.parametrize("cursor_at", [None, T0], ids=["first-walk", "delta"])
-async def test_a_live_watch_walk_refuses_a_second_and_writes_nothing(
-    fixture: _Fixture, cursor_at: datetime | None
+async def test_a_live_first_watch_walk_is_left_alone_and_a_new_one_completes_beside_it(
+    fixture: _Fixture,
 ) -> None:
-    """A first walk would be superseded and a delta resumed; a live one is neither."""
-    live = await _given_watch_run(fixture, heartbeat_at=NOW, cursor_at=cursor_at)
+    """Superseding it would close the row under a live walk, so this walk takes its own."""
+    await fixture.given_matched("movie-0")
+    fixture.adapter.seed_state(
+        SourceWatchState(external_id="movie-0", position_seconds=0, played=True)
+    )
+    live = await _given_watch_run(fixture, heartbeat_at=NOW, delta=False)
 
-    with pytest.raises(
-        WalkRefused, match="a watch-state walk of Living Room Emby is already running"
-    ):
-        await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
-
-    assert await fixture.runs.get(live.id) == live, "the refused walk wrote the live row"
-    assert len(await fixture.runs.list_for_source(fixture.source.id)) == 1
-    assert fixture.adapter.resumed_from == [], "the refused walk asked the source for states"
-    assert fixture.commits == 0
-
-
-@pytest.mark.parametrize(
-    ("age", "refused"),
-    [(timedelta(minutes=10) - timedelta(seconds=1), True), (timedelta(minutes=10), False)],
-)
-async def test_a_running_watch_walk_is_refused_until_its_heartbeat_is_ten_minutes_old(
-    fixture: _Fixture, age: timedelta, refused: bool
-) -> None:
-    """A killed walk's row still says `running`; only its heartbeat tells it from a live one."""
-    dead = await _given_watch_run(fixture, heartbeat_at=NOW - age)
-    if refused:
-        with pytest.raises(WalkRefused):
-            await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
-        return
     run = await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
-    assert (run.id, run.status) == (dead.id, SyncRunStatus.COMPLETED)
-    assert fixture.adapter.resumed_from == [2]
-    assert fixture.saved[0].heartbeat_at == NOW, "the reclaim kept the dead walk's heartbeat"
+
+    assert await fixture.runs.get(live.id) == live, "the live first walk's row was written"
+    assert run.id != live.id
+    assert (run.status, run.cursor_at, run.items_matched) == (SyncRunStatus.COMPLETED, None, 1)
+    assert fixture.adapter.resumed_from == [0]
+    assert len(await fixture.runs.list_for_source(fixture.source.id)) == 2
+
+
+async def test_a_live_watch_delta_is_not_resumed_and_a_new_delta_runs_beside_it(
+    fixture: _Fixture,
+) -> None:
+    """A heartbeat a second short of ten minutes old is alive: its row is not resumed."""
+    for index in range(3):
+        await fixture.given_matched(f"movie-{index}")
+    live = await _given_watch_run(
+        fixture, heartbeat_at=NOW - timedelta(minutes=10) + timedelta(seconds=1)
+    )
+
+    run = await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
+
+    assert await fixture.runs.get(live.id) == live, "the live delta's row was written"
+    assert run.id != live.id, "the live delta was resumed"
+    assert (run.status, run.cursor_at, run.items_matched) == (SyncRunStatus.COMPLETED, T0, 3)
+    assert fixture.adapter.resumed_from == [0]
+
+
+@pytest.mark.parametrize("delta", [False, True], ids=["first-walk", "delta"])
+@pytest.mark.parametrize(
+    "heartbeat_at", [NOW - timedelta(minutes=10), None], ids=["ten-minutes-old", "no-heartbeat"]
+)
+async def test_a_dead_watch_walk_is_superseded_or_resumed_as_before(
+    fixture: _Fixture, heartbeat_at: datetime | None, delta: bool
+) -> None:
+    """A heartbeat ten minutes old is a walk that died, and so is none, from before heartbeats."""
+    dead = await _given_watch_run(fixture, heartbeat_at=heartbeat_at, delta=delta)
+
+    run = await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
+
+    assert run.status is SyncRunStatus.COMPLETED
+    if delta:
+        assert run.id == dead.id, "a dead delta was not resumed"
+        assert fixture.adapter.resumed_from == [2]
+        assert fixture.saved[0].heartbeat_at == NOW, "the reclaim kept the dead walk's heartbeat"
+        return
+    assert run.id != dead.id, "a dead first walk was resumed"
+    assert fixture.adapter.resumed_from == [0]
+    closed = await fixture.runs.get(dead.id)
+    assert closed is not None
+    assert (closed.status, closed.error) == (
+        SyncRunStatus.FAILED,
+        "superseded: a first watch walk restarts",
+    )
 
 
 async def test_a_failed_watch_walk_resumes_however_fresh_its_heartbeat(fixture: _Fixture) -> None:
@@ -9012,14 +9048,12 @@ async def test_every_batch_of_a_watch_walk_moves_its_heartbeat() -> None:
     assert beats == [NOW + timedelta(seconds=seconds) for seconds in (1, 2, 3)]
 ```
 
-A `running` watch run with no heartbeat is already covered: `test_a_running_run_left_by_a_killed_process_is_reclaimed_not_orphaned` resumes one, and `test_an_unfinished_first_walk_is_superseded_rather_than_resumed` closes one.
-
 - [ ] **Step 2: Run them to see them fail**
 
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_services_reconcile.py tests/unit/test_services_watch_sync.py`, then `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/integration/test_services_reconcile.py::test_a_failed_whole_library_walk_resumes_in_place_against_real_sql`
-Expected: FAIL. The first command stops at collection, both modules raising `ImportError: cannot import name 'WalkRefused'`, and runs nothing. The second fails on `assert second.id == first.id`, the second walk having started a run of its own.
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_services_reconcile.py`, then `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_services_watch_sync.py`, then `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/integration/test_services_reconcile.py::test_a_failed_whole_library_walk_resumes_in_place_against_real_sql`
+Expected: FAIL. The first command stops at collection, `ImportError: cannot import name 'WalkRefused'`, and runs nothing, which is why the two unit modules run apart. The second errors in every case that builds a `_Fixture`, all but three, with `TypeError: WatchStateSyncService.__init__() got an unexpected keyword argument 'clock'`. The third fails on `assert second.id == first.id`, the second walk having started a run of its own.
 
-- [ ] **Step 3: Claim, resume and supersede, and refuse a live watch walk**
+- [ ] **Step 3: Claim, resume and supersede, and leave a live watch walk alone**
 
 `src/usher/services/reconcile.py` — `from datetime import UTC, datetime, timedelta`. After `RETRACTION_ERROR_CODE`:
 
@@ -9032,10 +9066,7 @@ WALK_SUPERSEDED_ERROR = "superseded: a whole-library walk restarts"
 
 
 class WalkRefused(Exception):
-    """Another walk of this source and kind is alive.
-
-    A whole-library walk raises it from `_claim`, and the watch lane from its `sync`.
-    """
+    """A whole-library walk of this source and kind is already running."""
 ```
 
 In `reconcile`, the docstring gains a paragraph after `walk is one stream.`, before its closing `Never raises a `UsherPortError`.`:
@@ -9166,7 +9197,7 @@ After `cursor_for`:
         rather than the run when it fails.
 ```
 
-`src/usher/services/watch_sync.py` — the watch lane's liveness. `from usher.services.reconcile import STALE_AFTER, WalkRefused`. After `SUPERSEDED_ERROR`:
+`src/usher/services/watch_sync.py` — the watch lane's heartbeat, and a run beside a live one. `from usher.services.reconcile import STALE_AFTER`. After `SUPERSEDED_ERROR`:
 
 ```python
 def _now() -> datetime:
@@ -9178,8 +9209,8 @@ def _now() -> datetime:
 ```python
         """Walk this source's watch state into the catalog.
 
-        Raises `WalkRefused`, having written nothing, while another walk of this
-        lane is alive. Never raises a `UsherPortError`.
+        A run another process is still walking is left to it, and this walk runs
+        beside it in a row of its own. Never raises a `UsherPortError`.
         """
 ```
 
@@ -9192,10 +9223,11 @@ After `incomplete = await self._runs.latest_incomplete_run(source.id, SyncRunKin
                 and incomplete.heartbeat_at is not None
                 and self._clock() - incomplete.heartbeat_at < STALE_AFTER
             ):
-                # Another process's walk, alive: superseding it would close the row
-                # under it, and resuming it would put two walks on one row. A row
-                # with no heartbeat predates heartbeats, and is taken for dead.
-                raise WalkRefused(f"a watch-state walk of {source.name} is already running")
+                # Another process's walk, alive. Closing or resuming its row would write
+                # under that walk, so this one runs in a row of its own: both merge the
+                # same states on one key, and converge. A row with no heartbeat predates
+                # heartbeats, and is taken for dead.
+                incomplete = None
 ```
 
 The fresh run's `SyncRun(…)` gains `heartbeat_at=self._clock(),` after `started_at=attempt_started,`. The reclaim, `run = incomplete.evolve(status=SyncRunStatus.RUNNING, error=None, finished_at=None)`, becomes:
@@ -9244,26 +9276,6 @@ async def test_a_refused_walk_fails_the_job_so_the_queue_retries_it(
     assert events == ["reconcile"], "the watch lane ran after the walk was refused"
     with pytest.raises(PortUnavailable):
         await adapter.get_item("anything")
-
-
-async def test_a_refused_watch_lane_fails_the_job_so_the_queue_retries_it(
-    source: Source, adapter: FakeSourceAdapter
-) -> None:
-    """Failed for a retry like a refused item walk, though the retry walks the items again."""
-    sources = FakeSourceRepository()
-    await sources.add(source)
-    events: list[str] = []
-    refusal = WalkRefused(f"a watch-state walk of {source.name} is already running")
-    reconcile = _RecordingReconcile(events)
-    watch = _RecordingWatch(events, raises=refusal)
-
-    with pytest.raises(PortUnavailable, match="is already running") as caught:
-        await sync_handler(sources, reconcile, watch, _Opener(adapter), user_id=_USER)(
-            Job(kind=JobKind.SYNC, key=f"{source.id}:full")
-        )
-
-    assert caught.value.__cause__ is refusal
-    assert events == ["reconcile", "watch"]
 ```
 
 `tests/unit/test_cli.py` — `_sync_failed` joins the `usher.cli` import. Append:
@@ -9272,7 +9284,7 @@ async def test_a_refused_watch_lane_fails_the_job_so_the_queue_retries_it(
 def test_the_exit_line_names_each_source_whose_walk_was_refused() -> None:
     """No run failed, and the command still must not claim success."""
     assert _sync_failed([], ["cli-a", "cli-b"]) == (
-        "refused for cli-a, cli-b: another walk of each is still running"
+        "refused for cli-a, cli-b: a whole-library walk of each is already running"
     )
 ```
 
@@ -9325,98 +9337,14 @@ async def test_usher_sync_exits_non_zero_when_a_live_walk_refuses_it(
     assert "cli-walking: refused: a whole-library walk of cli-walking is already running" in out
     assert "watch_state" not in out, "the watch lane ran after the walk was refused"
     assert exited.value.code == (
-        "refused for cli-walking: another walk of each is still running"
+        "refused for cli-walking: a whole-library walk of each is already running"
     )
-
-
-async def test_usher_sync_exits_non_zero_when_a_live_watch_walk_refuses_its_watch_lane(
-    cli_settings: Settings,
-    clean_slate: None,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """The item walk is printed and kept, though the watch lane after it is refused."""
-    source = Source(
-        kind=SourceKind.EMBY,
-        name="cli-watching",
-        base_url="https://emby.invalid",
-        credentials_ref=f"ref-{new_id()}",
-        device_id=str(new_id()),
-    )
-    live = SyncRun(
-        source_id=source.id, kind=SyncRunKind.WATCH_STATE, heartbeat_at=datetime.now(UTC)
-    )
-    async with _session_for(cli_settings) as session:
-        await PostgresSourceRepository(session).add(source)
-        await PostgresSyncRunRepository(session).add(live)
-        await session.commit()
-    adapter = FakeSourceAdapter(source)
-    adapter.go_offline()
-
-    async def _opened(pipeline: object, chosen: Source) -> FakeSourceAdapter:
-        return adapter
-
-    monkeypatch.setattr("usher.cli._open_adapter", _opened)
-
-    with pytest.raises(SystemExit) as exited:
-        await _sync(
-            cli_settings, source_name="cli-watching", kind="full", allow_full_retraction=False
-        )
-
-    out = capsys.readouterr().out
-    assert "cli-watching: full failed" in out, "the premise: the item walk ran, and failed"
-    assert "cli-watching: refused: a watch-state walk of cli-watching is already running" in out
-    assert exited.value.code == (
-        "1 sync run(s) failed: full; see the lines above and `usher sync-status`\n"
-        "refused for cli-watching: another walk of each is still running"
-    )
-```
-
-`tests/unit/test_api_lanes.py`, after Task 16's `test_the_gap_closer_walks_one_stream_even_unbounded_and_uncursored`:
-
-```python
-async def test_a_gap_close_whose_watch_lane_is_refused_leaves_the_push_lane_running(
-    fakes: _Fakes,
-) -> None:
-    """Another process's watch walk is alive, so the gap-closer says so and goes on.
-
-    A refusal escaping `_close_gap` would end this source's push lane until the next
-    refresh, which `crashed_sources()` names.
-    """
-    source = _source("A")
-    await _seed(fakes, source)
-    await _completed_walk(fakes, source)
-    await fakes.runs.add(
-        SyncRun(
-            source_id=source.id,
-            kind=SyncRunKind.WATCH_STATE,
-            cursor_at=_SYNCED_AT,
-            heartbeat_at=datetime.now(UTC),
-        )
-    )
-    fakes.adapters.stock(_item("emby-1"), _CHANGED_AT)
-    sink = io.StringIO()
-    supervisor = _supervisor(fakes, worker_enabled=False)
-    logger.remove()
-    try:
-        logger.add(sink, level="INFO")
-        await supervisor.start()
-        await _drain(
-            lambda: "watch-state gap" in sink.getvalue() or bool(supervisor.crashed_sources())
-        )
-        crashed = supervisor.crashed_sources()
-    finally:
-        logger.remove()
-        await supervisor.stop()
-    assert crashed == [], sink.getvalue()
-    assert fakes.watch_synced == ["A"], "the premise: the watch lane was asked"
-    assert _stored(fakes.media_items) == ["emby-1"], "the item lane's delta did not run first"
 ```
 
 - [ ] **Step 6: Run them to see them fail**
 
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_services_handlers.py tests/unit/test_cli.py tests/unit/test_api_lanes.py tests/integration/test_cli_pipeline.py -k "refused or refuses"`
-Expected: FAIL — both handler cases with `WalkRefused` raised where `PortUnavailable` was expected; the exit-line case with `TypeError: _sync_failed() takes 1 positional argument but 2 were given`; both CLI cases with `WalkRefused` propagating out of `_sync`; the gap-closer case on `crashed == []`, which reads `['A']`. The other cases the filter selects are older refusals, and pass.
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_services_handlers.py tests/unit/test_cli.py tests/integration/test_cli_pipeline.py -k "refused or refuses"`
+Expected: FAIL — the handler case with `WalkRefused` raised where `PortUnavailable` was expected; the exit-line case with `TypeError: _sync_failed() takes 1 positional argument but 2 were given`; the CLI case with `WalkRefused` propagating out of `_sync`. The other cases the filter selects are older refusals, and pass.
 
 - [ ] **Step 7: Handle the refusal at both callers**
 
@@ -9431,30 +9359,23 @@ and the walk becomes:
 ```python
         try:
             await reconcile.reconcile(source, lane, adapter)
-            await watch.sync(source, adapter, user_id=user_id)
         except WalkRefused as exc:
             # A port failure, so `JobWorker` fails the job for a retry instead of logging
             # a crash: a walk whose process died is resumed once its heartbeat is stale.
             raise PortUnavailable(str(exc)) from exc
+        else:
+            await watch.sync(source, adapter, user_id=user_id)
         finally:
             await adapter.aclose()
 ```
 
-The `try` holds the watch lane's call too, so a refused watch lane fails the job the same way.
+The watch lane moves to the `else:` arm, where it still runs only after a walk that raised nothing: the `except` is the item walk's alone, since `watch.sync` never refuses.
 
-`src/usher/cli.py` — `from usher.services.reconcile import RETRACTION_ERROR_CODE, WalkRefused`. In `_sync`, `failed: list[SyncRun] = []` gains `refused: list[str] = []` below it. Each run is kept as soon as it is printed, so a failed item walk is kept even when its watch lane is refused: `failed.extend(one for one in (run, watch) if one.status is SyncRunStatus.FAILED)` goes, and the item walk's `print(…)` is followed by
-
-```python
-                if run.status is SyncRunStatus.FAILED:
-                    failed.append(run)
-```
-
-and the watch lane's `print(…)` by the same two lines with `watch` for `run`. The `try:` around the two lanes gains, before its `finally:`:
+`src/usher/cli.py` — `from usher.services.reconcile import RETRACTION_ERROR_CODE, WalkRefused`. In `_sync`, `failed: list[SyncRun] = []` gains `refused: list[str] = []` below it; the `try:` around the two lanes gains, before its `finally:`:
 
 ```python
             except WalkRefused as exc:
-                # Another process's walk of this source is alive: an item walk, which
-                # runs its watch lane after, or the watch lane's own.
+                # Another process is walking this source, and runs its watch lane after.
                 print(f"{source.name}: refused: {exc}")
                 refused.append(source.name)
 ```
@@ -9493,7 +9414,7 @@ def _sync_failed(runs: Sequence[SyncRun], refused: Sequence[str] = ()) -> str:
         )
     if refused:
         lines.append(
-            f"refused for {', '.join(refused)}: another walk of each is still running"
+            f"refused for {', '.join(refused)}: a whole-library walk of each is already running"
         )
     if any(one.error_code == RETRACTION_ERROR_CODE for one in runs):
         lines.append(
@@ -9501,22 +9422,6 @@ def _sync_failed(runs: Sequence[SyncRun], refused: Sequence[str] = ()) -> str:
             "re-run with `usher sync --allow-full-retraction`"
         )
     return "\n".join(lines)
-```
-
-`src/usher/api/lanes.py` — `from usher.services.reconcile import WalkRefused`. In `_close_gap`, `await pipeline.watch.sync(source, adapter, user_id=await self._user_id())` becomes:
-
-```python
-            try:
-                await pipeline.watch.sync(source, adapter, user_id=await self._user_id())
-            except WalkRefused as exc:
-                # Another process's watch walk is alive. Escaping, this would end the push
-                # lane until the next refresh; that walk, or the next, reads the gap.
-                logger.info(
-                    "not closing {source}'s watch-state gap: {error}, and that walk or the "
-                    "next reads what changed meanwhile",
-                    source=source.name,
-                    error=str(exc),
-                )
 ```
 
 Run the Step 6 command. Expected: PASS.
@@ -9542,10 +9447,9 @@ The same file's paragraph beginning `**A watch-lane delta is resumable.**` gains
 
 ```markdown
 A watch run moves its heartbeat when it starts and with every batch it
-commits, and one still `running` whose heartbeat is under 10 minutes old is
-alive: a second watch run neither resumes nor closes it, but is refused —
-`usher sync` exits non-zero, a worker job fails and is retried, and the push
-lane's gap-closer leaves the watch lane to the walk already running.
+commits. One still `running` whose heartbeat is under 10 minutes old is alive,
+and a second watch run neither closes nor resumes it: it walks beside it in a
+run of its own, a delta from the cursor or, with no cursor yet, a first walk.
 ```
 
 `docs/prd/02-data-model.md`, "Supporting tables", the `sync_runs` row: Task 16's `` `heartbeat_at`, which a whole-library walk's writer moves on every commit ([03](03-sources-and-sync.md)) `` becomes `` `heartbeat_at`, which a whole-library walk's writer moves on every commit and the watch lane when it starts a run and with every batch ([03](03-sources-and-sync.md)) ``.
@@ -9556,7 +9460,8 @@ lane's gap-closer leaves the watch lane to the walk already running.
 - A whole-library walk that fails or is killed resumes where it stopped: the
   same run, each unit from the position it committed. While one is alive — its
   heartbeat under 10 minutes old — a second is refused, and `usher sync` exits
-  non-zero. A watch-state walk is refused the same way while another is alive.
+  non-zero. A watch-state walk started while another is alive runs beside it
+  instead of closing or resuming the other's run.
 ```
 
 `docs/guide/command-line.md`, "Syncing a media server". The bullet beginning `` **`usher sync` exits non-zero if any walk failed** `` becomes these two bullets:
@@ -9564,8 +9469,7 @@ lane's gap-closer leaves the watch lane to the walk already running.
 ```markdown
 - **`usher sync` exits non-zero if any walk failed or was refused**, after it
   has tried every source, so cron can notice. A walk of a whole library is
-  refused while another of the same kind is still running for that source,
-  and a watch-state walk while another watch-state walk is.
+  refused while another of the same kind is still running for that source.
 - **A walk of a whole library that stops part-way resumes.** The next walk of
   the same kind continues where each piece stopped, rather than starting again.
 ```
@@ -9581,7 +9485,14 @@ The file is past its 200-line target, so the same edit cuts the two lines it add
 - the write-back body bullet loses its last line, `` (`PlayCount` and `LastPlayedDate` survive the same omission.) ``;
 - in the Tier 4 bullet, `` `tmdb_id`. A probe with **no** year resolves nothing at all: the year `` and the line after it, `` `BETWEEN` propagates `NULL`, so "0.0%" there is not a bug. ``, become the one line `` `tmdb_id`. ``
 
-In "Gap-closing walks are unasked-for work", `` (`SUPERSEDED_ERROR`) `` becomes `` (`watch_sync.SUPERSEDED_ERROR`) ``: `WALK_SUPERSEDED_ERROR` is the other one.
+In "Gap-closing walks are unasked-for work", the paragraph's last sentence, from `` An unfinished first walk is superseded, never resumed (`SUPERSEDED_ERROR`): `` through `` so its row cannot be reset. ``, becomes the lines below. They name `watch_sync.SUPERSEDED_ERROR`, `WALK_SUPERSEDED_ERROR` being the other one, and add the live run this task leaves alone, without which the sentence is no longer true; `rules-file-maintenance.md` allows going a line or two over the target to correct a claim.
+
+```markdown
+An unfinished first walk is superseded, never resumed
+(`watch_sync.SUPERSEDED_ERROR`): `save` only raises `position`, so its row
+cannot be reset. A watch run whose heartbeat is under `STALE_AFTER` old is
+alive, first walk or delta, and is left alone: the next run walks beside it.
+```
 
 - [ ] **Step 9: Run everything this task touched**
 
@@ -9606,27 +9517,24 @@ Expected: PASS.
 14. `sync_handler` without its `except WalkRefused`. Expect the handler case to fail with `WalkRefused` where `PortUnavailable` was expected.
 15. `_sync` without its `except WalkRefused`. Expect the CLI case to fail with `WalkRefused` out of `_sync`.
 16. `_sync_failed` without the refused line. Expect the exit-line case to fail.
-17. The watch lane's live check with `<=` for `<`. Expect the `10:00` parametrisation of `test_a_running_watch_walk_is_refused_until_its_heartbeat_is_ten_minutes_old` to fail with `WalkRefused`.
-18. The watch lane's live check without `incomplete.status is SyncRunStatus.RUNNING`. Expect `test_a_failed_watch_walk_resumes_however_fresh_its_heartbeat` to fail with `WalkRefused`.
-19. Its last two conjuncts spelled `self._clock() - (incomplete.heartbeat_at or self._clock()) < STALE_AFTER`, a row with no heartbeat counting as live. Expect `test_a_running_run_left_by_a_killed_process_is_reclaimed_not_orphaned` and `test_an_unfinished_first_walk_is_superseded_rather_than_resumed` to fail with `WalkRefused`.
-20. The refusal moved below the supersede. Expect the `first-walk` parametrisation of `test_a_live_watch_walk_refuses_a_second_and_writes_nothing` to fail with `DID NOT RAISE`: the live first walk was closed instead.
-21. The watch lane's insert without `heartbeat_at=…`. Expect `test_a_watch_walk_that_fails_before_its_first_batch_still_leaves_its_heartbeat` to fail on `None == NOW`, and `test_every_batch_of_a_watch_walk_moves_its_heartbeat` on its beats, each a second early.
-22. The watch lane's `_flush` without `heartbeat_at=…`. Expect `test_every_batch_of_a_watch_walk_moves_its_heartbeat` to fail, every beat reading `NOW`.
-23. The watch lane's reclaim without `heartbeat_at=…`. Expect the `10:00` parametrisation of `test_a_running_watch_walk_is_refused_until_its_heartbeat_is_ten_minutes_old` to fail on `fixture.saved[0].heartbeat_at == NOW`.
-24. `sync_handler`'s watch call moved below its `try` statement. Expect `test_a_refused_watch_lane_fails_the_job_so_the_queue_retries_it` to fail with `WalkRefused` where `PortUnavailable` was expected.
-25. `_close_gap` without its `except WalkRefused`. Expect `test_a_gap_close_whose_watch_lane_is_refused_leaves_the_push_lane_running` to fail on `crashed == []`, which reads `['A']`.
-26. `_sync` keeping its runs after the watch lane, as before: `failed.extend(one for one in (run, watch) if one.status is SyncRunStatus.FAILED)` in place of the two `if`s. Expect `test_usher_sync_exits_non_zero_when_a_live_watch_walk_refuses_its_watch_lane` to fail on its exit line, which no longer names the failed item walk.
+17. The watch lane's live check with `<=` for `<`. Expect both `ten-minutes-old` parametrisations of `test_a_dead_watch_walk_is_superseded_or_resumed_as_before` to fail: the first walk's row is still `running`, and the delta is not resumed.
+18. The live check without `incomplete.status is SyncRunStatus.RUNNING`. Expect `test_a_failed_watch_walk_resumes_however_fresh_its_heartbeat` to fail on `run.id`, a fresh run having started beside the failed one.
+19. Its last two conjuncts spelled `self._clock() - (incomplete.heartbeat_at or self._clock()) < STALE_AFTER`, a row with no heartbeat counting as live. Expect both `no-heartbeat` parametrisations of `test_a_dead_watch_walk_is_superseded_or_resumed_as_before` to fail, and with them the older cases that start from a `running` row, `test_a_running_run_left_by_a_killed_process_is_reclaimed_not_orphaned` and `test_an_unfinished_first_walk_is_superseded_rather_than_resumed` among them.
+20. The live check's body, `incomplete = None`, replaced with `pass`, so a live run falls through to the supersede or the resume. Expect `test_a_live_first_watch_walk_is_left_alone_and_a_new_one_completes_beside_it` to fail on its live row, closed `failed`, and `test_a_live_watch_delta_is_not_resumed_and_a_new_delta_runs_beside_it` on its live row, resumed.
+21. The live check moved below the supersede. Expect `test_a_live_first_watch_walk_is_left_alone_and_a_new_one_completes_beside_it` to fail on its live row, which the supersede closes before the check runs. The delta case passes under this plant: a delta is never superseded.
+22. The watch lane's insert without `heartbeat_at=…`. Expect `test_a_watch_walk_that_fails_before_its_first_batch_still_leaves_its_heartbeat` to fail on `None == NOW`, and `test_every_batch_of_a_watch_walk_moves_its_heartbeat` on its beats, each a second early.
+23. The watch lane's `_flush` without `heartbeat_at=…`. Expect `test_every_batch_of_a_watch_walk_moves_its_heartbeat` to fail, every beat reading `NOW`.
+24. The watch lane's reclaim without `heartbeat_at=…`. Expect both `delta` parametrisations of `test_a_dead_watch_walk_is_superseded_or_resumed_as_before` to fail on `fixture.saved[0].heartbeat_at == NOW`.
 
 - [ ] **Step 11: Commit**
 
 ```bash
 git add src/usher/services/reconcile.py src/usher/services/watch_sync.py \
   src/usher/ports/repository/sync.py src/usher/services/handlers.py src/usher/cli.py \
-  src/usher/api/lanes.py tests/fakes/source_adapter.py docs/prd/02-data-model.md \
-  docs/prd/03-sources-and-sync.md CHANGELOG.md docs/guide/command-line.md \
-  .claude/rules/emby-push-and-ingest.md tests/unit/test_services_reconcile.py \
-  tests/unit/test_services_watch_sync.py tests/unit/test_services_handlers.py \
-  tests/unit/test_cli.py tests/unit/test_api_lanes.py \
+  tests/fakes/source_adapter.py docs/prd/02-data-model.md docs/prd/03-sources-and-sync.md \
+  CHANGELOG.md docs/guide/command-line.md .claude/rules/emby-push-and-ingest.md \
+  tests/unit/test_services_reconcile.py tests/unit/test_services_watch_sync.py \
+  tests/unit/test_services_handlers.py tests/unit/test_cli.py \
   tests/integration/test_services_reconcile.py tests/integration/test_cli_pipeline.py
 git commit -m "sync: resume an unfinished whole-library walk in place, and refuse a second live one"
 ```
@@ -9635,20 +9543,20 @@ git commit -m "sync: resume an unfinished whole-library walk in place, and refus
 
 ### Task 18: The watch lane runs as soon as the seed has committed
 
-Spec §2.4, "The watch lane runs after the seed". `reconcile` takes an optional `after_seed` hook and awaits it once every `SEED` unit has committed complete, before any `TITLES` unit is claimed. A resumed walk whose seed completed in an earlier attempt awaits it too, because that attempt may have died before its watch run did. A plan with no `SEED` unit, and every single walk, never calls it. `usher sync` and the worker's `sync_handler` pass a hook that runs `WatchStateSyncService.sync`, and still run the watch lane after the walk. The hook never stops the walk. A watch run it starts that is refused (Task 17) is reported — `usher sync` prints it and exits non-zero once every source is done, and a worker job logs it — and the walk goes on, the watch run after the walk covering what the refused one would have read. `usher sync` keeps a failed watch run from the hook for its exit line, like any other failed run.
+Spec §2.4, "The watch lane runs after the seed". `reconcile` takes an optional `after_seed` hook and awaits it once every `SEED` unit has committed complete, before any `TITLES` unit is claimed. A resumed walk whose seed completed in an earlier attempt awaits it too, because that attempt may have died before its watch run did. A plan with no `SEED` unit, and every single walk, never calls it. `usher sync` and the worker's `sync_handler` pass a hook that runs `WatchStateSyncService.sync`, and still run the watch lane after the walk. `usher sync` keeps a failed watch run from the hook for its exit line, like any other failed run.
 
 Departure 11 happens here. **The watch lane after the walk reads back to the instant the walk began.** `WatchStateSyncService.sync` takes `since_at_most`, and a fresh delta's cursor becomes the earlier of its own and that instant; both callers pass the walk's `started_at`. The run after the seed moved the cursor past the walk's start, so a state saved meanwhile for an item the walk had not yet stored would otherwise be skipped for good. A first walk, which has no cursor, and a resumed delta, whose position counts into the stream its own cursor selects, keep theirs.
 
 **Files:**
 - Modify: `src/usher/services/reconcile.py` (`reconcile`, `_walk_plan`)
 - Modify: `src/usher/services/watch_sync.py` (`sync`)
-- Modify: `src/usher/services/handlers.py` (`sync_handler`), `src/usher/cli.py` (`_sync`, `_sync_failed`, `_watch_line`, `_watch_lane`)
+- Modify: `src/usher/services/handlers.py` (`sync_handler`), `src/usher/cli.py` (`_sync`, `_watch_line`, `_watch_lane`)
 - Modify: `docs/prd/03-sources-and-sync.md`, `CHANGELOG.md`, `docs/guide/command-line.md`
-- Test: `tests/unit/test_services_reconcile.py`, `tests/unit/test_services_watch_sync.py`, `tests/unit/test_services_handlers.py`, `tests/unit/test_cli.py`, `tests/unit/test_cli_errors.py`, `tests/unit/test_api_lanes.py` (the two recorders' overrides), `tests/integration/test_cli_pipeline.py`
+- Test: `tests/unit/test_services_reconcile.py`, `tests/unit/test_services_watch_sync.py`, `tests/unit/test_services_handlers.py`, `tests/unit/test_cli_errors.py`, `tests/unit/test_api_lanes.py` (the two recorders' overrides), `tests/integration/test_cli_pipeline.py`
 
 **Interfaces:**
-- Consumes: Task 17's `_walk_plan(…, *, resumed)`, `unit_starts`, `WalkRefused`, `_sync`'s `failed` and `refused`, `_RecordingWatch(…, raises=…)`, and the CLI case's `_opened` shape; Task 16's `_Fixture`, `_shelve`, `FakeSourceAdapter.stage` and `.fail_unit_after`; Task 14's `SEED` stage; Task 6's `given_completed_walk`; Task 7's supersede in `sync`.
-- Produces: `reconcile(…, after_seed: Callable[[], Awaitable[object]] | None = None)`; `WatchStateSyncService.sync(…, since_at_most: AwareDatetime | None = None)`; `usher.cli._watch_line(source, watch) -> str`; `usher.cli._watch_lane(watch, source, adapter, user_id, failed, refused)`, the after-seed hook, which prints its run, keeps a failed one in `failed` and a refused one in `refused`, and never raises `WalkRefused`.
+- Consumes: Task 17's `_walk_plan(…, *, resumed)`, `unit_starts`, and the CLI case's `_opened` shape; `_sync`'s `failed`; Task 16's `_Fixture`, `_shelve`, `FakeSourceAdapter.stage` and `.fail_unit_after`; Task 14's `SEED` stage; Task 6's `given_completed_walk`; Task 7's supersede in `sync`.
+- Produces: `reconcile(…, after_seed: Callable[[], Awaitable[object]] | None = None)`; `WatchStateSyncService.sync(…, since_at_most: AwareDatetime | None = None)`; `usher.cli._watch_line(source, watch) -> str`; `usher.cli._watch_lane(watch, source, adapter, user_id, failed)`, the after-seed hook, which prints its run and keeps a failed one in `failed`.
 
 - [ ] **Step 1: Write the failing service tests**
 
@@ -9837,6 +9745,10 @@ and its loop becomes:
                 and after_seed is not None
                 and any(unit.stage is WalkStage.SEED for unit in units)
             ):
+                # Nothing beats while the hook runs, so a watch walk in it that outlasts
+                # `STALE_AFTER` leaves this walk looking dead. That watch walk is a filtered
+                # first walk or a cursored delta: a seed is planned only when both watch
+                # filters narrow the library, so a server ignoring them never gets here.
                 await after_seed()
 ```
 
@@ -9847,8 +9759,8 @@ and its loop becomes:
 
         A fresh delta reads from `since_at_most` when that is earlier than its own
         cursor, so a caller can cover what its item walk stored after this lane's
-        last run began. Raises `WalkRefused`, having written nothing, while another
-        walk of this lane is alive. Never raises a `UsherPortError`.
+        last run began. A run another process is still walking is left to it, and
+        this walk runs beside it in a row of its own. Never raises a `UsherPortError`.
         """
 ```
 
@@ -9878,7 +9790,7 @@ Expected: PASS.
         return run
 ```
 
-`_RecordingWatch.__init__` takes `refuse_first: bool = False` after `raises`, and stores it and `self.since_at_most: list[datetime | None] = []`. Its `sync` takes `since_at_most: datetime | None = None` after `user_id` and first appends it to `self.since_at_most`; once it has recorded the call, it raises `WalkRefused(f"a watch-state walk of {source.name} is already running")` if `refuse_first` is set and this is its first call. After Task 17's `test_a_refused_watch_lane_fails_the_job_so_the_queue_retries_it`:
+`_RecordingWatch.__init__` stores `self.since_at_most: list[datetime | None] = []`; its `sync` takes `since_at_most: datetime | None = None` after `user_id` and first appends it to `self.since_at_most`. After Task 17's `test_a_refused_walk_fails_the_job_so_the_queue_retries_it`:
 
 ```python
 async def test_the_sync_handler_runs_the_watch_lane_after_the_seed_and_again_after_the_walk(
@@ -9898,39 +9810,11 @@ async def test_the_sync_handler_runs_the_watch_lane_after_the_seed_and_again_aft
     assert events == ["reconcile", "watch", "watch"]
     [walk] = reconcile.runs
     assert watch.since_at_most == [None, walk.started_at]
-
-
-async def test_a_watch_run_refused_after_the_seed_lets_the_walk_go_on(
-    source: Source, adapter: FakeSourceAdapter
-) -> None:
-    """Logged, and the walk and the watch run after it still happen: the job completes."""
-    sources = FakeSourceRepository()
-    await sources.add(source)
-    events: list[str] = []
-    reconcile = _RecordingReconcile(events, seeded=True)
-    watch = _RecordingWatch(events, refuse_first=True)
-
-    await sync_handler(sources, reconcile, watch, _Opener(adapter), user_id=_USER)(
-        Job(kind=JobKind.SYNC, key=f"{source.id}:full")
-    )
-
-    assert events == ["reconcile", "watch", "watch"]
-    assert len(reconcile.runs) == 1, "the walk did not get past its seed"
 ```
 
 `tests/unit/test_api_lanes.py` — `_RecordingReconcile.reconcile` takes `after_seed: Callable[[], Awaitable[object]] | None = None` after `plan` and passes `after_seed=after_seed` on to `super().reconcile`; `_RecordingWatchSync.sync` takes `since_at_most: datetime | None = None` after `user_id` and passes it on. Neither is exercised here: the gap-closer passes neither.
 
-`tests/unit/test_cli.py`, after Task 17's `test_the_exit_line_names_each_source_whose_walk_was_refused`:
-
-```python
-def test_a_source_refused_after_the_seed_and_after_the_walk_is_named_once() -> None:
-    """Both watch runs of one source can be refused, and the exit line names it once."""
-    assert _sync_failed([], ["cli-a", "cli-a"]) == (
-        "refused for cli-a: another walk of each is still running"
-    )
-```
-
-`tests/unit/test_cli_errors.py` — imports: `Awaitable` beside `AsyncIterator`; `from tests.fakes.source_adapter import FakeSourceAdapter`; `SourceAdapter` beside `SourceNotSupported`; `WalkRefused` beside `RETRACTION_ERROR_CODE`; `from usher.services.watch_sync import WatchStateSyncService`. In `_sync_against`, `_Reconcile.reconcile` takes the hook and ignores it, or every `_sync_against` case raises `TypeError` once `_sync` passes `after_seed=`:
+`tests/unit/test_cli_errors.py` — imports: `Awaitable` beside `AsyncIterator`; `from tests.fakes.source_adapter import FakeSourceAdapter`; `SourceAdapter` beside `SourceNotSupported`; `from usher.services.watch_sync import WatchStateSyncService`. In `_sync_against`, `_Reconcile.reconcile` takes the hook and ignores it, or every `_sync_against` case raises `TypeError` once `_sync` passes `after_seed=`:
 
 ```python
         async def reconcile(
@@ -9944,7 +9828,7 @@ After `test_a_failed_watch_lane_is_a_non_zero_exit_without_the_retraction_hint`:
 class _AnsweringWatch(WatchStateSyncService):
     """A watch lane that gives one answer, and needs none of a real one's collaborators."""
 
-    def __init__(self, answer: SyncRun | WalkRefused) -> None:
+    def __init__(self, answer: SyncRun) -> None:
         self._answer = answer
 
     async def sync(
@@ -9955,14 +9839,10 @@ class _AnsweringWatch(WatchStateSyncService):
         user_id: uuid.UUID,
         since_at_most: datetime | None = None,
     ) -> SyncRun:
-        if isinstance(self._answer, WalkRefused):
-            raise self._answer
         return self._answer
 
 
-def _seed_hook(
-    answer: SyncRun | WalkRefused, failed: list[SyncRun], refused: list[str]
-) -> Callable[[], Awaitable[None]]:
+def _seed_hook(answer: SyncRun, failed: list[SyncRun]) -> Callable[[], Awaitable[None]]:
     """`_sync`'s after-seed hook for a source called Shared Emby, over that watch lane."""
     source = Source(
         kind=SourceKind.EMBY,
@@ -9972,7 +9852,7 @@ def _seed_hook(
         device_id="device-0",
     )
     return usher_cli._watch_lane(
-        _AnsweringWatch(answer), source, FakeSourceAdapter(source), new_id(), failed, refused
+        _AnsweringWatch(answer), source, FakeSourceAdapter(source), new_id(), failed
     )
 
 
@@ -9982,27 +9862,11 @@ async def test_a_failed_watch_run_after_the_seed_is_kept_for_the_exit_line(
     """Printed, and kept, so the command exits non-zero however the runs after it end."""
     run = _run(SyncRunKind.WATCH_STATE, SyncRunStatus.FAILED, error="source is unreachable")
     failed: list[SyncRun] = []
-    refused: list[str] = []
 
-    await _seed_hook(run, failed, refused)()
+    await _seed_hook(run, failed)()
 
-    assert (failed, refused) == ([run], [])
+    assert failed == [run]
     assert "Shared Emby: watch_state failed" in capsys.readouterr().out
-
-
-async def test_a_refused_watch_run_after_the_seed_is_kept_and_the_walk_goes_on(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """The hook returns rather than raising, so the walk that awaited it carries on."""
-    refusal = WalkRefused("a watch-state walk of Shared Emby is already running")
-    failed: list[SyncRun] = []
-    refused: list[str] = []
-
-    await _seed_hook(refusal, failed, refused)()
-
-    assert (failed, refused) == ([], ["Shared Emby"])
-    out = capsys.readouterr().out
-    assert "Shared Emby: refused: a watch-state walk of Shared Emby is already running" in out
 ```
 
 `tests/integration/test_cli_pipeline.py` — `from usher.ports.source import DEFAULT_UNIT_KEY, SourceItem, SourceItemKind`. After Task 17's `test_usher_sync_exits_non_zero_when_a_live_walk_refuses_it`:
@@ -10061,34 +9925,32 @@ async def test_usher_sync_runs_the_watch_lane_as_soon_as_the_seed_has_committed(
 
 - [ ] **Step 6: Run them to see them fail**
 
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_services_handlers.py tests/unit/test_cli.py tests/unit/test_cli_errors.py tests/integration/test_cli_pipeline.py -k "after_the_seed or as_soon_as_the_seed"`
-Expected: FAIL — the seeded handler case on `events == ["reconcile", "watch", "watch"]` (it reads `["reconcile", "watch"]`); the refused-hook handler case with `PortUnavailable`, the walk's own watch run being the first call and the one refused; both hook cases in `test_cli_errors.py` with `AttributeError: module 'usher.cli' has no attribute '_watch_lane'`; the twice-refused case on its exit line, `refused for cli-a, cli-a: …`; the CLI case on `printed`, which reads `["full", "watch_state"]`.
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_services_handlers.py tests/unit/test_cli_errors.py tests/integration/test_cli_pipeline.py -k "after_the_seed or as_soon_as_the_seed"`
+Expected: FAIL — the seeded handler case on `events == ["reconcile", "watch", "watch"]` (it reads `["reconcile", "watch"]`); the hook case in `test_cli_errors.py` with `AttributeError: module 'usher.cli' has no attribute '_watch_lane'`; the CLI case on `printed`, which reads `["full", "watch_state"]`.
 
 - [ ] **Step 7: Pass the hook, and the instant, at both callers**
 
-`src/usher/services/handlers.py`, `sync_handler`'s walk:
+`src/usher/services/handlers.py`, `sync_handler`'s walk becomes:
 
 ```python
-        async def after_seed() -> None:
-            try:
-                await watch.sync(source, adapter, user_id=user_id)
-            except WalkRefused as exc:
-                # The walk goes on: its own watch run after the walk reads what this
-                # one would have.
-                logger.info(
-                    "not running {source}'s watch lane after its seed: {error}; it runs "
-                    "again after the walk",
-                    source=source.name,
-                    error=str(exc),
-                )
-
         try:
-            run = await reconcile.reconcile(source, lane, adapter, after_seed=after_seed)
-            await watch.sync(source, adapter, user_id=user_id, since_at_most=run.started_at)
+            run = await reconcile.reconcile(
+                source,
+                lane,
+                adapter,
+                after_seed=lambda: watch.sync(source, adapter, user_id=user_id),
+            )
         except WalkRefused as exc:
+            # A port failure, so `JobWorker` fails the job for a retry instead of logging
+            # a crash: a walk whose process died is resumed once its heartbeat is stale.
+            raise PortUnavailable(str(exc)) from exc
+        else:
+            await watch.sync(source, adapter, user_id=user_id, since_at_most=run.started_at)
+        finally:
+            await adapter.aclose()
 ```
 
-(the `except` and `finally` arms unchanged), and its docstring gains `The watch lane also runs as soon as a whole-library walk's seed has committed; refused there, it is logged and the walk goes on.`
+and its docstring gains `The watch lane also runs as soon as a whole-library walk's seed has committed.`
 
 `src/usher/cli.py` — `from collections.abc import AsyncIterator, Awaitable, Callable, Sequence`; `from usher.services.watch_sync import WatchStateSyncService`. After `_sync_failed`:
 
@@ -10108,20 +9970,11 @@ def _watch_lane(
     adapter: SourceAdapter,
     user_id: uuid.UUID,
     failed: list[SyncRun],
-    refused: list[str],
 ) -> Callable[[], Awaitable[None]]:
-    """The watch lane as a walk's `after_seed`, printed and kept like the run after the walk.
-
-    A refused run is kept for the exit line, and the walk that awaited it goes on.
-    """
+    """The watch lane as a walk's `after_seed`, printed and kept like the run after the walk."""
 
     async def run() -> None:
-        try:
-            watched = await watch.sync(source, adapter, user_id=user_id)
-        except WalkRefused as exc:
-            print(f"{source.name}: refused: {exc}")
-            refused.append(source.name)
-            return
+        watched = await watch.sync(source, adapter, user_id=user_id)
         print(_watch_line(source, watched))
         if watched.status is SyncRunStatus.FAILED:
             failed.append(watched)
@@ -10132,7 +9985,7 @@ def _watch_lane(
 In `_sync`, the docstring becomes `"""Walk each selected source: items, then watch state, which also runs once a seed lands."""`, the item call becomes:
 
 ```python
-                hook = _watch_lane(pipeline.watch, source, adapter, user_id, failed, refused)
+                hook = _watch_lane(pipeline.watch, source, adapter, user_id, failed)
                 run = await pipeline.reconcile.reconcile(
                     source, SyncRunKind(kind), adapter, after_seed=hook
                 )
@@ -10146,8 +9999,6 @@ and the watch call and its `print` become:
                 )
                 print(_watch_line(source, watch))
 ```
-
-and in `_sync_failed`, `', '.join(refused)` becomes `', '.join(dict.fromkeys(refused))`: the watch runs after the seed and after the walk can both be refused.
 
 Run the Step 6 command. Expected: PASS.
 
@@ -10196,14 +10047,11 @@ Expected: PASS.
 6. `max` for `min` in the clamp. Expect the same case to fail, and `test_since_at_most_never_moves_a_cursor_forward` with it.
 7. The clamp spelled `cursor = since_at_most if cursor is None else min(cursor, since_at_most)` (with `since_at_most is not None` kept). Expect `test_since_at_most_leaves_a_first_walk_without_a_cursor` to fail.
 8. The resumed branch's `cursor = incomplete.cursor_at` clamped the same way. Expect `test_since_at_most_leaves_a_resumed_deltas_cursor_alone` to fail on `items_seen`, `movie-1` read: the row's own `cursor_at` is unchanged under this plant, so its premise still holds.
-9. `sync_handler` without `after_seed=`. Expect `test_the_sync_handler_runs_the_watch_lane_after_the_seed_and_again_after_the_walk` to fail on `events`, and `test_a_watch_run_refused_after_the_seed_lets_the_walk_go_on` with `PortUnavailable`.
+9. `sync_handler` without `after_seed=`. Expect `test_the_sync_handler_runs_the_watch_lane_after_the_seed_and_again_after_the_walk` to fail on `events`.
 10. `sync_handler`'s second watch call without `since_at_most=`. Expect `test_the_sync_handler_runs_the_watch_lane_after_the_seed_and_again_after_the_walk` to fail on `watch.since_at_most`.
 11. `_sync` without `after_seed=`. Expect `test_usher_sync_runs_the_watch_lane_as_soon_as_the_seed_has_committed` to fail on `printed`.
 12. `_sync`'s watch call without `since_at_most=`. Expect `test_usher_sync_runs_the_watch_lane_as_soon_as_the_seed_has_committed` to fail on the cursors: the second watch run's is the first's `started_at`.
-13. `sync_handler`'s `after_seed` without its `except WalkRefused`. Expect `test_a_watch_run_refused_after_the_seed_lets_the_walk_go_on` to fail with `PortUnavailable`, the hook's refusal having escaped the walk.
-14. `_watch_lane` without its `except WalkRefused`. Expect `test_a_refused_watch_run_after_the_seed_is_kept_and_the_walk_goes_on` to fail with `WalkRefused`.
-15. `_watch_lane` without `failed.append(watched)`. Expect `test_a_failed_watch_run_after_the_seed_is_kept_for_the_exit_line` to fail on `([], []) == ([run], [])`.
-16. `_sync_failed` joining `refused` rather than `dict.fromkeys(refused)`. Expect `test_a_source_refused_after_the_seed_and_after_the_walk_is_named_once` to fail.
+13. `_watch_lane` without `failed.append(watched)`. Expect `test_a_failed_watch_run_after_the_seed_is_kept_for_the_exit_line` to fail on `[] == [run]`.
 
 - [ ] **Step 11: Commit**
 
@@ -10212,7 +10060,7 @@ git add src/usher/services/reconcile.py src/usher/services/watch_sync.py \
   src/usher/services/handlers.py src/usher/cli.py docs/prd/03-sources-and-sync.md CHANGELOG.md \
   docs/guide/command-line.md tests/unit/test_services_reconcile.py \
   tests/unit/test_services_watch_sync.py tests/unit/test_services_handlers.py \
-  tests/unit/test_cli.py tests/unit/test_cli_errors.py tests/unit/test_api_lanes.py \
+  tests/unit/test_cli_errors.py tests/unit/test_api_lanes.py \
   tests/integration/test_cli_pipeline.py
 git commit -m "sync: run the watch lane as soon as a whole-library walk's seed has committed"
 ```
