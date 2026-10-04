@@ -36,6 +36,8 @@ async def instant_sleep(seconds: float) -> None:
 class EmbyHarness(SourceHarness):
     def __init__(self) -> None:
         self._server = FakeEmbyServer(page_size=PAGE_SIZE)
+        # Library name -> the view id minted for it the first time it was named.
+        self._view_ids: dict[str, str] = {}
         self._source = Source(
             id=new_id(),
             kind=SourceKind.EMBY,
@@ -102,12 +104,12 @@ class EmbyHarness(SourceHarness):
     async def given_item_in_libraries(
         self, item: SourceItem, libraries: Sequence[str], *, changed_at: AwareDatetime
     ) -> None:
-        """Libraries are ignored until the server can serve views.
-
-        `EmbyAdapter` plans the port's single unit for now, which covers every item
-        wherever it is placed.
-        """
         self._server.add_item(item, changed_at)
+        for name in libraries:
+            if name not in self._view_ids:
+                self._view_ids[name] = f"{0xD001 + len(self._view_ids):032x}"
+                self._server.add_view(self._view_ids[name], name)
+        self._server.place(item.external_id, *(self._view_ids[name] for name in libraries))
 
     async def given_watch_state(self, state: SourceWatchState) -> None:
         self._server.set_watch_state(state)

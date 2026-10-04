@@ -19,7 +19,8 @@ from usher.adapters.emby.mapping import (
     to_source_item,
     to_watch_state,
 )
-from usher.adapters.emby.paging import OffsetWindow
+from usher.adapters.emby.paging import PAGE_OVERLAP, OffsetWindow
+from usher.adapters.emby.planning import LibraryUnit, episode_chunks, parse_unit_key
 from usher.adapters.emby.playback import build_stream_targets
 from usher.adapters.emby.push import (
     DEFAULT_POLL_SECONDS,
@@ -39,6 +40,7 @@ from usher.adapters.emby.session import (
 )
 from usher.adapters.http import SourceGate
 from usher.domain.source import Source
+from usher.domain.sync import WalkStage
 from usher.ports.credentials import SourceCredentials
 from usher.ports.errors import (
     PortDataMalformed,
@@ -47,12 +49,16 @@ from usher.ports.errors import (
     UsherPortError,
 )
 from usher.ports.source import (
+    DEFAULT_UNIT_KEY,
     SourceAdapter,
     SourceEvent,
     SourceItem,
     SourceStatus,
     SourceWatchState,
     StreamTarget,
+    UnitPage,
+    WalkPlan,
+    WalkUnit,
     WatchStateUpdate,
 )
 
@@ -61,6 +67,11 @@ _tracer = trace.get_tracer("usher.source.emby")
 # The three types Usher models. A server that ignores this filter returns
 # Seasons and BoxSets too; the mapper skips them rather than failing.
 ITEM_TYPES = "Movie,Series,Episode"
+
+# Views that only point at items held in libraries. Walking them reads those
+# items twice, and counting them can lift the libraries' sum to the source's
+# total while an item sits in no library at all.
+NOT_LIBRARIES = frozenset({"boxsets", "playlists"})
 
 # Deliberately no `Path`: nothing needs a filesystem path, so none is
 # requested and none reaches `SourceItem.raw`.
@@ -151,7 +162,7 @@ def _listed_state(payload: dict[str, Any], user_id: str) -> SourceWatchState | N
 def _listing_query(
     since_param: str, since: AwareDatetime | None, *, filters: str | None = None
 ) -> dict[str, str]:
-    """A listing's parameters, less the paging `_walk` adds to each request."""
+    """A listing's parameters, less the paging `_pages` adds to each request."""
     query = {
         "Recursive": "true",
         "IncludeItemTypes": ITEM_TYPES,
@@ -175,6 +186,7 @@ class EmbyAdapter(SourceAdapter):
         client: httpx.AsyncClient | None = None,
         page_size: int = 1000,
         max_pages: int = MAX_PAGES,
+        unit_max_items: int = 100_000,
         timeout_seconds: float = 30.0,
         reauth_cooldown_seconds: float = 60.0,
         limiter: SourceGate | None = None,
@@ -188,6 +200,10 @@ class EmbyAdapter(SourceAdapter):
         self._sleep = sleep
         self._page_size = page_size
         self._max_pages = max_pages
+        self._unit_max_items = unit_max_items
+        # The library ids, read by the plan or by the first unit a resumed walk asks for.
+        self._library_ids: frozenset[str] | None = None
+        self._library_lock = asyncio.Lock()
         # Ownership is tracked, not assumed: `aclose()` closes a client this
         # adapter created and leaves an injected one alone. Closing someone
         # else's client is what the bulk adapters' no-op `aclose` avoids.
@@ -318,16 +334,35 @@ class EmbyAdapter(SourceAdapter):
     async def _walk(
         self, query: Mapping[str, str], *, start_index: int
     ) -> AsyncGenerator[dict[str, Any]]:
+        """Every new entry of one listing, from `start_index` to its end."""
+        async with aclosing(self._pages(query, start_index=start_index)) as pages:
+            async for entries, _ in pages:
+                for entry in entries:
+                    yield entry
+
+    async def _pages(
+        self,
+        query: Mapping[str, str],
+        *,
+        start_index: int,
+        stop: int | None = None,
+        path: str | None = None,
+    ) -> AsyncGenerator[tuple[list[dict[str, Any]], int]]:
         """Page one listing to its end, one request ahead of the consumer.
 
-        The next page is asked for as soon as a page arrives and before its items
-        are yielded, so the source answers while the caller writes; the request
-        outstanding when the consumer stops is cancelled. `start_index` is the
-        resume point (#41), never defaulted: every caller states its own.
+        Yields each page's new entries with the `StartIndex` that resumes after it,
+        which is the next request's start, reach-back included. The next page is
+        asked for as soon as a page arrives and before it is yielded; the request
+        outstanding when the consumer stops is cancelled. `stop` bounds the walk,
+        and one already at its stop sends nothing. `start_index` is the resume
+        point (#41), never defaulted: every caller states its own.
         """
-        path = f"/Users/{_segment(await self._session.user_id())}/Items"
-        window = OffsetWindow(limit=self._page_size, start=start_index)
-        pending = self._read(path, query, window.start, count=True)
+        if path is None:
+            path = await self._items_path()
+        window = OffsetWindow(limit=self._page_size, start=start_index, stop=stop)
+        if window.request_limit == 0:
+            return
+        pending = self._read(path, query, window.start, window.request_limit, count=True)
         try:
             # `for`, not `while True`: the bound is part of the loop, and the raise
             # below is reachable only by a walk that never ended.
@@ -351,10 +386,11 @@ class EmbyAdapter(SourceAdapter):
                         overlap=window.overlap,
                         start=window.start,
                     )
+                resume_at = window.cursor
                 if not page.ended and number < self._max_pages:
-                    pending = self._read(path, query, window.advance(), count=False)
-                for payload in page.fresh:
-                    yield payload
+                    resume_at = window.advance()
+                    pending = self._read(path, query, resume_at, window.request_limit, count=False)
+                yield page.fresh, resume_at
                 if page.ended:
                     return
         finally:
@@ -366,16 +402,29 @@ class EmbyAdapter(SourceAdapter):
         )
 
     def _read(
-        self, path: str, query: Mapping[str, str], start: int, *, count: bool
+        self, path: str, query: Mapping[str, str], start: int, limit: int, *, count: bool
     ) -> asyncio.Task[dict[str, Any]]:
         """One page's request, started now and awaited when the walk reaches it."""
         params = {
             **query,
             "StartIndex": str(start),
-            "Limit": str(self._page_size),
+            "Limit": str(limit),
             "EnableTotalRecordCount": "true" if count else "false",
         }
         return asyncio.create_task(self._page(path, params, start))
+
+    async def _items_path(self) -> str:
+        return f"/Users/{_segment(await self._session.user_id())}/Items"
+
+    async def _unit_pages(
+        self, query: Mapping[str, str], *, start_index: int, stop: int | None = None
+    ) -> AsyncGenerator[UnitPage]:
+        """`_pages` as the port's pages; one holding no item Usher models is not yielded."""
+        async with aclosing(self._pages(query, start_index=start_index, stop=stop)) as pages:
+            async for entries, resume_at in pages:
+                items = tuple(item for item in map(to_source_item, entries) if item is not None)
+                if items:
+                    yield UnitPage(items, resume_at)
 
     async def _page(self, path: str, params: Mapping[str, str], start: int) -> dict[str, Any]:
         """One page of a walk, asked for again while its failure is one a wait can fix.
@@ -438,6 +487,119 @@ class EmbyAdapter(SourceAdapter):
                 item = to_source_item(payload)
                 if item is not None:
                     yield item
+
+    async def plan_walk(self) -> WalkPlan:
+        """Each library's titles, then its episodes in chunks, largest library first.
+
+        A library is a view other than a collection or a playlist. Every library and
+        the whole source are counted at once. When the libraries hold fewer items
+        than the source, the plan is one walk of everything, and a WARNING names
+        both numbers. A library is counted once, over every type a walk lists, so
+        its count rides on its TITLES unit.
+        """
+        libraries = await self._views()
+        self._library_ids = frozenset(view_id for view_id, _ in libraries)
+        answers = await asyncio.gather(
+            self._count(None),
+            *(self._count(view_id) for view_id, _ in libraries),
+            return_exceptions=True,
+        )
+        counts: list[int] = []
+        for answer in answers:
+            # Raised only once every count has settled, so none is left running with
+            # nobody to read what it raised.
+            if isinstance(answer, BaseException):
+                raise answer
+            counts.append(answer)
+        total, held = counts[0], counts[1:]
+        if not libraries or sum(held) < total:
+            logger.warning(
+                "{source}'s libraries hold {held} items against a total of {total}; "
+                "walking the whole library as one unit",
+                source=self._source.name,
+                held=sum(held),
+                total=total,
+            )
+            whole = WalkUnit(DEFAULT_UNIT_KEY, WalkStage.TITLES, "the whole library", total)
+            return WalkPlan((whole,), expected_total=total)
+        ranked = sorted(zip(libraries, held, strict=True), key=lambda pair: pair[1], reverse=True)
+        units: list[WalkUnit] = []
+        for (view_id, name), count in ranked:
+            titles = LibraryUnit(WalkStage.TITLES, view_id)
+            units.append(WalkUnit(titles.key, WalkStage.TITLES, titles.label(name), count))
+        for (view_id, name), count in ranked:
+            for chunk in episode_chunks(view_id, count, self._unit_max_items):
+                units.append(WalkUnit(chunk.key, WalkStage.EPISODES, chunk.label(name)))
+        return WalkPlan(tuple(units), expected_total=total)
+
+    def list_unit(self, key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage]:
+        if key == DEFAULT_UNIT_KEY:
+            query = _listing_query(LIBRARY_SINCE_PARAM, None)
+            return self._unit_pages(query, start_index=start_index)
+        unit = parse_unit_key(key)
+        if unit is None:
+            raise PortDataMalformed(f"no plan of this adapter's could name walk unit {key!r}")
+        return self._library_unit(unit, start_index)
+
+    async def _library_unit(self, unit: LibraryUnit, start_index: int) -> AsyncGenerator[UnitPage]:
+        # A library gone since the plan was made has nothing left to walk, and its
+        # id is never sent: a server can answer a `ParentId` it does not know with
+        # the whole library.
+        if unit.view_id not in await self._known_libraries():
+            return
+        query = {
+            **_listing_query(LIBRARY_SINCE_PARAM, None),
+            "ParentId": unit.view_id,
+            "IncludeItemTypes": unit.item_types,
+        }
+        # A bounded chunk reads `PAGE_OVERLAP` items past its end, so a shift at the
+        # boundary with the next chunk is covered the way one between pages is.
+        stop = None if unit.upper is None else unit.upper + PAGE_OVERLAP
+        pages = self._unit_pages(query, start_index=max(start_index, unit.lower), stop=stop)
+        async with aclosing(pages) as unit_pages:
+            async for page in unit_pages:
+                yield page
+
+    async def _views(self) -> list[tuple[str, str]]:
+        """The account's libraries, as `(id, name)`."""
+        user_id = await self._session.user_id()
+        body = await self._page(f"/Users/{_segment(user_id)}/Views", {}, 0)
+        entries = body.get("Items")
+        if not isinstance(entries, list):
+            raise PortDataMalformed("Emby's view listing carried no Items array")
+        libraries: list[tuple[str, str]] = []
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("CollectionType") in NOT_LIBRARIES:
+                continue
+            view_id, name = entry.get("Id"), entry.get("Name")
+            if isinstance(view_id, str) and view_id:
+                libraries.append((view_id, name if isinstance(name, str) and name else view_id))
+        return libraries
+
+    async def _known_libraries(self) -> frozenset[str]:
+        """The library ids, read once per adapter however many walkers ask at once."""
+        async with self._library_lock:
+            if self._library_ids is None:
+                self._library_ids = frozenset(view_id for view_id, _ in await self._views())
+            return self._library_ids
+
+    async def _count(self, view_id: str | None) -> int:
+        """How many items a walk lists: in one library, or with none, in the whole source."""
+        params = {
+            "Recursive": "true",
+            "IncludeItemTypes": ITEM_TYPES,
+            "Limit": "0",
+            "EnableTotalRecordCount": "true",
+        }
+        if view_id is not None:
+            params["ParentId"] = view_id
+        body = await self._page(await self._items_path(), params, 0)
+        total = body.get("TotalRecordCount")
+        # A count the server left out is not a count of nothing: a source total
+        # read as zero would pass every coverage check.
+        if not isinstance(total, int) or total < 0:
+            raise PortDataMalformed("Emby's count carried no TotalRecordCount")
+        return total
 
     async def _fetch(self, external_id: str, *, op: str = "get_item") -> dict[str, Any] | None:
         """One item's payload, or `None` for a 404.

@@ -164,7 +164,8 @@ invented value.
 
 `tests/fakes/emby_server.py` uses these files as templates and overwrites the
 identity fields from the seeded `SourceItem` — the item routes from the four
-item fixtures, and `user_data_changed_frame`/`library_changed_frame`/
+item fixtures, `/Users/{id}/Views` from `view_item.json`, and
+`user_data_changed_frame`/`library_changed_frame`/
 `sessions_frame` from the three push ones — so the contract suite is not
 coupled to the values here. Rendering the push frames *from* these files
 rather than from dicts built inline is what keeps the fake from drifting

@@ -60,6 +60,7 @@ _ROUTE_WORDS: frozenset[str] = frozenset(
         "System",
         "Info",
         "Public",
+        "Views",
     }
 )
 

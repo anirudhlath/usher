@@ -214,6 +214,28 @@ class SourceAdapterContract:
                 async for _ in pages:
                     pass
 
+    async def test_a_unit_resumes_after_a_page_from_its_resume_at(
+        self, harness: SourceHarness
+    ) -> None:
+        """`start_index=page.resume_at` continues after that page and loses nothing.
+
+        Seven items over pages of two, so the first page cannot be the whole unit.
+        """
+        await self._seed_library(harness)
+        plan = await harness.adapter.plan_walk()
+        [unit] = [one for one in plan.units if one.stage is not WalkStage.SEED]
+        async with aclosing(harness.adapter.list_unit(unit.key)) as pages:
+            first = await anext(pages)
+        assert len(first.items) < 7, "the premise: the unit takes more than one page"
+        rest: set[str] = set()
+        async with aclosing(
+            harness.adapter.list_unit(unit.key, start_index=first.resume_at)
+        ) as pages:
+            async for page in pages:
+                rest.update(item.external_id for item in page.items)
+        seen = {item.external_id for item in first.items} | rest
+        assert seen == {f"filler-{index}" for index in range(7)}
+
     # --- mapping -------------------------------------------------------
 
     async def test_a_movie_round_trips_its_quality_facts(self, harness: SourceHarness) -> None:

@@ -235,3 +235,27 @@ def test_a_capped_page_that_brought_nothing_new_does_not_end_the_walk() -> None:
 def test_a_first_page_of_nothing_but_junk_does_not_end_the_walk() -> None:
     """The drained rule compares against an earlier page, and the first page has none."""
     assert not OffsetWindow(limit=4, start=0).receive(["junk", "junk"], 10).ended
+
+
+def test_a_bounded_window_asks_for_no_more_than_its_stop_allows() -> None:
+    """Neither the total nor a drained tail ends this walk; only the stop does."""
+    window = OffsetWindow(limit=4, start=0, stop=5)
+    assert window.request_limit == 4
+    assert not window.receive(_entries("a", "b", "c", "d"), 9).ended
+    assert window.advance() == 2
+    assert window.request_limit == 3
+    assert window.receive(_entries("c", "d", "e"), 0).ended
+
+
+def test_a_bounded_window_already_at_its_stop_asks_for_nothing() -> None:
+    assert OffsetWindow(limit=4, start=5, stop=5).request_limit == 0
+
+
+def test_an_unbounded_window_always_asks_for_its_limit() -> None:
+    assert OffsetWindow(limit=4, start=10_000).request_limit == 4
+
+
+def test_the_cursor_is_where_the_page_just_served_ends() -> None:
+    window = OffsetWindow(limit=4, start=10)
+    window.receive(_entries("a", "b", "c"), 20)
+    assert window.cursor == 13

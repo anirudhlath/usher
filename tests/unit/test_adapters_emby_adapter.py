@@ -8,6 +8,7 @@ import json
 import time
 import weakref
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, Sequence
+from contextlib import aclosing
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -27,11 +28,13 @@ from tests.fakes.emby_server import SERVER_VERSION, USER_ID, FakeEmbyServer
 from tests.fakes.push_connection import FakePushConnection, FakePushConnector
 from tests.fakes.slow_transport import SlowTransport
 from usher.adapters.emby.adapter import MAX_PAGES, EmbyAdapter
+from usher.adapters.emby.paging import PAGE_OVERLAP
 from usher.adapters.emby.push import SUBSCRIBE_FRAME
 from usher.adapters.emby.session import RequestRefused, redact_path
 from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
 from usher.domain.source import Source
+from usher.domain.sync import WalkStage
 from usher.ports.credentials import SourceCredentials
 from usher.ports.errors import (
     PortAuthFailed,
@@ -39,10 +42,12 @@ from usher.ports.errors import (
     PortUnavailable,
 )
 from usher.ports.source import (
+    DEFAULT_UNIT_KEY,
     SourceEventKind,
     SourceItem,
     SourceItemKind,
     SourceWatchState,
+    WalkUnit,
     WatchStateUpdate,
 )
 
@@ -92,6 +97,66 @@ def _numbered(count: int) -> list[SourceItem]:
     ]
 
 
+def _series(index: int) -> SourceItem:
+    return SourceItem(
+        external_id=f"series-{index}",
+        name=f"Series {index}",
+        kind=SourceItemKind.SERIES,
+        added_at=T0,
+    )
+
+
+def _episode(index: int) -> SourceItem:
+    """Episode `index` of `series-0`; zero-padded, so listing order is index order."""
+    return SourceItem(
+        external_id=f"episode-{index:03d}",
+        name=f"Episode {index:03d}",
+        kind=SourceItemKind.EPISODE,
+        series_external_id="series-0",
+        season_number=1,
+        episode_number=index + 1,
+        added_at=T0,
+    )
+
+
+def _library(
+    server: FakeEmbyServer,
+    number: int,
+    name: str,
+    items: Sequence[SourceItem],
+    *,
+    collection_type: str | None = "movies",
+) -> str:
+    """A view holding `items`, each seeded into the server. Returns the view's id."""
+    view_id = f"{0xD000 + number:032x}"
+    server.add_view(view_id, name, collection_type=collection_type)
+    for item in items:
+        server.add_item(item, T0)
+        server.place(item.external_id, view_id)
+    return view_id
+
+
+def _recorded(
+    server: FakeEmbyServer, *, page_size: int = 2, unit_max_items: int = 100_000
+) -> tuple[EmbyAdapter, list[httpx.Request]]:
+    """An adapter over `server`, and every request it sends, query included."""
+    seen: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return server.handle(request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handle), base_url=SOURCE.base_url)
+    adapter = EmbyAdapter(
+        SOURCE, CREDENTIALS, client=client, page_size=page_size, unit_max_items=unit_max_items
+    )
+    return adapter, seen
+
+
+def _listings(seen: Sequence[httpx.Request]) -> list[httpx.Request]:
+    return [request for request in seen if request.url.path.endswith("/Items")]
+
+
 def _deleting(
     server: FakeEmbyServer, external_ids: Sequence[str]
 ) -> Callable[[httpx.Request], httpx.Response]:
@@ -108,7 +173,11 @@ def _deleting(
 
 
 def _adapter(
-    server: FakeEmbyServer, *, page_size: int = 2, max_pages: int = MAX_PAGES
+    server: FakeEmbyServer,
+    *,
+    page_size: int = 2,
+    max_pages: int = MAX_PAGES,
+    unit_max_items: int = 100_000,
 ) -> EmbyAdapter:
     return EmbyAdapter(
         SOURCE,
@@ -116,6 +185,7 @@ def _adapter(
         client=httpx.AsyncClient(transport=server.transport(), base_url=SOURCE.base_url),
         page_size=page_size,
         max_pages=max_pages,
+        unit_max_items=unit_max_items,
     )
 
 
@@ -3070,6 +3140,313 @@ async def test_concurrent_expired_sessions_produce_one_authentication() -> None:
     )
 
 
+# --- the walk plan -----------------------------------------------------
+
+
+async def test_each_library_is_planned_as_its_titles_then_its_episodes_largest_first() -> None:
+    """Every TITLES unit before every EPISODES unit, each stage largest library first.
+
+    The smaller library is added first, so the order is the planner's, not the server's.
+    """
+    server = FakeEmbyServer()
+    films = _library(server, 1, "Films", [_movie(0)])
+    shows = _library(
+        server,
+        2,
+        "Shows",
+        [_series(0), *(_episode(index) for index in range(3))],
+        collection_type="tvshows",
+    )
+    adapter = _adapter(server)
+    try:
+        plan = await adapter.plan_walk()
+    finally:
+        await adapter.aclose()
+    walks = tuple(unit for unit in plan.units if unit.stage is not WalkStage.SEED)
+    assert walks == (
+        WalkUnit(f"titles:{shows}", WalkStage.TITLES, "titles in Shows", 4),
+        WalkUnit(f"titles:{films}", WalkStage.TITLES, "titles in Films", 1),
+        WalkUnit(f"episodes:{shows}:0:", WalkStage.EPISODES, "episodes in Shows"),
+        WalkUnit(f"episodes:{films}:0:", WalkStage.EPISODES, "episodes in Films"),
+    )
+    assert plan.expected_total == 5
+
+
+async def test_a_titles_unit_lists_titles_and_an_episodes_unit_lists_episodes() -> None:
+    """The stage barrier rests on this: an episode in a TITLES unit lands before its series."""
+    server = FakeEmbyServer()
+    shows = _library(
+        server, 2, "Shows", [_series(0), _episode(0), _episode(1)], collection_type="tvshows"
+    )
+    adapter = _adapter(server)
+    try:
+        titles = [
+            item.external_id
+            async for page in adapter.list_unit(f"titles:{shows}")
+            for item in page.items
+        ]
+        episodes = [
+            item.external_id
+            async for page in adapter.list_unit(f"episodes:{shows}:0:")
+            for item in page.items
+        ]
+    finally:
+        await adapter.aclose()
+    assert titles == ["series-0"]
+    assert sorted(episodes) == ["episode-000", "episode-001"]
+
+
+async def test_a_library_s_episodes_are_planned_in_chunks_of_the_unit_size() -> None:
+    server = FakeEmbyServer()
+    shows = _library(
+        server,
+        2,
+        "Shows",
+        [_series(0), *(_episode(index) for index in range(6))],
+        collection_type="tvshows",
+    )
+    adapter = _adapter(server, unit_max_items=3)
+    try:
+        plan = await adapter.plan_walk()
+    finally:
+        await adapter.aclose()
+    episodes = [unit for unit in plan.units if unit.stage is WalkStage.EPISODES]
+    assert [(unit.key, unit.label) for unit in episodes] == [
+        (f"episodes:{shows}:0:3", "episodes in Shows, 0 to 3"),
+        (f"episodes:{shows}:3:6", "episodes in Shows, 3 to 6"),
+        (f"episodes:{shows}:6:", "episodes in Shows, from 6"),
+    ]
+
+
+async def test_a_bounded_chunk_reads_past_its_end_by_the_overlap_and_no_further() -> None:
+    """Chunk 0 to 100 reads episodes 0 to 149, and no request reaches past 150.
+
+    The reach past its end covers a shift at the boundary with the next chunk.
+    """
+    server = FakeEmbyServer()
+    shows = _library(
+        server,
+        2,
+        "Shows",
+        [_series(0), *(_episode(index) for index in range(249))],
+        collection_type="tvshows",
+    )
+    adapter, seen = _recorded(server, page_size=40, unit_max_items=100)
+    try:
+        read = {
+            item.external_id
+            async for page in adapter.list_unit(f"episodes:{shows}:0:100")
+            for item in page.items
+        }
+    finally:
+        await adapter.aclose()
+    ends = [
+        int(request.url.params["StartIndex"]) + int(request.url.params["Limit"])
+        for request in _listings(seen)
+    ]
+    assert max(ends) == 100 + PAGE_OVERLAP
+    assert read == {f"episode-{index:03d}" for index in range(100 + PAGE_OVERLAP)}
+
+
+async def test_a_chunk_resumed_at_its_stop_asks_for_nothing() -> None:
+    """Its last page committed and the attempt died before the unit did."""
+    server = FakeEmbyServer()
+    shows = _library(server, 2, "Shows", [_series(0), *(_episode(index) for index in range(6))])
+    adapter, seen = _recorded(server, unit_max_items=3)
+    try:
+        pages = [
+            page
+            async for page in adapter.list_unit(
+                f"episodes:{shows}:0:3", start_index=3 + PAGE_OVERLAP
+            )
+        ]
+    finally:
+        await adapter.aclose()
+    assert pages == []
+    assert _listings(seen) == []
+
+
+async def test_a_page_s_resume_point_is_the_next_request_s_start_reach_back_included() -> None:
+    """Resuming there re-reads the page's tail, so a deletion between attempts skips nothing."""
+    server = FakeEmbyServer()
+    for item in _numbered(10):
+        server.add_item(item, T0)
+    adapter, seen = _recorded(server, page_size=4)
+    try:
+        async with aclosing(adapter.list_unit(DEFAULT_UNIT_KEY)) as pages:
+            first = await anext(pages)
+            await anext(pages)
+    finally:
+        await adapter.aclose()
+    assert first.resume_at == 4 - 2, "a page of four reaches back two"
+    assert int(_listings(seen)[1].url.params["StartIndex"]) == first.resume_at
+
+
+async def test_a_movie_library_s_episodes_unit_ends_on_one_empty_page() -> None:
+    """Every library gets an EPISODES unit, so most hold nothing; each costs one request."""
+    server = FakeEmbyServer()
+    _library(server, 1, "Films", [_movie(index) for index in range(5)])
+    adapter, seen = _recorded(server)
+    try:
+        plan = await adapter.plan_walk()
+        [episodes] = [unit for unit in plan.units if unit.stage is WalkStage.EPISODES]
+        before = len(seen)
+        pages = [page async for page in adapter.list_unit(episodes.key)]
+    finally:
+        await adapter.aclose()
+    listings = _listings(seen[before:])
+    assert pages == []
+    assert len(listings) == 1
+    assert listings[0].url.params["IncludeItemTypes"] == "Episode"
+
+
+async def test_libraries_that_hold_less_than_the_total_fall_back_to_one_walk() -> None:
+    """An item in no library is still walked, and the WARNING names both numbers.
+
+    A full walk over the libraries alone would sweep that item as unavailable.
+    """
+    server = FakeEmbyServer()
+    _library(server, 1, "Films", [_movie(0), _movie(1)])
+    server.add_item(_movie(2), T0)
+    lines: list[str] = []
+    handle = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        adapter = _adapter(server)
+        try:
+            plan = await adapter.plan_walk()
+            walks = tuple(unit for unit in plan.units if unit.stage is not WalkStage.SEED)
+            walked = {
+                item.external_id
+                async for page in adapter.list_unit(walks[0].key)
+                for item in page.items
+            }
+        finally:
+            await adapter.aclose()
+    finally:
+        logger.remove(handle)
+    assert walks == (WalkUnit(DEFAULT_UNIT_KEY, WalkStage.TITLES, "the whole library", 3),)
+    assert plan.expected_total == 3
+    assert walked == {"movie-0", "movie-1", "movie-2"}
+    assert [line.rstrip("\n") for line in lines] == [
+        "Living Room Emby's libraries hold 2 items against a total of 3; "
+        "walking the whole library as one unit"
+    ]
+
+
+async def test_collection_and_playlist_views_are_not_libraries() -> None:
+    """Neither is planned or counted: both only point at items held in libraries.
+
+    Counted, the collection's two items would lift the libraries' sum to the total
+    and hide that `movie-2` is in no library at all.
+    """
+    server = FakeEmbyServer()
+    films = _library(server, 1, "Films", [_movie(0), _movie(1)])
+    _library(server, 2, "Sets", [_movie(0), _movie(1)], collection_type="boxsets")
+    _library(server, 3, "Mix", [_movie(1)], collection_type="playlists")
+    server.add_item(_movie(2), T0)
+    adapter, seen = _recorded(server)
+    try:
+        plan = await adapter.plan_walk()
+    finally:
+        await adapter.aclose()
+    assert {request.url.params.get("ParentId") for request in _listings(seen)} == {None, films}
+    walks = [unit.key for unit in plan.units if unit.stage is not WalkStage.SEED]
+    assert walks == [DEFAULT_UNIT_KEY]
+
+
+async def test_a_library_removed_between_attempts_ends_its_unit_empty() -> None:
+    """A resumed unit whose view is gone yields nothing and never sends that view's id.
+
+    The fake answers an unknown `ParentId` with the whole library, the worst case.
+    """
+    server = FakeEmbyServer()
+    films = _library(server, 1, "Films", [_movie(0), _movie(1)])
+    shows = _library(server, 2, "Shows", [_series(0)], collection_type="tvshows")
+    planner = _adapter(server)
+    try:
+        plan = await planner.plan_walk()
+    finally:
+        await planner.aclose()
+    assert f"titles:{shows}" in {unit.key for unit in plan.units}, "the premise: it was planned"
+
+    server.remove_view(shows)
+    resumed, seen = _recorded(server)
+    try:
+        gone = [page async for page in resumed.list_unit(f"titles:{shows}")]
+        kept = [
+            item.external_id
+            async for page in resumed.list_unit(f"titles:{films}")
+            for item in page.items
+        ]
+    finally:
+        await resumed.aclose()
+    assert gone == []
+    assert sorted(kept) == ["movie-0", "movie-1"], "the control: a library still there walks"
+    assert {request.url.params.get("ParentId") for request in _listings(seen)} == {films}
+
+
+async def test_walkers_resuming_together_read_the_libraries_once() -> None:
+    server = FakeEmbyServer()
+    films = _library(server, 1, "Films", [_movie(0)])
+    shows = _library(server, 2, "Shows", [_series(0)], collection_type="tvshows")
+    transport = SlowTransport(server.handle)
+    adapter = EmbyAdapter(
+        SOURCE,
+        CREDENTIALS,
+        client=httpx.AsyncClient(transport=transport, base_url=SOURCE.base_url),
+        page_size=2,
+    )
+
+    async def walk(key: str) -> list[str]:
+        return [item.external_id async for page in adapter.list_unit(key) for item in page.items]
+
+    try:
+        await asyncio.gather(walk(f"titles:{films}"), walk(f"titles:{shows}"))
+    finally:
+        await adapter.aclose()
+    assert transport.max_in_flight >= 2, "the premise: the two walkers overlapped"
+    assert sum(1 for request in server.requests if request.endswith("/Views")) == 1
+
+
+async def test_a_count_that_fails_fails_the_plan() -> None:
+    """A library left uncounted is not a library of nothing."""
+    server = FakeEmbyServer()
+    films = _library(server, 1, "Films", [_movie(0)])
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("ParentId") == films:
+            return httpx.Response(400, json={"Error": "refused"})
+        return server.handle(request)
+
+    adapter = _on(handle)
+    try:
+        with pytest.raises(PortUnavailable):
+            await adapter.plan_walk()
+    finally:
+        await adapter.aclose()
+
+
+async def test_a_count_without_a_total_fails_the_plan() -> None:
+    """Read as zero, a missing source total would pass the coverage check."""
+    server = FakeEmbyServer()
+    _library(server, 1, "Films", [_movie(0)])
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        response = server.handle(request)
+        if request.url.params.get("Limit") != "0":
+            return response
+        body = response.json()
+        del body["TotalRecordCount"]
+        return httpx.Response(200, json=body)
+
+    adapter = _on(handle)
+    try:
+        with pytest.raises(PortDataMalformed):
+            await adapter.plan_walk()
+    finally:
+        await adapter.aclose()
+
+
 # --- the redacted request path ---------------------------------------------
 
 
@@ -3085,6 +3462,9 @@ async def test_every_path_this_adapter_issues_redacts_to_a_route_with_no_identif
     server.set_watch_state(
         SourceWatchState(external_id="movie-1", position_seconds=0, played=False)
     )
+    films = f"{0xD001:032x}"
+    server.add_view(films, "Films")
+    server.place("movie-1", films)
 
     def recording(request: httpx.Request) -> httpx.Response:
         seen.append(request.url.path)
@@ -3104,6 +3484,8 @@ async def test_every_path_this_adapter_issues_redacts_to_a_route_with_no_identif
         await adapter.get_item("movie-1")
         [state async for state in adapter.watch_state(since=T0)]
         await adapter.push_watch_state("movie-1", WatchStateUpdate(position_seconds=1, played=True))
+        plan = await adapter.plan_walk()
+        _ = [page async for page in adapter.list_unit(plan.units[0].key)]
     finally:
         await adapter.aclose()
 
@@ -3131,6 +3513,7 @@ async def test_every_path_this_adapter_issues_redacts_to_a_route_with_no_identif
         "/Users/{user_id}/Items/{item_id}",
         "/Users/{user_id}/Items/{item_id}/UserData",
         "/Users/{user_id}/PlayedItems/{item_id}",
+        "/Users/{user_id}/Views",
     }
 
 
