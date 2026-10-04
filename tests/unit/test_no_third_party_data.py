@@ -51,6 +51,12 @@ _ID_KEYS = frozenset(
         "ServerId",
         "SeriesId",
         "SeasonId",
+        # A library view (`emby/view_item.json`) carries five more.
+        "ParentId",
+        "DisplayPreferencesId",
+        "Etag",
+        "Guid",
+        "PresentationUniqueKey",
     }
 )
 

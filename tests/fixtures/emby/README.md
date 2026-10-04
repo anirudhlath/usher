@@ -117,10 +117,11 @@ returns has the shape of the item fixtures above.
 
 The rows from `/Users/{id}/Views` on were recorded on 2026-10-04 by Phase
 2's probe, a second read-only script outside the repository, which printed
-counts, seconds, booleans, and one view's keys with their types, never an
-id, a name or a token. The recorded account's NextUp was empty, so the `Ids`
-row comes from a three-request follow-up that took its series from a
-listing. The one shape kept is `view_item.json`, every value in it invented.
+counts, seconds, booleans, type names, and one view's keys with their
+types, never an id, a name or a token. The recorded account's NextUp was
+empty, so the `Ids` row comes from a three-request follow-up that took its
+series from a listing. The one shape kept is `view_item.json`, every value
+in it invented.
 
 | Behaviour | What the server does | What depends on it |
 |---|---|---|
@@ -129,13 +130,13 @@ listing. The one shape kept is `view_item.json`, every value in it invented.
 | `Filters=IsPlayed` | only items whose `UserData.Played` is true; some also hold a resume position | the first watch walk's first listing |
 | `Filters=IsResumable` | only items with a non-zero `PlaybackPositionTicks`, **played or not**, so it overlaps `IsPlayed` (21 of 208 on the recorded account) | the first watch walk's second listing, deduplicated by id |
 | A filtered listing's paging | the filter applies before `StartIndex`/`Limit`: the page at 700 of a 765-item filtered set held 65 | a filtered walk pages like any other |
-| `/Users/{id}/Views` | 17 views, each with a `CollectionType`: 9 `movies`, 5 `tvshows`, 1 `homevideos`, 1 `boxsets` and 1 `playlists`; the 15 that are neither cover the source without them (next row) | the planner skips those two kinds; `view_item.json` is one view's shape |
-| `ParentId={view}` with `Limit=0` | that library's count over `Movie,Series,Episode`; the libraries summed to 1,166,255 against a source total of 1,158,525 | the plan's coverage check |
-| `ParentId` no view carries | 1,158,526: the whole source, which had grown by one since the total was read, as the largest library's titles and episodes also summed one past its first count | the fake answers the whole library, the worst case; the adapter never sends a vanished view's id |
+| `/Users/{id}/Views` | 17 views, each with a `CollectionType`: 9 `movies`, 5 `tvshows`, 1 `homevideos`, 1 `boxsets` and 1 `playlists`; the 15 that are neither sum past the source total without them (next row) | the planner skips those two kinds; `view_item.json` is one view's shape |
+| `ParentId={view}` with `Limit=0` | that library's count over `Movie,Series,Episode`; the libraries summed to 1,166,255 against a source total of 1,158,525: 7,730 over, so some items count twice or outside the total, and a gap smaller than that is invisible to the sum | the plan's coverage check |
+| `ParentId` no view carries | 1,158,526, one past the total read first (the probe's equality check printed `False`); read as the whole source grown by one, since the largest library's titles and episodes also summed one past its first count | the fake answers the whole library, the worst case; the adapter never sends a vanished view's id |
 | Pages inside one library | head 2.3 s, middle 3.7 s, deep 4.0 s at 1,000 items, in a library of 606,840 | offset chunks of `USHER_SYNC_UNIT_MAX_ITEMS` |
 | Concurrent pages at the deployment gate | 1 walker 0.31/s, 2 walkers 0.34/s, 4 walkers 0.37/s | the `USHER_SYNC_WALKERS` default |
 | `/Shows/NextUp` | nothing on the recorded account (`TotalRecordCount` 0), so its paging and its entries' shape are unmeasured | the seed's third source |
-| `Ids=a,b,c` | the named items, without `Recursive`: 3 of 3 series asked, with it or without | the seed's series request |
+| `Ids=a,b,c` | without `Recursive`, 3 of 3 series asked came back, all of type `Series`; with it, 3 of 3 | the seed's series request |
 
 No source has been seen to cap `Limit`. `FakeEmbyServer.max_limit` exists for
 one that does, and so do two of the conditions on a short page that ends a
