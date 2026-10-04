@@ -67,12 +67,14 @@ async def test_the_deployment_tuning_reaches_the_adapter() -> None:
         push_stale_after_seconds=11.5,
         push_poll_seconds=0.75,
         listing_concurrency=3,
+        unit_max_items=5_000,
     )
     adapter = factory.build(SOURCE, CREDENTIALS)
     try:
         assert isinstance(adapter, EmbyAdapter)
         assert adapter._page_size == 17
         assert adapter._listing_limit.limit == 3
+        assert adapter._unit_max_items == 5_000
         assert adapter._client.timeout.read == 3.5
         assert adapter._session._reauth_cooldown == 7.25
         # The outbound gate reaches the session that sends through it.

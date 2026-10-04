@@ -1,7 +1,11 @@
 """PRD 03's reconciliation lanes: the full walk and the delta walk."""
 
+import asyncio
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable, Sequence
+from contextlib import aclosing
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from loguru import logger
@@ -9,12 +13,19 @@ from opentelemetry import metrics, trace
 from pydantic import AwareDatetime
 
 from usher.domain.source import Source
-from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus
+from usher.domain.sync import (
+    STAGE_ORDER,
+    SyncRun,
+    SyncRunKind,
+    SyncRunStatus,
+    SyncRunUnit,
+    SyncRunUnitStatus,
+)
 from usher.ports.errors import UsherPortError
 from usher.ports.events import ClientEvent, ClientEventKind, EventPublisher
 from usher.ports.ingest import AvailabilitySweepRefused
 from usher.ports.repository import MediaItemRepository, SyncRunRepository
-from usher.ports.source import SourceAdapter, SourceItem
+from usher.ports.source import SourceAdapter, SourceItem, UnitPage
 from usher.services.ingest import IngestService
 
 _tracer = trace.get_tracer("usher.reconcile")
@@ -69,6 +80,19 @@ def _recorded_failure(exc: UsherPortError) -> tuple[str, str | None]:
     return str(exc), None
 
 
+def _now() -> datetime:
+    return datetime.now(UTC)
+
+
+@dataclass(frozen=True, slots=True)
+class _Fetched:
+    """What a walker hands the writer: a page of a unit, the unit's end, or its error."""
+
+    unit_key: str
+    page: UnitPage | None = None
+    error: Exception | None = None
+
+
 class _Progress:
     """The run as the walk has most recently checkpointed it.
 
@@ -103,7 +127,12 @@ class ReconcileService:
         *,
         batch_size: int = 1_000,
         max_retract_fraction: float = 0.25,
+        walkers: int = 4,
+        heartbeat_seconds: float = 60.0,
+        clock: Callable[[], datetime] = _now,
     ) -> None:
+        if walkers < 1:
+            raise ValueError(f"a whole-library walk needs at least one walker, not {walkers}")
         self._ingest = ingest
         self._media_items = media_items
         self._runs = runs
@@ -115,6 +144,9 @@ class ReconcileService:
         self._commit = commit
         self._batch_size = batch_size
         self._max_retract_fraction = max_retract_fraction
+        self._walkers = walkers
+        self._heartbeat_seconds = heartbeat_seconds
+        self._clock = clock
 
     async def reconcile(
         self,
@@ -123,8 +155,13 @@ class ReconcileService:
         adapter: SourceAdapter,
         *,
         max_items: int = 0,
+        plan: bool = True,
     ) -> SyncRun:
         """Walk `source` and reconcile it.
+
+        A whole-library walk -- a full walk, or a delta with no cursor -- walks the
+        adapter's plan, unless `max_items` bounds it or `plan` is false; every other
+        walk is one stream.
 
         Never raises a `UsherPortError`.
         """
@@ -133,7 +170,15 @@ class ReconcileService:
             span.set_attribute("usher.source", source.name)
             span.set_attribute("usher.sync.kind", kind.value)
             cursor = await self.cursor_for(source, kind)
-            run = SyncRun(source_id=source.id, kind=kind, cursor_at=cursor)
+            planned = plan and not max_items and (kind is SyncRunKind.FULL or cursor is None)
+            run = SyncRun(
+                source_id=source.id,
+                kind=kind,
+                cursor_at=cursor,
+                # A planned walk's first heartbeat rides the insert, so one that dies
+                # while planning still leaves a row saying when it was last alive.
+                heartbeat_at=self._clock() if planned else None,
+            )
             # Inserted and committed before the walk begins, `RUNNING`: an
             # operator watching a six-hour sync needs a row to watch, and a
             # process killed mid-walk must leave a trace rather than nothing.
@@ -141,7 +186,11 @@ class ReconcileService:
             await self._commit()
             progress = _Progress(run)
             try:
-                truncated = await self._walk(source, progress, adapter, cursor, max_items)
+                truncated = False
+                if planned:
+                    await self._walk_plan(source, progress, adapter)
+                else:
+                    truncated = await self._walk(source, progress, adapter, cursor, max_items)
                 if truncated:
                     # Deliberately **not** `usher.failed`: the run is recorded `FAILED`
                     # because that is what stops the cursor, and a trace view that could
@@ -277,7 +326,166 @@ class ReconcileService:
             progress.run = await self._flush(source, progress.run, batch)
         return truncated
 
-    async def _flush(self, source: Source, run: SyncRun, batch: Sequence[SourceItem]) -> SyncRun:
+    async def _walk_plan(self, source: Source, progress: _Progress, adapter: SourceAdapter) -> None:
+        """Walk the adapter's plan, one stage at a time.
+
+        The units are stored with the heartbeat that follows the plan. A stage
+        starts only once every unit of the stages before it has committed
+        complete, so every episode finds its series.
+        """
+        plan = await adapter.plan_walk()
+        units = [
+            SyncRunUnit(
+                run_id=progress.run.id,
+                unit_key=unit.key,
+                stage=unit.stage,
+                label=unit.label,
+                expected_items=unit.expected_items,
+            )
+            for unit in plan.units
+        ]
+        await self._runs.add_units(units)
+        await self._beat(progress)
+        for stage in STAGE_ORDER:
+            staged = [unit for unit in units if unit.stage is stage]
+            if staged:
+                await self._walk_stage(source, progress, adapter, staged)
+
+    async def _walk_stage(
+        self,
+        source: Source,
+        progress: _Progress,
+        adapter: SourceAdapter,
+        units: Sequence[SyncRunUnit],
+    ) -> None:
+        """Up to `walkers` walkers fetch `units`, the largest first, while this task writes.
+
+        Returns once every unit has committed complete. However it ends, the
+        walkers still fetching are cancelled and awaited first.
+        """
+        claimable = deque(sorted(units, key=lambda unit: unit.expected_items or 0, reverse=True))
+        queue: asyncio.Queue[_Fetched] = asyncio.Queue(maxsize=self._walkers)
+        walkers = [
+            asyncio.create_task(self._fetch(adapter, claimable, queue))
+            for _ in range(min(self._walkers, len(units)))
+        ]
+        try:
+            await self._write(source, progress, units, queue)
+        finally:
+            for walker in walkers:
+                walker.cancel()
+            await asyncio.gather(*walkers, return_exceptions=True)
+
+    @staticmethod
+    async def _fetch(
+        adapter: SourceAdapter, claimable: deque[SyncRunUnit], queue: asyncio.Queue[_Fetched]
+    ) -> None:
+        """A walker: claim the next unit, put its pages on `queue`, then its end.
+
+        A walker never touches the database. A unit that raises puts the error on
+        the queue in place of its end, and the walker stops.
+        """
+        while claimable:
+            unit = claimable.popleft()
+            try:
+                pages = adapter.list_unit(unit.unit_key, start_index=unit.position)
+                async with aclosing(pages):
+                    async for page in pages:
+                        await queue.put(_Fetched(unit.unit_key, page))
+            except Exception as exc:
+                await queue.put(_Fetched(unit.unit_key, error=exc))
+                return
+            await queue.put(_Fetched(unit.unit_key))
+
+    async def _write(
+        self,
+        source: Source,
+        progress: _Progress,
+        units: Sequence[SyncRunUnit],
+        queue: asyncio.Queue[_Fetched],
+    ) -> None:
+        """The one writer: each unit's pages, committed once they add up to a batch.
+
+        A unit's pages are held until they reach `batch_size` items or the unit
+        ends, then committed with its position, the run's counters and a new
+        heartbeat. A beat of the heartbeat alone falls due `heartbeat_seconds`
+        after the last commit or beat, whether or not pages are arriving.
+        Returns once every unit has committed complete. A unit that failed is
+        saved `failed` at its committed position and its error raised; the pages
+        held for it are dropped.
+        """
+        current = {unit.unit_key: unit for unit in units}
+        held: dict[str, list[UnitPage]] = {key: [] for key in current}
+        open_units = len(units)
+        # A deadline, not a silence: pages that keep arriving below a batch would
+        # otherwise hold every beat off.
+        due = time.monotonic() + self._heartbeat_seconds
+        while open_units:
+            if time.monotonic() >= due:
+                await self._beat(progress)
+                due = time.monotonic() + self._heartbeat_seconds
+                continue
+            try:
+                fetched = await asyncio.wait_for(queue.get(), max(0.0, due - time.monotonic()))
+            except TimeoutError:
+                continue
+            unit = current[fetched.unit_key]
+            if fetched.error is not None:
+                await self._runs.save_unit(unit.evolve(status=SyncRunUnitStatus.FAILED))
+                raise fetched.error
+            pages = held[unit.unit_key]
+            if fetched.page is not None:
+                pages.append(fetched.page)
+                if sum(len(page.items) for page in pages) < self._batch_size:
+                    continue
+            done = fetched.page is None
+            current[unit.unit_key] = await self._commit_unit(
+                source, progress, unit, pages, done=done
+            )
+            due = time.monotonic() + self._heartbeat_seconds
+            held[unit.unit_key] = []
+            if done:
+                open_units -= 1
+
+    async def _commit_unit(
+        self,
+        source: Source,
+        progress: _Progress,
+        unit: SyncRunUnit,
+        pages: Sequence[UnitPage],
+        *,
+        done: bool,
+    ) -> SyncRunUnit:
+        """Ingest `pages` and commit them with the unit's position and a new heartbeat.
+
+        Returns the unit as saved: `completed` once its walk has ended, which an
+        empty `pages` can carry on its own.
+        """
+        items = [item for page in pages for item in page.items]
+        unit = unit.evolve(
+            position=pages[-1].resume_at if pages else unit.position,
+            items_seen=unit.items_seen + len(items),
+            status=SyncRunUnitStatus.COMPLETED if done else SyncRunUnitStatus.RUNNING,
+        )
+        progress.run = await self._flush(
+            source, progress.run.evolve(heartbeat_at=self._clock()), items, unit=unit
+        )
+        return unit
+
+    async def _beat(self, progress: _Progress) -> None:
+        """Move the run's heartbeat and commit it, with nothing else to write."""
+        progress.run = progress.run.evolve(heartbeat_at=self._clock())
+        await self._runs.save(progress.run)
+        await self._commit()
+
+    async def _flush(
+        self,
+        source: Source,
+        run: SyncRun,
+        batch: Sequence[SourceItem],
+        *,
+        unit: SyncRunUnit | None = None,
+    ) -> SyncRun:
         # `run.started_at`, not `now()`: `last_seen_at` means "the run that
         # saw this item", which is the quantity the sweep's
         # `last_seen_at < started_at` comparison is about. A per-row write
@@ -289,11 +497,17 @@ class ReconcileService:
             items_matched=run.items_matched + result.matched,
             items_unmatched=run.items_unmatched + result.unmatched,
         )
+        if unit is not None:
+            # A planned walk's unit moves in the commit that holds the items it read.
+            await self._runs.save_unit(unit)
         await self._runs.save(run)
         # One commit per batch, exactly like BootstrapService: a crash costs
         # the batch in flight, never the walk.
         await self._commit()
-        await self._publish_progress(source, run)
+        if batch:
+            # A unit's end can commit an empty batch, to save the unit `completed`;
+            # it moved no counter, so it is no frame (PRD 07: one per batch).
+            await self._publish_progress(source, run)
         return run
 
     async def _publish_progress(self, source: Source, run: SyncRun) -> None:

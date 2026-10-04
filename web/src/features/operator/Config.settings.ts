@@ -206,7 +206,8 @@ export const CONFIG: readonly SettingRow[] = [
     key: 'USHER_SYNC_BATCH_SIZE',
     group: 'ingest',
     def: '1000',
-    about: 'Items per committed batch during a sync walk.',
+    about:
+      'Items per committed batch during a sync walk. A whole-library walk commits whole pages, so its batches can run past this by less than a page.',
     secret: false,
     measured: false,
   },
@@ -224,7 +225,16 @@ export const CONFIG: readonly SettingRow[] = [
     group: 'ingest',
     def: '4',
     about:
-      'The most listing requests one walk has in flight to a source. An outage or a 429 drops it to one, and each ten pages that succeed raise it a step, back to this. 1 is one request at a time. Against a real Emby at the default gate, four walkers read 0.37 pages/s and two read 0.34.',
+      'How many units a whole-library walk fetches at once, and the most listing requests it has in flight to a source. An outage or a 429 drops the requests to one, and each ten pages that succeed raise them a step, back to this. 1 is one request at a time. Against a real Emby at the default gate, four walkers read 0.37 pages/s and two read 0.34.',
+    secret: false,
+    measured: true,
+  },
+  {
+    key: 'USHER_SYNC_UNIT_MAX_ITEMS',
+    group: 'ingest',
+    def: '100000',
+    about:
+      'A whole-library walk reads a library’s episodes in chunks of this many items, several at once. Against a real Emby, a 1,000-item page inside a library took 2.3 s at its head, 3.7 s in the middle and 4.0 s at the deep end.',
     secret: false,
     measured: true,
   },

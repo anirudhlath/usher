@@ -3,7 +3,7 @@
 For the things the fakes cannot say: a refused sweep, and the sweep's own SQL.
 """
 
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator, Iterator
 from datetime import UTC, datetime
 
 import pytest
@@ -24,9 +24,17 @@ from usher.db.repositories.title import PostgresTitleRepository
 from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
 from usher.domain.source import Source
-from usher.domain.sync import SyncRunKind, SyncRunStatus
+from usher.domain.sync import SyncRunKind, SyncRunStatus, SyncRunUnitStatus
 from usher.ports.errors import PortUnavailable
-from usher.ports.source import SourceItem, SourceItemKind
+from usher.ports.source import (
+    DEFAULT_UNIT_KEY,
+    WHOLE_LIBRARY,
+    SourceItem,
+    SourceItemKind,
+    UnitPage,
+    WalkPlan,
+    pages_of,
+)
 from usher.services.ingest import IngestService
 from usher.services.matching import MatchService
 from usher.services.reconcile import (
@@ -119,7 +127,7 @@ def service(
 
 
 class _Adapter:
-    """The smallest `list_items` that satisfies what `ReconcileService` uses.
+    """The smallest `list_items`, `plan_walk` and `list_unit` that satisfy `ReconcileService`.
 
     Not `FakeSourceAdapter`: that one is a `SourceAdapter` with a session
     model and a watch-state store, and none of it is under test here.
@@ -144,6 +152,14 @@ class _Adapter:
             if self.fail_after is not None and index >= self.fail_after:
                 raise PortUnavailable("source went away mid-walk")
             yield item
+
+    async def plan_walk(self) -> WalkPlan:
+        return WHOLE_LIBRARY
+
+    def list_unit(self, key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage]:
+        # Pages of two, so at the fixture's batch of two a planned walk commits
+        # page by page, as its single walk commits item pair by item pair.
+        return pages_of(self._walk(), start_index=start_index, size=2)
 
 
 @pytest.fixture
@@ -378,6 +394,29 @@ async def test_a_walk_that_raises_leaves_every_row_available(
         stored = await media_items.get_by_external_id(source.id, f"m{index}")
         assert stored is not None
         assert stored.available is True, f"m{index} was retracted by a walk that failed"
+
+
+async def test_a_whole_library_walk_persists_its_units_against_real_sql(
+    service: ReconcileService,
+    runs: PostgresSyncRunRepository,
+    source: Source,
+    adapter: _Adapter,
+) -> None:
+    """The writer's unit saves and heartbeats ride its commits, through real SQL."""
+    for index in range(5):
+        adapter.items[f"m{index}"] = _item(f"m{index}")
+    run = await service.reconcile(source, SyncRunKind.FULL, adapter)  # type: ignore[arg-type]
+    assert run.status is SyncRunStatus.COMPLETED
+    [unit] = await runs.units_for(run.id)
+    assert (unit.unit_key, unit.status, unit.position, unit.items_seen) == (
+        DEFAULT_UNIT_KEY,
+        SyncRunUnitStatus.COMPLETED,
+        5,
+        5,
+    )
+    stored = await runs.get(run.id)
+    assert stored is not None
+    assert stored.heartbeat_at is not None and stored.heartbeat_at == run.heartbeat_at
 
 
 async def test_a_run_that_failed_does_not_move_the_delta_cursor(

@@ -18,6 +18,9 @@ paths:
 Beside it `EmbyPushChannel` → `PushSupervisor` → `PushApplyService` run the
 websocket, and `WatchWriteService` the client's own writes back out.
 
+A whole-library walk's walkers only fetch; the reconcile task is the one writer,
+because `AsyncSession` is not safe to share between tasks.
+
 ## Commands
 
 ```bash
@@ -58,8 +61,7 @@ says nothing about a source left out of step by a parked write-back.
 - 🔴 **The write-back route is `POST /Users/{user}/Items/{item}/UserData`** with
   a JSON body (204). The session-scoped `PlayingItems/{item}/Progress` and
   `Sessions/Playing/Progress` answer **400**, keying off a play session Usher
-  never has — and `FakeEmbyServer` implemented the adapter's own guess, so the
-  whole contract suite passed against a write-back that had never worked.
+  never has.
 - **That body must name `Played` even when `Played` is not what is changing** —
   it takes the DTO default and a position-only body unplays a played item.
   (`PlayCount` and `LastPlayedDate` survive the same omission.)
@@ -99,13 +101,11 @@ says nothing about a source left out of step by a parked write-back.
   library, whose frames are `Sessions` mapping to none. `_streak` compares
   `push_messages_received` across a connection, so N empty stale-outs in a row
   still park it: N stale limits of unbroken silence is what reads as broken.
-  Seeing any of this needs a fake with an **unbounded** supply of connections.
 - **`ItemsRemoved` fires on a library from which nothing was removed**, so count
   it and retract nothing on it, or one refresh marks a present file unavailable.
 - **A dropped socket raises `PortUnavailable` rather than hanging, and Emby
   re-delivers nothing**, so **the gap-closing delta is the only cover there
-  is**; no real `429` has ever been seen. Do not let the queue fill during that
-  walk.
+  is**. Do not let the queue fill during that walk.
 - 🔒 **`socket_logger()`'s level is the token defence; `configure_logging` is
   what it defends against** — that sets `propagate = True` on every existing
   logger and a root handler at level 0, so at `DEBUG` the `websockets` URL logs

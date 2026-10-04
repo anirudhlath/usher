@@ -100,6 +100,11 @@ when the walk stops:
   two pages; the walk then logs a WARNING naming the page, and the next full
   reconcile covers what it missed. Duplicates are permitted; silent truncation
   is not.
+- **A walk fails on a listing that 10,000 pages do not finish**, and each unit
+  of a whole-library walk is a listing of its own: at the default page size
+  that is one of 9,500,050 items or more, and fewer at a smaller page (the
+  [configuration guide](../guide/configuration.md#walking-a-large-library) has
+  the table).
 - **The delta cursor is widened by one second.**
 - **An unrecognised filter degrades to a full walk, never to an empty result.**
 - **A page that fails as unreachable is asked for again** — a 5xx, a 408, a
@@ -118,6 +123,14 @@ when the walk stops:
   429 drops that to one, and each run of ten pages that succeed raises it by
   one, back up to the setting. A page waiting for its turn, or waiting to ask
   again, holds no request.
+- **A whole-library walk is split into units.** Emby plans three stages: what
+  the account is watching, then each library's movies and series, then each
+  library's episodes in chunks of `USHER_SYNC_UNIT_MAX_ITEMS` (default
+  **100,000**), the largest library first. A library is any view but a
+  collection or a playlist. The first stage is planned only when the played
+  and the in-progress filters each narrow the library. When the libraries hold
+  fewer items than the source, everything after the first stage is one walk of
+  the whole source, and a WARNING names both numbers.
 
 The item lane filters on the library edit time, the watch lane on the user-data
 change time.
@@ -164,6 +177,18 @@ an oversized event on a cursorless source is discarded until the sync runs.
 deployment has a populated catalog and no `sync_runs` row, so it is refused
 until an operator syncs.
 
+**A whole-library walk — a full walk, or a delta with no cursor — walks the
+adapter's plan.** Up to `USHER_SYNC_WALKERS` units are fetched at once, the
+largest of a stage first, and one writer commits each unit's pages once they
+add up to `USHER_SYNC_BATCH_SIZE` items, and when the unit ends. No unit of a
+stage is fetched until every unit of the stages before it has committed, so an
+episode always finds its series. A walk's units are kept in `sync_run_units`
+with the position each has committed to, and the run's `heartbeat_at` moves on
+every commit and at least once a minute between commits. A unit that
+fails stops the walk: it is marked `failed` at its committed position, and
+pages fetched but not yet committed are dropped. A delta with a cursor, a
+bounded walk and the gap-closer keep the single walk.
+
 **A bounded walk records `FAILED`, never `COMPLETED`.**
 `USHER_PUSH_GAP_MAX_ITEMS` (default **20,000**; 0 is unlimited) stops a
 gap-closing delta that does have a cursor, with `error_code =
@@ -175,11 +200,11 @@ watch lane owns its own cursor and still walks whole.
 the row stays available until a walk sweeps it.
 
 **Retraction is a separate step, and it can decline.** Marking unseen items
-unavailable happens only after a walk returns normally, and even then it
-refuses to retract more than `sync_max_retract_fraction` (default `0.25`) of a
-source in one run, raising and changing nothing. `1.0` disables the ceiling.
-The ceiling is a fraction of what *Usher* holds for that source, not of the
-source itself.
+unavailable happens only after a walk returns normally — after a whole-library
+walk, once every unit has completed — and even then it refuses to retract more
+than `sync_max_retract_fraction` (default `0.25`) of a source in one run,
+raising and changing nothing. `1.0` disables the ceiling. The ceiling is a
+fraction of what *Usher* holds for that source, not of the source itself.
 
 An item that reappears in a walk is available again at that moment. The sweep
 only ever sets `false`.

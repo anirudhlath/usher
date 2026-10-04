@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from tests.fakes.emby_harness import instant_sleep
 from tests.fakes.emby_server import FakeEmbyServer
 from tests.fakes.event_publisher import FakeEventPublisher
+from tests.fakes.source_adapter import FakeSourceAdapter
 from tests.integration.conftest import (
     A_DECISIVE_MARGIN,
     Analyze,
@@ -768,8 +769,6 @@ def _mixed(*, series: int, episodes: int, movies: int, offset: int) -> list[Sour
 
 
 async def test_statements_do_not_grow_with_the_page(
-    emby: FakeEmbyServer,
-    adapter: EmbyAdapter,
     session: AsyncSession,
     media_items: PostgresMediaItemRepository,
     episodes: PostgresEpisodeRepository,
@@ -779,9 +778,30 @@ async def test_statements_do_not_grow_with_the_page(
     source: Source,
     catalog: uuid.UUID,
 ) -> None:
-    """A flat statement count, at the library's own shape."""
+    """A flat statement count, at the library's own shape.
+
+    Walked through `FakeSourceAdapter`, whose pages are exactly `page_size` items, so
+    each counted walk is nine batches of one page. The real adapter's overlapping
+    pages carry two or three new items, and batches of whole pages would give the two
+    walks different commit counts for a reason that is not a statement per item.
+    """
+    adapter = FakeSourceAdapter(source)
+    commits: list[int] = []
+
+    def _stock(items: list[SourceItem]) -> None:
+        # Name order, as the real listing's `SortName` gives: each batch holds one
+        # kind of item, and the two walks' batches hold the same kinds.
+        for item in sorted(items, key=lambda one: one.name):
+            adapter.forget(item.external_id)
+            adapter.seed(item, CHANGED_AT)
 
     def _walker(batch_size: int) -> ReconcileService:
+        adapter.page_size = batch_size
+
+        async def commit() -> None:
+            commits.append(batch_size)
+            await session.flush()
+
         matching = PostgresTitleMatchRepository(session)
         return ReconcileService(
             ingest=IngestService(
@@ -796,22 +816,26 @@ async def test_statements_do_not_grow_with_the_page(
             media_items=media_items,
             events=FakeEventPublisher(),
             runs=runs,
-            commit=session.flush,
+            commit=commit,
             batch_size=batch_size,
         )
 
-    _seed(emby, _mixed(series=5, episodes=20, movies=20, offset=0))
+    small_library = _mixed(series=5, episodes=20, movies=20, offset=0)
+    _stock(small_library)
     await _walker(1_000).reconcile(source, SyncRunKind.FULL, adapter)
     statement_counter.clear()
     await _walker(5).reconcile(source, SyncRunKind.FULL, adapter)
     small = len(statement_counter)
 
-    _seed(emby, _mixed(series=45, episodes=180, movies=180, offset=1_000))
+    _stock(small_library + _mixed(series=45, episodes=180, movies=180, offset=1_000))
     await _walker(1_000).reconcile(source, SyncRunKind.FULL, adapter)
     statement_counter.clear()
     await _walker(50).reconcile(source, SyncRunKind.FULL, adapter)
     large = len(statement_counter)
 
+    assert commits.count(5) == commits.count(50), (
+        "the premise: both measured walks committed the same number of times"
+    )
     assert small == large, (
         f"{small} statements for 9 batches of 5, {large} for 9 batches of 50 -- "
         "something costs a statement per item"

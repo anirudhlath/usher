@@ -75,6 +75,14 @@ class FakeSourceAdapter(SourceAdapter):
         self._libraries: dict[str, list[str]] = {}
         #: Items per `list_unit` page: small, so a walk of a few items pages.
         self.page_size = 2
+        # Library name -> the stage its unit is planned in; absent means TITLES.
+        self._stages: dict[str, WalkStage] = {}
+        # Library name -> how many items its unit yields before it raises.
+        self._unit_failures: dict[str, int] = {}
+        # Library name -> an event its unit waits on before its first item.
+        self._holds: dict[str, asyncio.Event] = {}
+        #: `("fetched", "library:<name>")` for every item a library's unit yields.
+        self.journal: list[tuple[str, str]] = []
         # The session model. `_server_token` is what the source currently
         # accepts; `_token` is what this adapter last obtained. Expiring a
         # session rotates the former, so the next call sees a mismatch and
@@ -116,6 +124,20 @@ class FakeSourceAdapter(SourceAdapter):
             if external_id not in placed:
                 placed.append(external_id)
 
+    def stage(self, library: str, stage: WalkStage) -> None:
+        """Plan `library`'s unit in `stage` instead of `TITLES`."""
+        self._stages[library] = stage
+
+    def fail_unit_after(self, library: str, count: int) -> None:
+        """Have `library`'s unit raise `PortUnavailable` after yielding `count` items."""
+        self._unit_failures[library] = count
+
+    def hold(self, library: str) -> asyncio.Event:
+        """Hold `library`'s unit before its first item until the event returned is set."""
+        event = asyncio.Event()
+        self._holds[library] = event
+        return event
+
     def forget(self, external_id: str) -> None:
         self._items.pop(external_id, None)
         self._changed_at.pop(external_id, None)
@@ -135,13 +157,14 @@ class FakeSourceAdapter(SourceAdapter):
         self._fail_after = count
 
     def clear_failure(self) -> None:
-        """Undo `fail_after`.
+        """Undo `fail_after` and `fail_unit_after`.
 
         `ReconcileService`'s cursor case needs a run that failed *followed by* one that
         succeeds, which is the only way to show that a delta walk resumes from the last
         run that completed rather than from the last run that happened.
         """
         self._fail_after = None
+        self._unit_failures.clear()
 
     def reject_credentials(self) -> None:
         self._credentials_valid = False
@@ -286,7 +309,12 @@ class FakeSourceAdapter(SourceAdapter):
             # item, so a partly placed source walks as one unit.
             return WalkPlan(WHOLE_LIBRARY.units, expected_total=len(self._items))
         units = tuple(
-            WalkUnit(f"library:{name}", WalkStage.TITLES, f"library {name}", len(placed))
+            WalkUnit(
+                f"library:{name}",
+                self._stages.get(name, WalkStage.TITLES),
+                f"library {name}",
+                len(placed),
+            )
             for name, placed in self._libraries.items()
         )
         return WalkPlan(units, expected_total=len(self._items))
@@ -301,10 +329,20 @@ class FakeSourceAdapter(SourceAdapter):
 
     async def _walk_library(self, name: str) -> AsyncIterator[SourceItem]:
         await self._ready()
+        if name in self._holds:
+            await self._holds[name].wait()
+        yielded = 0
         for external_id in list(self._libraries[name]):
             item = self._items.get(external_id)
-            if item is not None:
-                yield item
+            if item is None:
+                continue
+            if yielded == self._unit_failures.get(name):
+                raise PortUnavailable(f"library {name} went away mid-walk")
+            # A turn of the loop per item, as a request gives, so walkers interleave.
+            await asyncio.sleep(0)
+            self.journal.append(("fetched", f"library:{name}"))
+            yield item
+            yielded += 1
 
     async def get_item(self, external_id: str) -> SourceItem | None:
         await self._ready()

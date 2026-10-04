@@ -3418,6 +3418,29 @@ async def test_the_walker_setting_reaches_every_adapter_the_deployment_builds() 
         await adapter.aclose()
 
 
+async def test_the_walk_settings_reach_the_reconciler_and_the_adapter() -> None:
+    """`USHER_SYNC_WALKERS` reaches `ReconcileService`, `USHER_SYNC_UNIT_MAX_ITEMS` the adapter.
+
+    `create_async_engine` does not connect, and nothing here issues a statement.
+    """
+    engine = create_async_engine("postgresql+asyncpg://usher:usher@127.0.0.1:1/usher")
+    try:
+        pipeline = build_pipeline(
+            AsyncSession(engine), _settings(sync_walkers=3, sync_unit_max_items=5_000)
+        )
+        assert pipeline.reconcile._walkers == 3
+        adapter = pipeline.adapters.build(_GATED, _GATE_CREDENTIALS)
+        try:
+            assert isinstance(adapter, EmbyAdapter), (
+                "the premise: the factory built an Emby adapter"
+            )
+            assert adapter._unit_max_items == 5_000
+        finally:
+            await adapter.aclose()
+    finally:
+        await engine.dispose()
+
+
 def _source_of(kind: SourceKind, name: str, ref: str) -> Source:
     return Source(
         id=new_id(),

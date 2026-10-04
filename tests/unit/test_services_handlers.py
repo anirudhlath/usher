@@ -567,6 +567,7 @@ class _RecordingReconcile(ReconcileService):
         adapter: SourceAdapter,
         *,
         max_items: int = 0,
+        plan: bool = True,
     ) -> SyncRun:
         self.calls.append((source.id, kind))
         self.ceilings.append(max_items)

@@ -32,8 +32,10 @@ couples the two.** The endpoint requires `prompt_tokens + llm_max_output_tokens
 the failure arrives as a parked job rather than as a startup refusal: no setting
 knows `max_model_len`.
 
-**`USHER_SYNC_WALKERS` caps the listing requests in flight to a source** (default
-4; 1 is one at a time), and the cap backs off by itself
+**`USHER_SYNC_WALKERS` is how many units a whole-library walk fetches at once,
+and the cap on listing requests in flight to a source** (default 4; 1 is one at
+a time); the cap backs off by itself. **`USHER_SYNC_UNIT_MAX_ITEMS`** (default
+100,000) is the size of the episode chunks such a walk splits a library into
 ([03](03-sources-and-sync.md#walking-the-library)).
 
 Two things are **not** settings:

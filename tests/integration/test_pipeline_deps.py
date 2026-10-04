@@ -276,6 +276,7 @@ async def test_the_reconcile_service_carries_this_deployments_tuning(
         secret_key="0" * 32,
         sync_batch_size=7,
         sync_max_retract_fraction=0.5,
+        sync_walkers=3,
         push_enabled=False,
         worker_enabled=False,
     )
@@ -286,13 +287,14 @@ async def test_the_reconcile_service_carries_this_deployments_tuning(
         return {
             "batch_size": service._batch_size,
             "max_retract_fraction": service._max_retract_fraction,
+            "walkers": service._walkers,
         }
 
     async with LifespanManager(app) as manager:
         transport = ASGITransport(app=manager.app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             body = (await client.get("/_probe/tuning")).json()
-    assert body == {"batch_size": 7, "max_retract_fraction": 0.5}
+    assert body == {"batch_size": 7, "max_retract_fraction": 0.5, "walkers": 3}
 
 
 async def test_the_search_service_the_graph_resolves_holds_both_suggest_tiers(

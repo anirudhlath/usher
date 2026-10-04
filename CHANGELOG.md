@@ -14,6 +14,12 @@ Versioning is `0.x` while the wire contract may still move —
   and back off on their own: an outage or a 429 drops the cap to one,
   and every ten pages that succeed raise it by one. The gauge
   `usher.source.listing.concurrency` shows the cap.
+- A whole-library walk — a full sync, or a source's first delta — walks a plan:
+  what the account is watching, then each library's movies and series, then its
+  episodes in chunks of `USHER_SYNC_UNIT_MAX_ITEMS` (default 100,000).
+  `USHER_SYNC_WALKERS` units are fetched at once while one writer commits them;
+  each unit's position is kept in `sync_run_units`, and the run's
+  `heartbeat_at` shows the writer is alive.
 
 ### Changed
 

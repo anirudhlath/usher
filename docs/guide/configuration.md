@@ -113,6 +113,27 @@ A sync reads the media server's library a page at a time. `USHER_SYNC_WALKERS`
 server fails one, the cap drops to one by itself and climbs back a step for
 every ten pages that succeed.
 
+A full sync, or the first sync of a source, reads the library as a plan: what
+you are watching first, then each library's films and shows, then their
+episodes, a library larger than `USHER_SYNC_UNIT_MAX_ITEMS` (default 100,000)
+in several pieces. Up to `USHER_SYNC_WALKERS` pieces are read at once.
+
+`USHER_SOURCE_PAGE_SIZE` (default 1,000, at most 1,000) also bounds how large a
+piece can be. A sync reads at most 10,000 pages of one piece, and each page
+after the first moves on by the page size less a reach-back of 50 items, or of
+half the page below 100. A piece those pages do not finish fails:
+
+| Page size | A piece fails once it holds |
+|---|---|
+| 1,000 | 9,500,050 items |
+| 100 | 500,050 items |
+| 21 | 110,010 items |
+| 20 | 100,010 items |
+
+A piece of episodes reads 50 items past its end, so at a page size of 20 or
+less every full piece of `USHER_SYNC_UNIT_MAX_ITEMS` (100,000) fails. A server
+that serves fewer items a page than it is asked for moves on by what it serves.
+
 Every request is work for the media server. If you don't administer it, or a
 sync slows down somebody's playback, set `USHER_SYNC_WALKERS=1` for one request
 at a time.

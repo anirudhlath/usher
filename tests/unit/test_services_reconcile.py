@@ -1,8 +1,10 @@
 """The reconcile lane, against port fakes and `FakeSourceAdapter`."""
 
+import asyncio
 import uuid
-from collections.abc import Iterator
+from collections.abc import AsyncGenerator, Iterator
 from datetime import UTC, datetime, timedelta
+from itertools import groupby, pairwise
 
 import httpx
 import pytest
@@ -25,11 +27,11 @@ from usher.adapters.emby.adapter import EmbyAdapter
 from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
 from usher.domain.source import Source
-from usher.domain.sync import SyncRunKind, SyncRunStatus
+from usher.domain.sync import SyncRunKind, SyncRunStatus, SyncRunUnitStatus, WalkStage
 from usher.ports.credentials import SourceCredentials
 from usher.ports.errors import PortDataMalformed, PortUnavailable, UsherPortError
 from usher.ports.events import ClientEventKind
-from usher.ports.source import SourceItem, SourceItemKind
+from usher.ports.source import SourceItem, SourceItemKind, UnitPage, WalkPlan
 from usher.services.ingest import IngestService
 from usher.services.matching import MatchService
 from usher.services.reconcile import (
@@ -56,8 +58,26 @@ def _item(external_id: str, **overrides: object) -> SourceItem:
     return SourceItem(**fields)  # type: ignore[arg-type]
 
 
+class _Ticks:
+    """A clock that moves on a second every time it is read."""
+
+    def __init__(self) -> None:
+        self.reads = 0
+
+    def __call__(self) -> datetime:
+        self.reads += 1
+        return LATER + timedelta(seconds=self.reads)
+
+
 class _Fixture:
-    def __init__(self, *, batch_size: int = 1_000, max_retract_fraction: float = 0.25) -> None:
+    def __init__(
+        self,
+        *,
+        batch_size: int = 1_000,
+        max_retract_fraction: float = 0.25,
+        walkers: int = 4,
+        heartbeat_seconds: float = 60.0,
+    ) -> None:
         self.source = Source(
             kind=SourceKind.EMBY,
             name="Living Room Emby",
@@ -73,24 +93,48 @@ class _Fixture:
         self.runs = FakeSyncRunRepository()
         self.events = FakeEventPublisher()
         self.commits = 0
+        # The adapter's own list, so its `fetched` entries and the `completed`
+        # entries `_commit` adds are ordered against each other.
+        self.journal = self.adapter.journal
+        # Read back at every commit: the newest run's items and heartbeat, and
+        # its units' statuses by key.
+        self.checkpoints: list[tuple[int, datetime | None]] = []
+        self.unit_states: list[dict[str, SyncRunUnitStatus]] = []
+        self._completed: set[tuple[uuid.UUID, str]] = set()
+        self.ingest = IngestService(
+            matcher=MatchService(titles=self.titles, matching=self.matching, queue=self.queue),
+            matching=self.matching,
+            media_items=self.media_items,
+            episodes=FakeEpisodeRepository(),
+            queue=self.queue,
+        )
         self.service = ReconcileService(
-            ingest=IngestService(
-                matcher=MatchService(titles=self.titles, matching=self.matching, queue=self.queue),
-                matching=self.matching,
-                media_items=self.media_items,
-                episodes=FakeEpisodeRepository(),
-                queue=self.queue,
-            ),
+            ingest=self.ingest,
             media_items=self.media_items,
             runs=self.runs,
             events=self.events,
             commit=self._commit,
             batch_size=batch_size,
             max_retract_fraction=max_retract_fraction,
+            walkers=walkers,
+            heartbeat_seconds=heartbeat_seconds,
+            clock=_Ticks(),
         )
 
     async def _commit(self) -> None:
         self.commits += 1
+        newest = await self.runs.list_for_source(self.source.id, limit=1)
+        if not newest:
+            return
+        run = newest[0]
+        self.checkpoints.append((run.items_seen, run.heartbeat_at))
+        units = await self.runs.units_for(run.id)
+        self.unit_states.append({unit.unit_key: unit.status for unit in units})
+        for unit in units:
+            key = (run.id, unit.unit_key)
+            if unit.status is SyncRunUnitStatus.COMPLETED and key not in self._completed:
+                self._completed.add(key)
+                self.journal.append(("completed", unit.unit_key))
 
 
 @pytest.fixture
@@ -193,7 +237,7 @@ async def test_a_run_checkpoints_every_batch(fixture: _Fixture) -> None:
         fixture.adapter.seed(_item(f"m{index}"), T0)
     fixture.service._batch_size = 2
     await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
-    # Four batches, plus the run's own insert and its final save.
+    # Four batches, plus the run's insert, the beat that stores its plan, and its final save.
     assert fixture.commits >= 6, fixture.commits
 
 
@@ -965,3 +1009,350 @@ def test_the_two_error_codes_are_pinned_by_value_because_they_are_wire_artefacts
     assert CEILING_ERROR_CODE == "gap_delta_ceiling"
     assert RETRACTION_ERROR_CODE == "availability_ceiling"
     assert CEILING_ERROR_CODE != RETRACTION_ERROR_CODE
+
+
+# -- a whole-library walk, as a plan ---------------------------------------
+
+
+def _shelve(
+    fixture: _Fixture, library: str, ids: range, *, stage: WalkStage = WalkStage.TITLES
+) -> list[str]:
+    """Seed `m<id>` for each id into `library`, whose unit the fake plans in `stage`."""
+    external_ids = [f"m{index}" for index in ids]
+    for external_id in external_ids:
+        fixture.adapter.seed(_item(external_id), T0)
+        fixture.adapter.place(external_id, library)
+    fixture.adapter.stage(library, stage)
+    return external_ids
+
+
+def _fetch_window(journal: list[tuple[str, str]], key: str) -> tuple[int, int]:
+    """Where `key`'s first and last fetched items sit in the journal."""
+    at = [index for index, entry in enumerate(journal) if entry == ("fetched", key)]
+    return at[0], at[-1]
+
+
+def _progress(fixture: _Fixture) -> list[object]:
+    """`items_seen` of every `sync.progress` the walk published, in order."""
+    return [
+        event.data["items_seen"]
+        for event in fixture.events.published
+        if event.kind is ClientEventKind.SYNC_PROGRESS
+    ]
+
+
+async def test_a_whole_library_walk_stores_its_plan_and_completes_every_unit() -> None:
+    fixture = _Fixture()
+    _shelve(fixture, "Films", range(3))
+    _shelve(fixture, "Shows", range(10, 15))
+    run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    assert run.status is SyncRunStatus.COMPLETED
+    assert run.items_seen == 8
+    units = await fixture.runs.units_for(run.id)
+    assert [
+        (unit.unit_key, unit.status, unit.position, unit.items_seen, unit.expected_items)
+        for unit in units
+    ] == [
+        ("library:Films", SyncRunUnitStatus.COMPLETED, 3, 3, 3),
+        ("library:Shows", SyncRunUnitStatus.COMPLETED, 5, 5, 5),
+    ]
+    assert await fixture.media_items.count_for_source(fixture.source.id) == 8
+
+
+async def test_no_unit_of_a_stage_is_fetched_before_every_unit_ahead_of_it_has_committed() -> None:
+    """The stage barrier, with a walker free for every unit.
+
+    Four walkers for three units, so without the barrier all three start at once.
+    The episodes library is also planned first.
+    """
+    fixture = _Fixture(walkers=4)
+    _shelve(fixture, "Episodes", range(20, 22), stage=WalkStage.EPISODES)
+    _shelve(fixture, "Films", range(4))
+    _shelve(fixture, "Shows", range(10, 14))
+    plan = await fixture.adapter.plan_walk()
+    assert plan.units[0].stage is WalkStage.EPISODES, "the premise: episodes are planned first"
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    first_episode = fixture.journal.index(("fetched", "library:Episodes"))
+    titles_done = max(
+        fixture.journal.index(("completed", key)) for key in ("library:Films", "library:Shows")
+    )
+    assert first_episode > titles_done
+
+
+async def test_within_a_stage_the_largest_unit_is_fetched_first() -> None:
+    """One walker, so the fetch order is the claim order."""
+    fixture = _Fixture(walkers=1)
+    _shelve(fixture, "Shorts", range(2))
+    _shelve(fixture, "Films", range(10, 15))
+    plan = await fixture.adapter.plan_walk()
+    assert [unit.expected_items for unit in plan.units] == [2, 5], (
+        "the premise: the plan lists the smaller unit first"
+    )
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    fetched = [key for event, key in fixture.journal if event == "fetched"]
+    assert fetched == ["library:Films"] * 5 + ["library:Shorts"] * 2
+
+
+@pytest.mark.parametrize(("walkers", "together"), [(1, False), (2, True)])
+async def test_walkers_fetch_units_at_once_up_to_their_number(walkers: int, together: bool) -> None:
+    """Two units' fetch windows overlap with two walkers and never with one."""
+    fixture = _Fixture(walkers=walkers)
+    _shelve(fixture, "Films", range(6))
+    _shelve(fixture, "Shows", range(10, 16))
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    films = _fetch_window(fixture.journal, "library:Films")
+    shows = _fetch_window(fixture.journal, "library:Shows")
+    assert (films[0] < shows[1] and shows[0] < films[1]) is together, (films, shows)
+
+
+async def test_a_units_pages_are_committed_once_they_add_up_to_a_batch_and_when_it_ends() -> None:
+    """Pages of two at a batch of three: a commit after four items, then one at the end.
+
+    A commit per page reads [2, 4, 5], and a commit only at the end [5].
+    """
+    fixture = _Fixture(batch_size=3)
+    _shelve(fixture, "Films", range(5))
+    run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    assert _progress(fixture) == [4, 5]
+    [unit] = await fixture.runs.units_for(run.id)
+    assert (unit.position, unit.items_seen, unit.status) == (5, 5, SyncRunUnitStatus.COMPLETED)
+    statuses = [states["library:Films"] for states in fixture.unit_states if states]
+    assert [status for status, _ in groupby(statuses)] == [
+        SyncRunUnitStatus.PENDING,
+        SyncRunUnitStatus.RUNNING,
+        SyncRunUnitStatus.COMPLETED,
+    ]
+
+
+async def test_a_failing_unit_fails_the_run_and_keeps_every_units_committed_position() -> None:
+    """Shows raises after three of its four items: its first page committed, its third dropped.
+
+    One walker, and Films is the larger, so Films has completed before Shows starts.
+    """
+    fixture = _Fixture(batch_size=2, walkers=1)
+    _shelve(fixture, "Films", range(10, 15))
+    shows = _shelve(fixture, "Shows", range(4))
+    fixture.adapter.fail_unit_after("Shows", 3)
+    run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    assert run.status is SyncRunStatus.FAILED
+    assert "library Shows went away" in (run.error or "")
+    assert run.items_seen == 7
+    assert run.items_retracted == 0
+    stored = await fixture.runs.get(run.id)
+    assert stored is not None and stored.items_seen == 7
+    units = {unit.unit_key: unit for unit in await fixture.runs.units_for(run.id)}
+    films, failed = units["library:Films"], units["library:Shows"]
+    assert (films.status, films.position) == (SyncRunUnitStatus.COMPLETED, 5)
+    assert (failed.status, failed.position, failed.items_seen) == (SyncRunUnitStatus.FAILED, 2, 2)
+    assert await fixture.media_items.get_by_external_id(fixture.source.id, shows[2]) is None
+
+
+async def test_the_run_and_its_first_heartbeat_are_committed_before_the_plan_is_made() -> None:
+    """A walk that dies while planning still leaves a row saying when it was last alive."""
+    fixture = _Fixture()
+    _shelve(fixture, "Films", range(2))
+    seen: list[tuple[int, datetime | None]] = []
+    original = fixture.adapter.plan_walk
+
+    async def _peek() -> WalkPlan:
+        [run] = await fixture.runs.list_for_source(fixture.source.id)
+        seen.append((fixture.commits, run.heartbeat_at))
+        return await original()
+
+    fixture.adapter.plan_walk = _peek  # type: ignore[method-assign]
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    [(commits, heartbeat)] = seen
+    assert commits == 1, "the run's insert is committed before the plan is asked for"
+    assert heartbeat is not None
+
+
+async def test_every_commit_of_a_planned_walk_moves_the_heartbeat() -> None:
+    fixture = _Fixture(batch_size=2)
+    _shelve(fixture, "Films", range(5))
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    rises = [
+        (before[1], after[1])
+        for before, after in pairwise(fixture.checkpoints)
+        if after[0] > before[0]
+    ]
+    assert len(rises) == 3, "the premise: three commits that each brought items"
+    for earlier, later in rises:
+        assert earlier is not None and later is not None and later > earlier
+
+
+async def test_a_writer_waiting_on_its_walkers_still_heartbeats() -> None:
+    """A page under retry can take minutes, and the run must not look dead meanwhile."""
+    fixture = _Fixture(heartbeat_seconds=0.01)
+    _shelve(fixture, "Films", range(2))
+    release = fixture.adapter.hold("Films")
+    walk = asyncio.create_task(
+        fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    )
+    try:
+        async with asyncio.timeout(5):
+            while fixture.commits < 5:
+                await asyncio.sleep(0.01)
+        assert fixture.journal == [], "the premise: nothing was fetched while the writer waited"
+        beats = [beat for _, beat in fixture.checkpoints[2:5] if beat is not None]
+        assert len(beats) == 3
+        assert beats == sorted(set(beats)), "a beat that did not move the heartbeat"
+    finally:
+        release.set()
+        run = await walk
+    assert run.status is SyncRunStatus.COMPLETED
+
+
+async def test_pages_that_keep_arriving_below_a_batch_still_let_the_heartbeat_move() -> None:
+    """A beat falls due a fixed time after the last commit, not after a silence.
+
+    Forty pages of one item, a hundredth of a second apart, never fill a batch, so a
+    writer that beat only when nothing arrived would not beat once in the walk.
+    """
+    fixture = _Fixture(heartbeat_seconds=0.1)
+    _shelve(fixture, "Films", range(1))
+
+    async def _trickle(key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage]:
+        for index in range(40):
+            await asyncio.sleep(0.01)
+            yield UnitPage((_item(f"t{index}"),), resume_at=index + 1)
+
+    fixture.adapter.list_unit = _trickle  # type: ignore[method-assign]
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    carried = [seen for seen, _ in fixture.checkpoints if seen]
+    assert carried[0] == 40, "the premise: the unit's forty items rode one commit"
+    beats = [beat for seen, beat in fixture.checkpoints[2:] if seen == 0]
+    assert len(beats) >= 2, "no beat while pages kept arriving"
+
+
+async def test_a_unit_that_ends_on_a_batch_boundary_publishes_no_second_frame() -> None:
+    """Its end commits an empty batch to save the unit `completed`, and that is no frame.
+
+    PRD 07 publishes one `sync.progress` per committed batch, and an empty one moved
+    no counter: four items in batches of two are two frames, not three.
+    """
+    fixture = _Fixture(batch_size=2)
+    _shelve(fixture, "Films", range(4))
+    run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    assert _progress(fixture) == [2, 4]
+    [unit] = await fixture.runs.units_for(run.id)
+    assert unit.status is SyncRunUnitStatus.COMPLETED
+
+
+async def test_a_unit_that_yields_no_page_is_still_saved_completed() -> None:
+    """Emby's seed when the account is watching nothing: planned, and no page at all.
+
+    Its end alone commits it `completed`, at the position it started from.
+    """
+    fixture = _Fixture()
+    _shelve(fixture, "Films", range(2))
+    for external_id in _shelve(fixture, "Watching", range(10, 11), stage=WalkStage.SEED):
+        fixture.adapter.forget(external_id)
+    plan = await fixture.adapter.plan_walk()
+    assert [(unit.key, unit.stage, unit.expected_items) for unit in plan.units] == [
+        ("library:Films", WalkStage.TITLES, 2),
+        ("library:Watching", WalkStage.SEED, 0),
+    ], "the premise: an empty seed unit, planned"
+    run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    assert run.status is SyncRunStatus.COMPLETED
+    assert ("fetched", "library:Watching") not in fixture.journal, "the premise: it fetched nothing"
+    units = {unit.unit_key: unit for unit in await fixture.runs.units_for(run.id)}
+    seed = units["library:Watching"]
+    assert (seed.status, seed.position, seed.items_seen) == (SyncRunUnitStatus.COMPLETED, 0, 0)
+
+
+async def test_a_delta_with_no_cursor_walks_the_plan_and_never_sweeps() -> None:
+    """A console-triggered first sync.
+
+    The row the source no longer has is a fifth of what Usher holds, under the
+    retraction ceiling, so only the rule that a delta never sweeps can spare it.
+    """
+    fixture = _Fixture()
+    _shelve(fixture, "Films", range(4))
+    await fixture.ingest.ingest_batch(fixture.source.id, [_item("m90")], observed_at=T0)
+    run = await fixture.service.reconcile(fixture.source, SyncRunKind.DELTA, fixture.adapter)
+    assert run.cursor_at is None, "the premise: no walk has completed, so there is no cursor"
+    assert [unit.unit_key for unit in await fixture.runs.units_for(run.id)] == ["library:Films"]
+    assert run.status is SyncRunStatus.COMPLETED
+    assert run.items_retracted == 0
+    kept = await fixture.media_items.get_by_external_id(fixture.source.id, "m90")
+    assert kept is not None and kept.available is True
+
+
+async def test_a_delta_with_a_cursor_keeps_the_single_walk() -> None:
+    fixture = _Fixture()
+    _shelve(fixture, "Films", range(2))
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    delta = await fixture.service.reconcile(fixture.source, SyncRunKind.DELTA, fixture.adapter)
+    assert delta.cursor_at is not None, "the premise: the full walk gave the delta its cursor"
+    assert delta.heartbeat_at is None
+    assert await fixture.runs.units_for(delta.id) == []
+
+
+async def test_a_bounded_walk_keeps_the_single_walk_even_with_no_cursor() -> None:
+    fixture = _Fixture()
+    _shelve(fixture, "Films", range(2))
+    run = await fixture.service.reconcile(
+        fixture.source, SyncRunKind.DELTA, fixture.adapter, max_items=10
+    )
+    assert run.cursor_at is None, "the premise: a cursorless delta, which would otherwise plan"
+    assert run.status is SyncRunStatus.COMPLETED
+    assert run.heartbeat_at is None
+    assert await fixture.runs.units_for(run.id) == []
+
+
+async def test_a_walk_told_not_to_plan_keeps_the_single_walk() -> None:
+    """The gap-closer's walk, which stays one stream even unbounded and cursorless."""
+    fixture = _Fixture()
+    _shelve(fixture, "Films", range(2))
+    run = await fixture.service.reconcile(
+        fixture.source, SyncRunKind.FULL, fixture.adapter, plan=False
+    )
+    assert run.status is SyncRunStatus.COMPLETED
+    assert run.items_seen == 2
+    assert run.heartbeat_at is None
+    assert await fixture.runs.units_for(run.id) == []
+
+
+async def test_a_failing_unit_cancels_the_walkers_still_fetching() -> None:
+    """Films fails at once while Shows is held; the walk ends without waiting for Shows."""
+    fixture = _Fixture()
+    _shelve(fixture, "Films", range(2))
+    _shelve(fixture, "Shows", range(10, 12))
+    fixture.adapter.fail_unit_after("Films", 0)
+    release = fixture.adapter.hold("Shows")
+    try:
+        async with asyncio.timeout(5):
+            run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    finally:
+        release.set()
+    assert run.status is SyncRunStatus.FAILED
+    walkers = [
+        task
+        for task in asyncio.all_tasks()
+        if getattr(task.get_coro(), "__qualname__", "") == "ReconcileService._fetch"
+    ]
+    assert walkers == []
+
+
+async def test_a_bug_in_a_walker_is_raised_not_recorded() -> None:
+    """A walker hands the writer whatever it raised, so a bug ends the walk loudly.
+
+    A walker that died of it silently would leave the writer waiting for an end that
+    never comes, heartbeating forever; the deadline turns that into a failure.
+    """
+    fixture = _Fixture()
+    _shelve(fixture, "Films", range(2))
+
+    def _broken(key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage]:
+        raise ZeroDivisionError("a bug, not an outage")
+
+    fixture.adapter.list_unit = _broken  # type: ignore[method-assign]
+    with pytest.raises(ZeroDivisionError):
+        async with asyncio.timeout(5):
+            await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+
+
+def test_a_service_with_no_walkers_is_refused() -> None:
+    """No walker would fetch, and the writer would wait on an empty queue forever."""
+    with pytest.raises(ValueError, match="at least one walker"):
+        _Fixture(walkers=0)
