@@ -2,7 +2,7 @@
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from urllib.parse import quote
 
@@ -12,8 +12,11 @@ from tests.contract.source_harness import SourceHarness
 from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
 from usher.domain.source import Source
-from usher.ports.errors import PortAuthFailed, PortUnavailable
+from usher.domain.sync import WalkStage
+from usher.ports.errors import PortAuthFailed, PortDataMalformed, PortUnavailable
 from usher.ports.source import (
+    DEFAULT_UNIT_KEY,
+    WHOLE_LIBRARY,
     SourceAdapter,
     SourceEvent,
     SourceEventKind,
@@ -24,7 +27,11 @@ from usher.ports.source import (
     SourceWatchState,
     StreamTarget,
     StreamTargetKind,
+    UnitPage,
+    WalkPlan,
+    WalkUnit,
     WatchStateUpdate,
+    pages_of,
 )
 
 # Same layout table the Emby mapper uses. Duplicated rather than imported so
@@ -63,6 +70,11 @@ class FakeSourceAdapter(SourceAdapter):
         #: forever" is precisely the defect it would hide.
         self._closes = 0
         self._fail_after: int | None = None
+        # Library name -> the external ids placed in it, in placement order. Empty
+        # means the fake plans the port's default single unit.
+        self._libraries: dict[str, list[str]] = {}
+        #: Items per `list_unit` page: small, so a walk of a few items pages.
+        self.page_size = 2
         # The session model. `_server_token` is what the source currently
         # accepts; `_token` is what this adapter last obtained. Expiring a
         # session rotates the former, so the next call sees a mismatch and
@@ -96,6 +108,13 @@ class FakeSourceAdapter(SourceAdapter):
 
     def seed_state(self, state: SourceWatchState) -> None:
         self._states[state.external_id] = state
+
+    def place(self, external_id: str, *libraries: str) -> None:
+        """Put a seeded item in each named library, creating any not yet named."""
+        for library in libraries:
+            placed = self._libraries.setdefault(library, [])
+            if external_id not in placed:
+                placed.append(external_id)
 
     def forget(self, external_id: str) -> None:
         self._items.pop(external_id, None)
@@ -252,6 +271,31 @@ class FakeSourceAdapter(SourceAdapter):
                 raise PortUnavailable("source went away mid-walk")
             yield item
             yielded += 1
+
+    async def plan_walk(self) -> WalkPlan:
+        await self._ready()
+        if not self._libraries:
+            return WHOLE_LIBRARY
+        units = tuple(
+            WalkUnit(f"library:{name}", WalkStage.TITLES, f"library {name}", len(placed))
+            for name, placed in self._libraries.items()
+        )
+        return WalkPlan(units, expected_total=len(self._items))
+
+    def list_unit(self, key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage]:
+        if key == DEFAULT_UNIT_KEY:
+            return pages_of(self._walk_items(None), start_index=start_index, size=self.page_size)
+        name = key.removeprefix("library:")
+        if name == key or name not in self._libraries:
+            raise PortDataMalformed(f"no walk unit {key!r} in this source's plan")
+        return pages_of(self._walk_library(name), start_index=start_index, size=self.page_size)
+
+    async def _walk_library(self, name: str) -> AsyncIterator[SourceItem]:
+        await self._ready()
+        for external_id in list(self._libraries[name]):
+            item = self._items.get(external_id)
+            if item is not None:
+                yield item
 
     async def get_item(self, external_id: str) -> SourceItem | None:
         await self._ready()
@@ -467,6 +511,12 @@ class FakeSourceHarness(SourceHarness):
 
     async def given_item(self, item: SourceItem, *, changed_at: AwareDatetime) -> None:
         self._adapter.seed(item, changed_at)
+
+    async def given_item_in_libraries(
+        self, item: SourceItem, libraries: Sequence[str], *, changed_at: AwareDatetime
+    ) -> None:
+        self._adapter.seed(item, changed_at)
+        self._adapter.place(item.external_id, *libraries)
 
     async def given_watch_state(self, state: SourceWatchState) -> None:
         self._adapter.seed_state(state)

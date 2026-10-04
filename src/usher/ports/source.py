@@ -3,7 +3,7 @@
 import asyncio
 import uuid
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field, fields
 from enum import StrEnum
@@ -14,8 +14,9 @@ from pydantic import AwareDatetime
 
 from usher.domain.enums import HdrFormat
 from usher.domain.source import Source
+from usher.domain.sync import WalkStage
 from usher.ports.credentials import SourceCredentials
-from usher.ports.errors import UsherPortError
+from usher.ports.errors import PortDataMalformed, UsherPortError
 
 # The provider-id keys every adapter must emit under these exact names whenever it knows
 # them.
@@ -147,6 +148,79 @@ class SourceEvent:
                 "a carried watch state must name an item the event listed in external_ids; "
                 f"unlisted: {sorted(unnamed)}"
             )
+
+
+#: The one unit a plan holds when its adapter does not split the library.
+DEFAULT_UNIT_KEY = "all"
+
+
+@dataclass(frozen=True, slots=True)
+class WalkUnit:
+    """One piece of a whole-library walk.
+
+    `key` is opaque and the adapter's own: stored like `MediaItem.external_id`
+    and never in an API response. `label` is for logs and the CLI only.
+    `expected_items` is a count taken while planning, or `None`.
+    """
+
+    key: str
+    stage: WalkStage
+    label: str
+    expected_items: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WalkPlan:
+    """The units of one whole-library walk, and the source's own total if it gave one."""
+
+    units: tuple[WalkUnit, ...]
+    expected_total: int | None = None
+
+
+WHOLE_LIBRARY = WalkPlan((WalkUnit(DEFAULT_UNIT_KEY, WalkStage.TITLES, "the whole library"),))
+
+
+@dataclass(frozen=True, slots=True)
+class UnitPage:
+    """One page of a unit: its items, and the `start_index` that resumes after it."""
+
+    items: tuple[SourceItem, ...]
+    resume_at: int
+
+
+async def pages_of(
+    items: AsyncIterator[SourceItem], *, start_index: int = 0, size: int = 1_000
+) -> AsyncGenerator[UnitPage]:
+    """A walk in pages of `size`, from its `start_index`th item.
+
+    `resume_at` counts every item the walk produced, skipped ones included, so it
+    is the `start_index` that resumes after the page. A walk that fails mid-page
+    yields the items it had, then raises. Never yields an empty page. A consumer
+    that stops closes `items` at once.
+    """
+    received = 0
+    held: list[SourceItem] = []
+    try:
+        async for item in items:
+            received += 1
+            if received <= start_index:
+                continue
+            held.append(item)
+            if len(held) >= size:
+                yield UnitPage(tuple(held), resume_at=received)
+                held = []
+    except UsherPortError:
+        if held:
+            yield UnitPage(tuple(held), resume_at=received)
+        raise
+    finally:
+        # A consumer that stops closes the walk now, read-ahead included, rather
+        # than leaving it to the garbage collector.
+        aclose = getattr(items, "aclose", None)
+        if aclose is not None:
+            await aclose()
+    if held:
+        yield UnitPage(tuple(held), resume_at=received)
 
 
 def redact_query(url: str) -> str:
@@ -372,6 +446,27 @@ class SourceAdapter(ABC):
         that never did.
         """
         return 0
+
+    async def plan_walk(self) -> WalkPlan:
+        """How to walk the whole library, unit by unit.
+
+        By default one unit, `all`, which is `list_items(None)`. The units outside
+        `SEED`, taken together, yield exactly the items `list_items(None)` yields,
+        possibly more than once: they may overlap, because ingest upserts. A `SEED`
+        unit may repeat items other units yield.
+        """
+        return WHOLE_LIBRARY
+
+    def list_unit(self, key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage]:
+        """One unit of this adapter's plan, in pages, from `start_index`.
+
+        Each page's `resume_at` is the `start_index` that resumes after it. Never
+        yields an empty page, and raises rather than truncating, as `list_items`
+        does. A key this adapter never planned raises `PortDataMalformed`.
+        """
+        if key != DEFAULT_UNIT_KEY:
+            raise PortDataMalformed(f"no walk unit {key!r} in this adapter's plan")
+        return pages_of(self.list_items(None), start_index=start_index)
 
     async def probe_push(self, *, timeout_seconds: float = 15.0) -> PushProbe:
         """Open the push channel, wait, and report what arrived."""

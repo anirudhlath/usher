@@ -39,6 +39,24 @@ class SyncRunStatus(StrEnum):
     FAILED = "failed"
 
 
+class WalkStage(StrEnum):
+    """Which part of a whole-library walk a unit belongs to.
+
+    `SEED` is what the account is watching, so the watch lane can run early;
+    `TITLES` is movies and series; `EPISODES` waits until every title has
+    committed, so each episode finds its series.
+    """
+
+    SEED = "seed"
+    TITLES = "titles"
+    EPISODES = "episodes"
+
+
+#: The stage barrier's order: no unit of a stage is fetched before every unit of
+#: the stages ahead of it has committed complete.
+STAGE_ORDER: tuple[WalkStage, ...] = (WalkStage.SEED, WalkStage.TITLES, WalkStage.EPISODES)
+
+
 class SyncRun(DomainModel):
     """One attempt at reconciling a source."""
 

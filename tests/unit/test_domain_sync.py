@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from usher.domain.ids import new_id
-from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus
+from usher.domain.sync import STAGE_ORDER, SyncRun, SyncRunKind, SyncRunStatus, WalkStage
 
 SOURCE_ID = new_id()
 
@@ -111,3 +111,12 @@ def test_a_run_starts_at_position_zero_and_refuses_a_negative_one() -> None:
 
     with pytest.raises(ValidationError):
         one.evolve(position=-1)
+
+
+def test_a_whole_library_walk_runs_its_stages_seed_then_titles_then_episodes() -> None:
+    """The stage barrier's order, and every stage has a place in it.
+
+    A stage missing from the order is a stage whose units are never walked.
+    """
+    assert STAGE_ORDER == (WalkStage.SEED, WalkStage.TITLES, WalkStage.EPISODES)
+    assert set(STAGE_ORDER) == set(WalkStage)

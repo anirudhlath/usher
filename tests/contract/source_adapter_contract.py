@@ -1,13 +1,15 @@
 """Behaviour every `SourceAdapter` implementation must satisfy."""
 
 import asyncio
+from contextlib import aclosing
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from tests.contract.source_harness import SourceHarness
 from usher.domain.enums import HdrFormat
-from usher.ports.errors import PortAuthFailed, PortUnavailable
+from usher.domain.sync import WalkStage
+from usher.ports.errors import PortAuthFailed, PortDataMalformed, PortUnavailable
 from usher.ports.source import (
     SourceEvent,
     SourceEventKind,
@@ -170,6 +172,47 @@ class SourceAdapterContract:
         await harness.given_item(MOVIE, changed_at=T1)
         seen = {item.external_id async for item in harness.adapter.list_items(since=T1)}
         assert "movie-1" in seen
+
+    # --- the walk plan -------------------------------------------------
+
+    async def test_the_plan_s_units_together_yield_what_a_whole_walk_yields(
+        self, harness: SourceHarness
+    ) -> None:
+        """The units outside `SEED`, taken together, cover `list_items()` exactly.
+
+        An item in two libraries is yielded by both units and is still one item, and a
+        series shares its library with its episode. A plan that dropped a library, or a
+        unit that stopped after its first page, leaves an item out.
+        """
+        await harness.given_item_in_libraries(MOVIE, ["Films", "Favourites"], changed_at=T0)
+        await harness.given_item_in_libraries(SERIES, ["Shows"], changed_at=T0)
+        await harness.given_item_in_libraries(EPISODE, ["Shows"], changed_at=T0)
+        for index in range(5):
+            await harness.given_item_in_libraries(_filler(index), ["Films"], changed_at=T0)
+        whole = {item.external_id async for item in harness.adapter.list_items()}
+        assert len(whole) == 8, "the premise: the source holds eight items"
+
+        plan = await harness.adapter.plan_walk()
+        walked: set[str] = set()
+        for unit in plan.units:
+            if unit.stage is WalkStage.SEED:
+                continue
+            async with aclosing(harness.adapter.list_unit(unit.key)) as pages:
+                async for page in pages:
+                    walked.update(item.external_id for item in page.items)
+        assert walked == whole
+
+    async def test_a_unit_the_plan_never_named_is_refused(self, harness: SourceHarness) -> None:
+        """A key this adapter never planned raises rather than walking nothing.
+
+        An empty unit reads to the writer as a unit that completed, and a full walk
+        would then sweep everything that unit should have held.
+        """
+        await self._seed_library(harness)
+        with pytest.raises(PortDataMalformed):
+            async with aclosing(harness.adapter.list_unit("no-such-unit")) as pages:
+                async for _ in pages:
+                    pass
 
     # --- mapping -------------------------------------------------------
 

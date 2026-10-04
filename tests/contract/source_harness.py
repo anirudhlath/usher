@@ -1,6 +1,7 @@
 """The seam that makes `SourceAdapterContract` source-agnostic."""
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 
 from pydantic import AwareDatetime
 
@@ -25,6 +26,16 @@ class SourceHarness(ABC):
     @abstractmethod
     async def given_item(self, item: SourceItem, *, changed_at: AwareDatetime) -> None:
         """Make the source hold `item`, last changed at `changed_at`."""
+
+    @abstractmethod
+    async def given_item_in_libraries(
+        self, item: SourceItem, libraries: Sequence[str], *, changed_at: AwareDatetime
+    ) -> None:
+        """`given_item`, with the item placed in each named library.
+
+        A library is created the first time it is named. Two names put one item in
+        two libraries, which real servers allow.
+        """
 
     @abstractmethod
     async def given_watch_state(self, state: SourceWatchState) -> None:

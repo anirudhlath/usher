@@ -1,5 +1,7 @@
 """Binds a real `EmbyAdapter` to `FakeEmbyServer` for the contract suite."""
 
+from collections.abc import Sequence
+
 import httpx
 from pydantic import AwareDatetime, SecretStr
 
@@ -94,6 +96,16 @@ class EmbyHarness(SourceHarness):
           height survive, because Emby carries them at item level too. See
           `tests/fakes/emby_server.py`'s own docstring for the full
           reasoning; nothing seeds such an item.
+        """
+        self._server.add_item(item, changed_at)
+
+    async def given_item_in_libraries(
+        self, item: SourceItem, libraries: Sequence[str], *, changed_at: AwareDatetime
+    ) -> None:
+        """Libraries are ignored until the server can serve views.
+
+        `EmbyAdapter` plans the port's single unit for now, which covers every item
+        wherever it is placed.
         """
         self._server.add_item(item, changed_at)
 
