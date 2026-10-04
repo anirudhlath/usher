@@ -3347,7 +3347,7 @@ The clone is scratch. Once its numbers are posted, drop it:
 docker exec usher-postgres-1 dropdb -U usher ffs_first_watch
 ```
 
-Then go on to Phase 2. Task 10, Step 1 marks Phase 1 landed and Task 9's first watch walk passed in both status tables, as the Phase 2 branch's first commit; Task 20 marks Task 9 passed once its item walk's number is in.
+Then go on to Phase 2. Task 10, Step 1 marks Phase 1 landed and Task 9's first watch walk passed in both status tables, as the Phase 2 branch's first commit; Task 10's fix round marked Task 9 passed once its item walk's number was in.
 
 ---
 
@@ -3355,7 +3355,7 @@ Then go on to Phase 2. Task 10, Step 1 marks Phase 1 landed and Task 9's first w
 
 Spec §2.1–2.8. A **whole-library walk** — a full walk, or a delta with no cursor yet — asks the adapter for a plan of units, fetches the units with several walkers, commits them with one writer, runs the watch lane as soon as the seed has landed, and resumes in place after a failure. A delta with a cursor and the gap-closer keep Phase 1's single walk.
 
-Phase 2 starts once PR 1 has merged and Task 9's first watch walk has passed, on its own branch (Task 10, Step 1). Task 9's item walk on production waits on the owner; Task 20 does not open PR 2 until it has passed.
+Phase 2 starts once PR 1 has merged and Task 9's first watch walk has passed, on its own branch (Task 10, Step 1). Task 9's item walk on production, which Task 20 needs before it opens PR 2, passed on 2026-10-04 in 2.36 h.
 
 ### Departures from the spec's letter
 
@@ -3443,7 +3443,7 @@ git log --oneline -1   # the merge of PR 1
 
 Every later Phase 2 command runs in this worktree.
 
-Mark Phase 1 in both status tables, claiming only what has run. In `docs/plans/progress.md`, the Tasks 1–8 row becomes `✅ landed (PR #<n>)`, the Task 9 row becomes `🔨 the first watch walk passed in <s> s; the item walk on production waits on the owner`, with `<s>` the time Task 9 Step 3 printed, and the Tasks 10–20 row becomes `🔨 in progress — Task 10's writer measurement passed`, Step 8 having passed before this commit was made. `docs/prd/README.md` holds one row for this plan, and says the same in its one cell: `🔨 Phase 1 landed (PR #<n>); its first watch walk passed in <s> s, and its item walk on production waits on the owner. Phase 2 in progress — Task 10's writer measurement passed`. Task 20 Step 4 flips the Task 9 row to `✅ passed` once Task 9 Step 4's time is in. This is the Phase 2 branch's first commit, and it carries the plan's own amendments with it:
+Mark Phase 1 in both status tables, claiming only what has run. In `docs/plans/progress.md`, the Tasks 1–8 row becomes `✅ landed (PR #<n>)`, the Task 9 row becomes `🔨 the first watch walk passed in <s> s; the item walk on production waits on the owner`, with `<s>` the time Task 9 Step 3 printed, and the Tasks 10–20 row becomes `🔨 in progress — Task 10's writer measurement passed`, Step 8 having passed before this commit was made. `docs/prd/README.md` holds one row for this plan, and says the same in its one cell: `🔨 Phase 1 landed (PR #<n>); its first watch walk passed in <s> s, and its item walk on production waits on the owner. Phase 2 in progress — Task 10's writer measurement passed`. Task 10's fix round flipped the Task 9 row to `✅ passed` once Task 9 Step 4's time was in. This is the Phase 2 branch's first commit, and it carries the plan's own amendments with it:
 
 ```bash
 git add docs/plans/2026-10-01-fast-first-sync.md docs/plans/progress.md docs/prd/README.md
@@ -3616,7 +3616,7 @@ grep -c -E '[0-9a-f]{32}' /var/tmp/sync-speed/facts2.out
 
 Expected: every section printed, and the last command prints `0` — no 32-hex identifier reached the output. If it prints anything else, delete the output file and fix the script before going on.
 
-Section 9 takes its series from NextUp, so it prints nothing when the account's NextUp is empty. Then run this follow-up, `/var/tmp/sync-speed/facts2b.py` (outside the repository; never committed), which takes three series from a listing instead and makes three requests in all:
+Section 9 takes its series from NextUp, so it prints nothing when the account's NextUp is empty. Then run this follow-up, `/var/tmp/sync-speed/facts2b.py` (outside the repository; never committed), which takes three series from a listing instead: a sign-in, then three requests.
 
 ```python
 # Throwaway, read-only: facts2.py's section 9 with series taken from a listing, since the
@@ -3707,7 +3707,7 @@ counts, seconds, booleans and type names, never an id, a name or a token.
 The one shape it kept is `view_item.json`, every value in it invented.
 ```
 
-If Step 4's follow-up ran, the paragraph says so before its last sentence: ``The recorded account's NextUp was empty, so the `Ids` row comes from a three-request follow-up that took its series from a listing.``
+If Step 4's follow-up ran, the paragraph says so before its last sentence: ``The recorded account's NextUp was empty, so the `Ids` row comes from a follow-up that took its series from a listing: a sign-in and three requests.``
 
 Fill every `<…>` from `facts2.out` (the `Ids` row from `facts2b.out`, if the follow-up ran), and `<date>` with the day Step 4 ran, before committing — nothing in angle brackets survives this step.
 
@@ -11512,7 +11512,7 @@ where `/var/tmp/sync-speed/pr2-facts-comment.md` holds the three fences and thre
 
 ```bash
 git add docs/plans/progress.md docs/prd/README.md
-git commit -m "docs(plan): fast first sync phase 1 passed, and phase 2 is in review"
+git commit -m "docs(plan): fast first sync phase 2 is in review"
 git push
 ```
 
