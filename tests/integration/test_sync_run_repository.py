@@ -1,6 +1,6 @@
 """The shared contract against real Postgres, plus what a dict cannot express.
 
-A foreign key, a CHECK constraint, and a poisoned session.
+A foreign key, a CHECK constraint, a collation, and a poisoned session.
 """
 
 import uuid
@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from tests.contract.sync_run_repository_contract import (
     EARLIER,
     LATER,
+    UNIT_KEYS_IN_BYTE_ORDER,
     SyncRunRepositoryContract,
     run,
     unit,
@@ -234,3 +235,25 @@ async def test_a_caught_unit_conflict_leaves_the_session_usable(
     await repository.add(one)
     await repository.add_units([unit(one.id, "alpha")])
     assert [each.unit_key for each in await repository.units_for(one.id)] == ["alpha"]
+
+
+async def test_the_unit_key_column_alone_orders_its_keys_unlike_bytes(
+    session: AsyncSession, repository: PostgresSyncRunRepository, source_id: uuid.UUID
+) -> None:
+    """The premise of the contract's key-order case on this arm, asked of the database.
+
+    That case sees a dropped `COLLATE "C"` only while the column's own collation orders
+    its keys unlike bytes; a database created under the C locale would hide the plant.
+    """
+    one = run(source_id)
+    await repository.add(one)
+    await repository.add_units([unit(one.id, key) for key in UNIT_KEYS_IN_BYTE_ORDER])
+    in_column_order = (
+        await session.execute(
+            text("SELECT unit_key FROM sync_run_units WHERE run_id = :id ORDER BY unit_key"),
+            {"id": one.id},
+        )
+    ).scalars()
+    assert list(in_column_order) != list(UNIT_KEYS_IN_BYTE_ORDER), (
+        "the premise: the column's own collation orders these keys as bytes do"
+    )

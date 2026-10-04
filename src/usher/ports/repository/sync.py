@@ -90,7 +90,7 @@ class SyncRunRepository(ABC):
 
         A unit whose key is already stored or repeats in the plan, or whose run does
         not exist, raises `RepositoryConflict` and adds nothing. A plan that both names
-        a missing run and repeats a key may raise on either constraint.
+        a missing run and holds a stored or repeated key may raise on either constraint.
         """
 
     @abstractmethod

@@ -19,6 +19,10 @@ from usher.ports.repository import SyncRunRepository
 EARLIER = datetime(2026, 7, 30, 3, 0, tzinfo=UTC)
 LATER = EARLIER + timedelta(days=1)
 
+# A library walk's own unit-key shapes, in byte order. A locale that skips punctuation,
+# as the test database's does, orders the two `episodes:` keys the other way round.
+UNIT_KEYS_IN_BYTE_ORDER = ("episodes:30:0:", "episodes:3:0:", "seed", "titles:3")
+
 
 def run(
     source_id: uuid.UUID,
@@ -501,7 +505,7 @@ class SyncRunRepositoryContract:
             unit(one.id, "seed"),
             unit(one.id, "episodes:30:0:", expected_items=40),
         ]
-        in_byte_order = ["episodes:30:0:", "episodes:3:0:", "seed", "titles:3"]
+        in_byte_order = list(UNIT_KEYS_IN_BYTE_ORDER)
         assert [each.unit_key for each in plan] != in_byte_order, "the premise: added out of order"
         # The premise that lets this case see the collation: a locale such as the
         # test database's `en_US.utf8` compares letters and digits before punctuation,
