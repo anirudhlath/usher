@@ -202,7 +202,7 @@ async def test_a_failure_that_is_not_the_rows_fault_is_not_translated() -> None:
 
 
 # --------------------------------------------------------------------------
-# The re-raise, at every site that widened -- a property, not eleven cases
+# The re-raise, at every site that widened -- one property, not a case per site
 # --------------------------------------------------------------------------
 
 _SCANNED = (

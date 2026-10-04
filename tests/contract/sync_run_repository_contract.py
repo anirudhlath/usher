@@ -488,18 +488,31 @@ class SyncRunRepositoryContract:
     async def test_a_runs_units_come_back_in_key_order(
         self, repository: SyncRunRepository, source_id: uuid.UUID
     ) -> None:
+        """Byte order, which is Python's `sorted`, and never the database's locale.
+
+        The keys are a library walk's own shapes, and the plan is added last key
+        first, so its order cannot come off the heap.
+        """
         one = run(source_id)
         await repository.add(one)
-        await repository.add_units(
-            [
-                unit(one.id, "charlie"),
-                unit(one.id, "alpha", expected_items=40),
-                unit(one.id, "bravo"),
-            ]
+        plan = [
+            unit(one.id, "titles:3"),
+            unit(one.id, "episodes:3:0:"),
+            unit(one.id, "seed"),
+            unit(one.id, "episodes:30:0:", expected_items=40),
+        ]
+        in_byte_order = ["episodes:30:0:", "episodes:3:0:", "seed", "titles:3"]
+        assert [each.unit_key for each in plan] != in_byte_order, "the premise: added out of order"
+        # The premise that lets this case see the collation: a locale such as the
+        # test database's `en_US.utf8` compares letters and digits before punctuation,
+        # so it puts `episodes:3:0:` first, where bytes put `0` before `:`.
+        assert sorted(in_byte_order, key=lambda key: key.replace(":", "")) != in_byte_order, (
+            "the premise: a locale that skips punctuation orders these keys as bytes do"
         )
+        await repository.add_units(plan)
         stored = await repository.units_for(one.id)
-        assert [each.unit_key for each in stored] == ["alpha", "bravo", "charlie"]
-        assert stored[0] == unit(one.id, "alpha", expected_items=40)
+        assert [each.unit_key for each in stored] == in_byte_order
+        assert stored[0] == unit(one.id, "episodes:30:0:", expected_items=40)
 
     async def test_a_units_position_rises_and_never_falls(
         self, repository: SyncRunRepository, source_id: uuid.UUID
@@ -564,6 +577,26 @@ class SyncRunRepositoryContract:
 
         with pytest.raises(RepositoryConflict) as caught:
             await repository.add_units([unit(one.id, "bravo"), unit(one.id, "alpha")])
+
+        assert caught.value.constraint == "pk_sync_run_units"
+        assert [each.unit_key for each in await repository.units_for(one.id)] == ["alpha"]
+
+    async def test_a_plan_that_repeats_a_key_is_refused_whole(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        """A key twice in one plan is refused as a stored one is, on a run that exists.
+
+        Only the one fault: a plan that also names a missing run may be refused on
+        either constraint, and the port leaves that open.
+        """
+        one = run(source_id)
+        await repository.add(one)
+        await repository.add_units([unit(one.id, "alpha")])
+
+        with pytest.raises(RepositoryConflict) as caught:
+            await repository.add_units(
+                [unit(one.id, "bravo"), unit(one.id, "charlie"), unit(one.id, "bravo")]
+            )
 
         assert caught.value.constraint == "pk_sync_run_units"
         assert [each.unit_key for each in await repository.units_for(one.id)] == ["alpha"]

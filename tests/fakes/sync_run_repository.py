@@ -70,7 +70,7 @@ class FakeSyncRunRepository(SyncRunRepository):
         keys = [(unit.run_id, unit.unit_key) for unit in units]
         if len(set(keys)) != len(keys) or any(key in self._units for key in keys):
             raise RepositoryConflict(
-                "a walk unit is already stored", constraint="pk_sync_run_units"
+                "a walk unit repeats a stored or planned key", constraint="pk_sync_run_units"
             )
         if any(unit.run_id not in self._runs for unit in units):
             raise RepositoryConflict(

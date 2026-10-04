@@ -88,8 +88,9 @@ class SyncRunRepository(ABC):
     async def add_units(self, units: Sequence[SyncRunUnit]) -> None:
         """Insert a whole-library walk's plan, all of it or none of it.
 
-        A unit already stored, or one whose run does not exist, raises
-        `RepositoryConflict` and adds nothing.
+        A unit whose key is already stored or repeats in the plan, or whose run does
+        not exist, raises `RepositoryConflict` and adds nothing. A plan that both names
+        a missing run and repeats a key may raise on either constraint.
         """
 
     @abstractmethod
