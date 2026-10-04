@@ -3,7 +3,7 @@
 Read [`../README.md`](../README.md) first: it states the licensing rule, the
 reserved identifier bands, and the guard that enforces them.
 
-**Every value in these seven files is invented**, including the `ProviderIds`,
+**Every value in these eight files is invented**, including the `ProviderIds`,
 which until 2026-08-01 carried real TMDb/IMDb/TVDb ids for four real works.
 That is a licensing constraint, not a style, and a doubled one: a real Emby
 response *embeds TMDb-sourced metadata*, which TMDb's terms forbid
@@ -28,6 +28,7 @@ them would test nothing.
 | `series_item.json` | `RunTimeTicks: null`, no `MediaSources` key at all (so a series yields no stream target), `UnplayedItemCount` |
 | `episode_item.json` | an episode carrying **its own** provider ids rather than its series' — the payload fact behind "an episode never walks the match ladder" |
 | `multi_version_movie.json` | three `MediaSources`, the first transcode-only (`Protocol: Http`, `Size: 0`, `SupportsDirectPlay: false`), so `primary_media_source`'s selection rule has something to select |
+| `view_item.json` | one library view from `/Users/{id}/Views`: `CollectionType` says what the library holds, and `boxsets`/`playlists` views are not libraries |
 
 `multi_version_movie.json` has been looked for twice against the live server,
 over disjoint slices totalling 1,400 movies, and has never met a real
@@ -114,6 +115,13 @@ outside the repository, which printed counts only. No payload was kept,
 because these rows are behaviour rather than shape: every item a listing
 returns has the shape of the item fixtures above.
 
+The rows from `/Users/{id}/Views` on were recorded on 2026-10-04 by Phase
+2's probe, a second read-only script outside the repository, which printed
+counts, seconds, booleans, and one view's keys with their types, never an
+id, a name or a token. The recorded account's NextUp was empty, so the `Ids`
+row comes from a three-request follow-up that took its series from a
+listing. The one shape kept is `view_item.json`, every value in it invented.
+
 | Behaviour | What the server does | What depends on it |
 |---|---|---|
 | `EnableTotalRecordCount=false` | `TotalRecordCount` is still present, as **0**, at the head of the listing and a million items deep | `OffsetWindow` reads the total from a walk's first page only; `FakeEmbyServer` renders 0 |
@@ -121,6 +129,13 @@ returns has the shape of the item fixtures above.
 | `Filters=IsPlayed` | only items whose `UserData.Played` is true; some also hold a resume position | the first watch walk's first listing |
 | `Filters=IsResumable` | only items with a non-zero `PlaybackPositionTicks`, **played or not**, so it overlaps `IsPlayed` (21 of 208 on the recorded account) | the first watch walk's second listing, deduplicated by id |
 | A filtered listing's paging | the filter applies before `StartIndex`/`Limit`: the page at 700 of a 765-item filtered set held 65 | a filtered walk pages like any other |
+| `/Users/{id}/Views` | 17 views, each with a `CollectionType`: 9 `movies`, 5 `tvshows`, 1 `homevideos`, 1 `boxsets` and 1 `playlists`; the 15 that are neither cover the source without them (next row) | the planner skips those two kinds; `view_item.json` is one view's shape |
+| `ParentId={view}` with `Limit=0` | that library's count over `Movie,Series,Episode`; the libraries summed to 1,166,255 against a source total of 1,158,525 | the plan's coverage check |
+| `ParentId` no view carries | 1,158,526: the whole source, which had grown by one since the total was read, as the largest library's titles and episodes also summed one past its first count | the fake answers the whole library, the worst case; the adapter never sends a vanished view's id |
+| Pages inside one library | head 2.3 s, middle 3.7 s, deep 4.0 s at 1,000 items, in a library of 606,840 | offset chunks of `USHER_SYNC_UNIT_MAX_ITEMS` |
+| Concurrent pages at the deployment gate | 1 walker 0.31/s, 2 walkers 0.34/s, 4 walkers 0.37/s | the `USHER_SYNC_WALKERS` default |
+| `/Shows/NextUp` | nothing on the recorded account (`TotalRecordCount` 0), so its paging and its entries' shape are unmeasured | the seed's third source |
+| `Ids=a,b,c` | the named items, without `Recursive`: 3 of 3 series asked, with it or without | the seed's series request |
 
 No source has been seen to cap `Limit`. `FakeEmbyServer.max_limit` exists for
 one that does, and so do two of the conditions on a short page that ends a
