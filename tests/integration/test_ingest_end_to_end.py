@@ -834,7 +834,7 @@ async def test_statements_do_not_grow_with_the_page(
     large = len(statement_counter)
 
     assert commits.count(5) == commits.count(50), (
-        "the premise: both measured walks committed the same number of times"
+        "the premise: both counted walks committed the same number of times"
     )
     assert small == large, (
         f"{small} statements for 9 batches of 5, {large} for 9 batches of 50 -- "

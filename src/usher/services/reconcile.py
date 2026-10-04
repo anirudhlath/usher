@@ -133,6 +133,10 @@ class ReconcileService:
     ) -> None:
         if walkers < 1:
             raise ValueError(f"a whole-library walk needs at least one walker, not {walkers}")
+        if heartbeat_seconds <= 0:
+            raise ValueError(
+                f"a heartbeat needs a positive period, not {heartbeat_seconds} seconds"
+            )
         self._ingest = ingest
         self._media_items = media_items
         self._runs = runs
@@ -329,11 +333,26 @@ class ReconcileService:
     async def _walk_plan(self, source: Source, progress: _Progress, adapter: SourceAdapter) -> None:
         """Walk the adapter's plan, one stage at a time.
 
+        The plan's own requests can sit out a retry, so the heartbeat beats every
+        `heartbeat_seconds` while the plan is made. Those requests never touch the
+        session, which is what lets a beat commit beside them. However the wait
+        ends, a plan still being made is cancelled and awaited first.
+
         The units are stored with the heartbeat that follows the plan. A stage
         starts only once every unit of the stages before it has committed
         complete, so every episode finds its series.
         """
-        plan = await adapter.plan_walk()
+        planning = asyncio.create_task(adapter.plan_walk())
+        try:
+            pending = {planning}
+            while pending:
+                _, pending = await asyncio.wait(pending, timeout=self._heartbeat_seconds)
+                if pending:
+                    await self._beat(progress)
+        finally:
+            planning.cancel()
+            await asyncio.gather(planning, return_exceptions=True)
+        plan = planning.result()
         units = [
             SyncRunUnit(
                 run_id=progress.run.id,

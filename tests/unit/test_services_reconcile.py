@@ -1,6 +1,7 @@
 """The reconcile lane, against port fakes and `FakeSourceAdapter`."""
 
 import asyncio
+import contextlib
 import uuid
 from collections.abc import AsyncGenerator, Iterator
 from datetime import UTC, datetime, timedelta
@@ -238,7 +239,7 @@ async def test_a_run_checkpoints_every_batch(fixture: _Fixture) -> None:
     fixture.service._batch_size = 2
     await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
     # Four batches, plus the run's insert, the beat that stores its plan, and its final save.
-    assert fixture.commits >= 6, fixture.commits
+    assert fixture.commits == 7, fixture.commits
 
 
 async def test_a_run_records_its_matched_and_unmatched_counts(fixture: _Fixture) -> None:
@@ -1166,6 +1167,72 @@ async def test_the_run_and_its_first_heartbeat_are_committed_before_the_plan_is_
     assert heartbeat is not None
 
 
+async def test_the_heartbeat_beats_while_the_plan_is_made() -> None:
+    """Emby counts each library through its retrying page, so a plan can take minutes too."""
+    fixture = _Fixture(heartbeat_seconds=0.01)
+    _shelve(fixture, "Films", range(2))
+    asked, release = asyncio.Event(), asyncio.Event()
+    original = fixture.adapter.plan_walk
+
+    async def _held() -> WalkPlan:
+        asked.set()
+        await release.wait()
+        return await original()
+
+    fixture.adapter.plan_walk = _held  # type: ignore[method-assign]
+    walk = asyncio.create_task(
+        fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    )
+    try:
+        with contextlib.suppress(TimeoutError):
+            async with asyncio.timeout(5):
+                while fixture.commits < 3:
+                    await asyncio.sleep(0.01)
+        assert asked.is_set(), "the premise: the plan was asked for"
+        assert fixture.commits >= 3, "no beat while the plan was made"
+        assert fixture.unit_states[:3] == [{}, {}, {}], "the premise: no plan was stored yet"
+        beats = [beat for _, beat in fixture.checkpoints[:3] if beat is not None]
+        assert len(beats) == 3
+        assert beats == sorted(set(beats)), "a beat that did not move the heartbeat"
+    finally:
+        release.set()
+        run = await walk
+    assert run.status is SyncRunStatus.COMPLETED
+    [unit] = await fixture.runs.units_for(run.id)
+    assert unit.status is SyncRunUnitStatus.COMPLETED
+
+
+async def test_a_beat_that_fails_while_the_plan_is_made_cancels_the_plan_first() -> None:
+    """However the wait for a plan ends, the plan is not left running: here a beat raised."""
+    fixture = _Fixture(heartbeat_seconds=0.01)
+    _shelve(fixture, "Films", range(2))
+    release, cancelled = asyncio.Event(), asyncio.Event()
+    original = fixture.adapter.plan_walk
+
+    async def _held() -> WalkPlan:
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return await original()
+
+    commit = fixture.service._commit
+
+    async def _commit_until_the_first_beat() -> None:
+        if fixture.commits == 1:
+            raise ConnectionError("the database went away")
+        await commit()
+
+    fixture.adapter.plan_walk = _held  # type: ignore[method-assign]
+    fixture.service._commit = _commit_until_the_first_beat
+    with pytest.raises(ConnectionError, match="the database went away"):
+        async with asyncio.timeout(5):
+            await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    assert fixture.commits == 1, "the premise: the run's insert committed, and the beat did not"
+    assert cancelled.is_set(), "the walk ended with its plan still being made"
+
+
 async def test_every_commit_of_a_planned_walk_moves_the_heartbeat() -> None:
     fixture = _Fixture(batch_size=2)
     _shelve(fixture, "Films", range(5))
@@ -1356,3 +1423,10 @@ def test_a_service_with_no_walkers_is_refused() -> None:
     """No walker would fetch, and the writer would wait on an empty queue forever."""
     with pytest.raises(ValueError, match="at least one walker"):
         _Fixture(walkers=0)
+
+
+@pytest.mark.parametrize("heartbeat_seconds", [0, -0.5])
+def test_a_service_whose_heartbeat_is_not_positive_is_refused(heartbeat_seconds: float) -> None:
+    """Its beat would always be due, so the writer would beat and never read its queue."""
+    with pytest.raises(ValueError, match=f"a positive period, not {heartbeat_seconds} seconds"):
+        _Fixture(heartbeat_seconds=heartbeat_seconds)
