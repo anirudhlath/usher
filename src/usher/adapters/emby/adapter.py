@@ -513,7 +513,7 @@ class EmbyAdapter(SourceAdapter):
         yielded: set[str] = set()
         for number, filters in enumerate(FIRST_WALK_FILTERS):
             query = _listing_query(USER_DATA_SINCE_PARAM, None, filters=filters)
-            unfiltered = False
+            unwatched = watched = 0
             walk = self._walk(query, start_index=start_index if number == 0 else 0)
             async with aclosing(walk) as payloads:
                 async for payload in payloads:
@@ -521,13 +521,25 @@ class EmbyAdapter(SourceAdapter):
                     if state is None or state.external_id in yielded:
                         continue
                     if not state.played and state.position_seconds <= 0:
-                        unfiltered = True
+                        unwatched += 1
                         continue
                     yielded.add(state.external_id)
+                    watched += 1
                     yield state
-            if unfiltered:
-                # The server ignored `Filters` and listed everything, resume
-                # positions included, so a second walk would only repeat it.
+            if number == 0 and unwatched > watched:
+                # Unwatched entries strictly outnumbering watched ones mean the server
+                # ignored `Filters` and listed everything, resume positions included, so
+                # a second walk would only repeat it. A tie or an empty listing goes on:
+                # a Series marked played that has since gained an episode can match
+                # `IsPlayed` and still read unwatched.
+                logger.warning(
+                    "{source} appears to ignore Filters: its first watch walk's played "
+                    "listing was mostly unwatched ({unwatched} unwatched skipped, {watched} "
+                    "watched yielded), so the walk did not ask for the in-progress listing",
+                    source=self._source.name,
+                    unwatched=unwatched,
+                    watched=watched,
+                )
                 return
 
     async def get_watch_state(self, external_id: str) -> SourceWatchState | None:

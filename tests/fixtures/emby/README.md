@@ -127,6 +127,11 @@ one that does, and so do two of the conditions on a short page that ends a
 walk: it is shorter than the longest page served before it, and the cursor has
 reached the first page's total.
 
+No `IsPlayed` listing has been seen to hold an entry reading `Played: false`.
+`FakeEmbyServer.set_unplayed_episodes` exists for a Series that would: its
+listed `Played` is derived from its episodes, while the filter matches the flag
+stored for it. One such entry must not read as a server that ignored `Filters`.
+
 ## Regenerating
 
 Never paste a capture in. `scripts/capture_emby_fixture.py` replaces every

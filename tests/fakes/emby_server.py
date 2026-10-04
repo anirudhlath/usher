@@ -183,6 +183,7 @@ class FakeEmbyServer:
         self._items: dict[str, tuple[SourceItem, AwareDatetime]] = {}
         self._alternates: dict[str, list[dict[str, Any]]] = {}
         self._states: dict[str, SourceWatchState] = {}
+        self._unplayed_episodes: dict[str, int] = {}
         self._sessions = 0
         self._session_token: str | None = None
 
@@ -229,9 +230,25 @@ class FakeEmbyServer:
         self._items.pop(external_id, None)
         self._states.pop(external_id, None)
         self._alternates.pop(external_id, None)
+        self._unplayed_episodes.pop(external_id, None)
 
     def set_watch_state(self, state: SourceWatchState) -> None:
         self._states[state.external_id] = state
+
+    def set_unplayed_episodes(self, external_id: str, count: int) -> None:
+        """Give a seeded Series `count` unplayed episodes, which its `Played` is rendered from.
+
+        Emby derives a Series' `Played` from its episodes -- `series_item.json` says
+        `Played: false` beside `UnplayedItemCount: 12` -- while `Filters` here still reads
+        the flag `set_watch_state` stored. So a Series marked played that has since gained
+        an episode matches `IsPlayed` and is listed as unwatched. No live listing has shown
+        one; it is the entry a first watch walk must not take for a server that ignored
+        `Filters`.
+        """
+        item, _ = self._items[external_id]
+        if item.kind is not SourceItemKind.SERIES:
+            raise ValueError(f"{external_id} is a {item.kind.value}; only a Series has episodes")
+        self._unplayed_episodes[external_id] = count
 
     def recorded_watch_state(self, external_id: str) -> tuple[int, bool] | None:
         state = self._states.get(external_id)
@@ -593,6 +610,11 @@ class FakeEmbyServer:
             "IsFavorite": False,
             "Played": state.played,
         }
+        episodes = self._unplayed_episodes.get(external_id)
+        if episodes is not None:
+            # Derived on both routes; `_passes` keeps reading the stored flag.
+            user_data["Played"] = episodes == 0
+            user_data["UnplayedItemCount"] = episodes
         if for_listing:
             # Emby 4.9.5.0's listing route reports `PlayCount: 0` and omits
             # `LastPlayedDate` entirely -- not null, absent -- for an item whose

@@ -1856,10 +1856,11 @@ async def test_a_first_watch_walk_lists_played_then_in_progress_items() -> None:
 async def test_a_server_that_ignores_the_filter_still_yields_only_watched_states_once() -> None:
     """A server that ignored `Filters` lists the whole library on the first listing.
 
-    The walk still yields only played or in-progress states, and stops there: the
-    second listing would repeat the first, item for item.
+    Most of a library is unwatched, which is how the walk tells. It still yields only
+    played or in-progress states, and stops there: the second listing would repeat the
+    first, item for item.
     """
-    entries = [
+    entries: list[dict[str, Any]] = [
         {
             "Id": "movie-0",
             "Type": "Movie",
@@ -1877,6 +1878,18 @@ async def test_a_server_that_ignores_the_filter_still_yields_only_watched_states
             "Type": "Movie",
             "Name": "C",
             "UserData": {"PlaybackPositionTicks": 6_400_000_000, "Played": False},
+        },
+        {
+            "Id": "movie-3",
+            "Type": "Movie",
+            "Name": "D",
+            "UserData": {"PlaybackPositionTicks": 0, "Played": False},
+        },
+        {
+            "Id": "movie-4",
+            "Type": "Movie",
+            "Name": "E",
+            "UserData": {"PlaybackPositionTicks": 0, "Played": False},
         },
     ]
     asked: list[str] = []
@@ -1896,8 +1909,145 @@ async def test_a_server_that_ignores_the_filter_still_yields_only_watched_states
         ]
     finally:
         await adapter.aclose()
+    data = [entry["UserData"] for entry in entries]
+    unseen = sum(1 for each in data if not each["Played"] and not each["PlaybackPositionTicks"])
+    assert unseen > len(data) - unseen, "the premise: the library listed is mostly unwatched"
     assert walked == [("movie-0", True, 0), ("movie-2", False, 640)]
     assert asked == ["IsPlayed"], "the second listing repeated a whole-library walk"
+
+
+async def test_a_series_reading_unwatched_in_the_played_listing_keeps_the_in_progress_one() -> None:
+    """A Series marked played that has since gained an episode can match `IsPlayed`.
+
+    Its entry reads unwatched, with no position. One such entry beside one played
+    movie is a tie, not a server that ignored `Filters`, so the walk still asks for
+    the in-progress listing and yields the resume position it holds.
+    """
+    server = FakeEmbyServer()
+    series = SourceItem(
+        external_id="series-0", name="Series 0", kind=SourceItemKind.SERIES, year=2004, added_at=T0
+    )
+    for item in (_movie(0), _movie(1), series):
+        server.add_item(item, T0)
+    server.set_watch_state(SourceWatchState(external_id="movie-0", position_seconds=0, played=True))
+    server.set_watch_state(
+        SourceWatchState(external_id="movie-1", position_seconds=640, played=False)
+    )
+    server.set_watch_state(
+        SourceWatchState(external_id="series-0", position_seconds=0, played=True)
+    )
+    server.set_unplayed_episodes("series-0", 1)
+    asked: list[str] = []
+    served: dict[str, list[dict[str, Any]]] = {}
+
+    def spy(request: httpx.Request) -> httpx.Response:
+        response = server.handle(request)
+        if request.url.path.endswith("/Items"):
+            asked.append(request.url.params["Filters"])
+            served[asked[-1]] = response.json()["Items"]
+        return response
+
+    lines: list[str] = []
+    handle = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        adapter = _on(spy)
+        try:
+            walked = [
+                (state.external_id, state.played, state.position_seconds)
+                async for state in adapter.watch_state()
+            ]
+        finally:
+            await adapter.aclose()
+    finally:
+        logger.remove(handle)
+    played_listing = sorted(
+        (
+            entry["Id"],
+            entry["UserData"]["Played"],
+            entry["UserData"]["PlaybackPositionTicks"],
+            entry["UserData"].get("UnplayedItemCount"),
+        )
+        for entry in served["IsPlayed"]
+    )
+    assert played_listing == [("movie-0", True, 0, None), ("series-0", False, 0, 1)], (
+        "the premise: the played listing holds a played movie and a Series reading unwatched"
+    )
+    assert server.recorded_watch_state("movie-1") == (640, False), (
+        "the premise: the in-progress listing holds one unplayed movie at 640 s"
+    )
+    assert asked == ["IsPlayed", "IsResumable"], (
+        "one Series reading unwatched cost the walk its in-progress listing"
+    )
+    assert walked == [("movie-0", True, 0), ("movie-1", False, 640)]
+    assert lines == [], "a server that honours Filters was logged as ignoring them"
+
+
+@pytest.mark.parametrize(
+    ("unwatched", "watched", "listings", "warnings"),
+    [
+        pytest.param(
+            2,
+            1,
+            ["IsPlayed"],
+            [
+                "Living Room Emby appears to ignore Filters: its first watch walk's played "
+                "listing was mostly unwatched (2 unwatched skipped, 1 watched yielded), so "
+                "the walk did not ask for the in-progress listing"
+            ],
+            id="unwatched-outnumber-watched",
+        ),
+        pytest.param(1, 1, ["IsPlayed", "IsResumable"], [], id="a-tie"),
+    ],
+)
+async def test_a_played_listing_is_judged_unfiltered_only_when_mostly_unwatched(
+    unwatched: int, watched: int, listings: list[str], warnings: list[str]
+) -> None:
+    """A server ignoring `Filters` lists the whole library, and a library is mostly unwatched.
+
+    So the walk lists once, and says so, only when the played listing's unwatched entries
+    strictly outnumber its watched ones. On a tie it asks for the second listing as well,
+    dropping by id what the first already yielded.
+    """
+    entries: list[dict[str, Any]] = [
+        {
+            "Id": f"movie-{index}",
+            "Type": "Movie",
+            "Name": f"Movie {index}",
+            "UserData": {"PlaybackPositionTicks": 0, "Played": index >= unwatched},
+        }
+        for index in range(unwatched + watched)
+    ]
+    asked: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        authenticated = _authenticated(request)
+        if authenticated is not None:
+            return authenticated
+        asked.append(request.url.params.get("Filters", ""))
+        return httpx.Response(200, json={"Items": entries, "TotalRecordCount": len(entries)})
+
+    lines: list[str] = []
+    handle = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        adapter = _on(handler)
+        try:
+            walked = [(state.external_id, state.played) async for state in adapter.watch_state()]
+        finally:
+            await adapter.aclose()
+    finally:
+        logger.remove(handle)
+    stored = {entry["Id"]: entry["UserData"] for entry in entries}
+    unseen = [
+        key for key, data in stored.items() if not (data["Played"] or data["PlaybackPositionTicks"])
+    ]
+    seen = [key for key in stored if key not in unseen]
+    assert (len(unseen), len(seen)) == (unwatched, watched), (
+        f"the premise: the entries stored are {unwatched} unwatched and {watched} watched"
+    )
+    assert asked == listings, "the played listing was misjudged as filtered or as unfiltered"
+    assert len(lines) == len(warnings), "the walk listed once without a WARNING, or warned anyway"
+    assert [line.rstrip("\n") for line in lines] == warnings, "the WARNING miscounted the entries"
+    assert walked == [(key, True) for key in seen], "a watched state was lost or yielded twice"
 
 
 async def test_a_resumed_first_walk_reads_its_second_listing_from_the_top() -> None:

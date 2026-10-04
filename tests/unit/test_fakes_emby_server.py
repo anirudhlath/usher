@@ -872,3 +872,29 @@ async def test_a_filter_applies_before_the_page_is_cut(driver: _Driver) -> None:
     body = await _filtered(driver, "IsPlayed", StartIndex="1", Limit="1")
     assert [entry["Id"] for entry in body["Items"]] == ["played"]
     assert body["TotalRecordCount"] == 2
+
+
+async def test_a_played_series_with_an_unplayed_episode_is_listed_as_played_and_reads_unwatched(
+    driver: _Driver,
+) -> None:
+    """Both routes derive its `Played` from its episodes; `IsPlayed` reads the stored flag."""
+    series = SourceItem(external_id="series", name="series", kind=SourceItemKind.SERIES, year=2004)
+    driver.server.add_item(series, T0)
+    driver.server.set_watch_state(
+        SourceWatchState(external_id="series", position_seconds=0, played=True)
+    )
+    driver.server.set_unplayed_episodes("series", 1)
+    body = await _filtered(driver, "IsPlayed")
+    single = await driver.payload("series")
+    keys = ("Played", "UnplayedItemCount", "PlaybackPositionTicks")
+    assert [entry["Id"] for entry in body["Items"]] == ["series"]
+    assert [body["Items"][0]["UserData"].get(key) for key in keys] == [False, 1, 0]
+    assert [single["UserData"].get(key) for key in keys] == [False, 1, 0]
+    assert driver.server.recorded_watch_state("series") == (0, True)
+
+
+def test_only_a_series_takes_unplayed_episodes() -> None:
+    server = FakeEmbyServer()
+    server.add_item(MOVIE, T0)
+    with pytest.raises(ValueError, match="only a Series has episodes"):
+        server.set_unplayed_episodes(MOVIE.external_id, 1)
