@@ -32,7 +32,7 @@ def test_the_class_counts_are_the_ones_this_task_argued_for() -> None:
     line beside them could not fail and is deliberately absent.
     """
     assert Counter(entry.kind for entry in MANIFEST.values()) == {
-        BackupClass.REBUILDABLE: 20,
+        BackupClass.REBUILDABLE: 21,
         BackupClass.PRECIOUS: 7,
         BackupClass.PARTIAL: 1,
         BackupClass.SCHEMA: 1,

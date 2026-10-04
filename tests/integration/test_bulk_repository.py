@@ -45,7 +45,7 @@ from usher.domain.enums import ImageKind, SourceKind, TitleKind
 from usher.domain.ids import new_id
 from usher.domain.image import Image
 from usher.domain.source import Source
-from usher.domain.sync import SyncRun, SyncRunKind
+from usher.domain.sync import SyncRun, SyncRunKind, SyncRunUnit, WalkStage
 from usher.domain.title import Title
 from usher.ports.bulk import (
     GENOME_TAG_COUNT,
@@ -691,6 +691,23 @@ async def _refused_sync_run(bed: _Bed, **changes: object) -> None:
     await PostgresSyncRunRepository(bed.session).add(_sync_run(bed.source_id, **changes))
 
 
+async def _refused_sync_run_unit(bed: _Bed, **changes: object) -> None:
+    repository = PostgresSyncRunRepository(bed.session)
+    owner = _sync_run(bed.source_id)
+    await repository.add(owner)
+    await repository.add_units(
+        [
+            SyncRunUnit(
+                run_id=owner.id,
+                unit_key="an-invented-unit",
+                stage=WalkStage.TITLES,
+                label="an invented unit",
+                **changes,
+            )
+        ]
+    )
+
+
 async def _refused_title_update(bed: _Bed, **changes: object) -> None:
     await PostgresTitleRepository(bed.session).update(bed.title.evolve(**changes))
 
@@ -775,6 +792,13 @@ _BOUNDED_ARMS: dict[tuple[str, str], Callable[[_Bed], Awaitable[object]]] = {
     ("sync_runs", "items_retracted"): lambda bed: _refused_sync_run(
         bed, items_retracted=_OVER_INT32
     ),
+    ("sync_run_units", "expected_items"): lambda bed: _refused_sync_run_unit(
+        bed, expected_items=_OVER_INT32
+    ),
+    ("sync_run_units", "items_seen"): lambda bed: _refused_sync_run_unit(
+        bed, items_seen=_OVER_INT32
+    ),
+    ("sync_run_units", "position"): lambda bed: _refused_sync_run_unit(bed, position=_OVER_INT32),
     ("title_embeddings", "embedding"): lambda bed: PostgresTitleEmbeddingRepository(
         bed.session
     ).upsert_many(

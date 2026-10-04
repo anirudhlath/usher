@@ -5,7 +5,14 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus
+from usher.domain.sync import (
+    SyncRun,
+    SyncRunKind,
+    SyncRunStatus,
+    SyncRunUnit,
+    SyncRunUnitStatus,
+    WalkStage,
+)
 from usher.ports.errors import RepositoryConflict, RepositoryNotFound
 from usher.ports.repository import SyncRunRepository
 
@@ -29,6 +36,12 @@ def run(
             "started_at": started_at,
             **changes,
         }
+    )
+
+
+def unit(run_id: uuid.UUID, key: str, **changes: object) -> SyncRunUnit:
+    return SyncRunUnit.model_validate(
+        {"run_id": run_id, "unit_key": key, "stage": WalkStage.TITLES, "label": key, **changes}
     )
 
 
@@ -469,3 +482,132 @@ class SyncRunRepositoryContract:
         self, repository: SyncRunRepository, source_id: uuid.UUID
     ) -> None:
         assert await repository.latest_incomplete_run(source_id, SyncRunKind.WATCH_STATE) is None
+
+    # --- a whole-library walk's units and heartbeat ------------------------
+
+    async def test_a_runs_units_come_back_in_key_order(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        one = run(source_id)
+        await repository.add(one)
+        await repository.add_units(
+            [
+                unit(one.id, "charlie"),
+                unit(one.id, "alpha", expected_items=40),
+                unit(one.id, "bravo"),
+            ]
+        )
+        stored = await repository.units_for(one.id)
+        assert [each.unit_key for each in stored] == ["alpha", "bravo", "charlie"]
+        assert stored[0] == unit(one.id, "alpha", expected_items=40)
+
+    async def test_a_units_position_rises_and_never_falls(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        """`save`'s checkpoint rule, per unit, with its positive control first.
+
+        Two attempts can hold one walk at once, and the slower one must not pull a
+        unit back to the page it started from.
+        """
+        one = run(source_id)
+        await repository.add(one)
+        first = unit(one.id, "alpha")
+        await repository.add_units([first])
+        running = first.evolve(status=SyncRunUnitStatus.RUNNING)
+
+        await repository.save_unit(running.evolve(position=2_000, items_seen=2_000))
+        [stored] = await repository.units_for(one.id)
+        assert stored.position == 2_000, "the positive control: a save moves the position"
+
+        await repository.save_unit(running.evolve(position=1_000, items_seen=1_000))
+        [stored] = await repository.units_for(one.id)
+        assert stored.position == 2_000, "a slower attempt pulled the unit's checkpoint back"
+        assert stored.items_seen == 1_000, "the rest of the row is the later write's"
+
+    async def test_a_completed_unit_takes_no_further_write(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        one = run(source_id)
+        await repository.add(one)
+        first = unit(one.id, "alpha")
+        await repository.add_units([first])
+        await repository.save_unit(
+            first.evolve(status=SyncRunUnitStatus.COMPLETED, position=7, items_seen=7)
+        )
+
+        await repository.save_unit(
+            first.evolve(status=SyncRunUnitStatus.FAILED, position=3, items_seen=3)
+        )
+
+        [stored] = await repository.units_for(one.id)
+        assert (stored.status, stored.position, stored.items_seen) == (
+            SyncRunUnitStatus.COMPLETED,
+            7,
+            7,
+        )
+
+    async def test_saving_a_unit_that_was_never_added_is_not_found(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        one = run(source_id)
+        await repository.add(one)
+        with pytest.raises(RepositoryNotFound):
+            await repository.save_unit(unit(one.id, "alpha"))
+
+    async def test_a_plan_holding_a_stored_unit_is_refused_whole(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        """All or nothing: a refused plan adds none of its units, not the ones before."""
+        one = run(source_id)
+        await repository.add(one)
+        await repository.add_units([unit(one.id, "alpha")])
+
+        with pytest.raises(RepositoryConflict) as caught:
+            await repository.add_units([unit(one.id, "bravo"), unit(one.id, "alpha")])
+
+        assert caught.value.constraint == "pk_sync_run_units"
+        assert [each.unit_key for each in await repository.units_for(one.id)] == ["alpha"]
+
+    async def test_a_unit_of_a_run_that_does_not_exist_is_refused(
+        self, repository: SyncRunRepository
+    ) -> None:
+        with pytest.raises(RepositoryConflict) as caught:
+            await repository.add_units([unit(uuid.uuid4(), "alpha")])
+        assert caught.value.constraint == "fk_sync_run_units_run_id_sync_runs"
+
+    async def test_each_run_has_its_own_units(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        """One key in two runs is two units."""
+        one, other = run(source_id), run(source_id, started_at=LATER)
+        await repository.add(one)
+        await repository.add(other)
+        await repository.add_units([unit(one.id, "alpha", label="first")])
+        await repository.add_units([unit(other.id, "alpha", label="second")])
+
+        assert [each.label for each in await repository.units_for(one.id)] == ["first"]
+        assert [each.label for each in await repository.units_for(other.id)] == ["second"]
+        assert await repository.units_for(uuid.uuid4()) == []
+
+    async def test_the_heartbeat_survives_every_read(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        """`get`, `latest_incomplete_run` and `list_for_source` each carry it.
+
+        The last two read the row through a `SELECT *` of their own, so a column the
+        model lacked, or the model a column, fails there and nowhere else. The run is
+        a watch-state one: the kind `latest_incomplete_run` has always served.
+        """
+        one = run(source_id, kind=SyncRunKind.WATCH_STATE, heartbeat_at=EARLIER)
+        await repository.add(one)
+        await repository.save(one.evolve(heartbeat_at=LATER, items_seen=10))
+
+        stored = await repository.get(one.id)
+        incomplete = await repository.latest_incomplete_run(source_id, SyncRunKind.WATCH_STATE)
+        [listed] = await repository.list_for_source(source_id)
+        assert stored is not None and incomplete is not None
+        assert (stored.heartbeat_at, incomplete.heartbeat_at, listed.heartbeat_at) == (
+            LATER,
+            LATER,
+            LATER,
+        )

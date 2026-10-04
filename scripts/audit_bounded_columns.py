@@ -971,6 +971,7 @@ _DOMAIN_FOR_TABLE: Mapping[str, str] = {
     "people": "usher.domain.people:Person",
     "seasons": "usher.domain.episode:Season",
     "sources": "usher.domain.source:Source",
+    "sync_run_units": "usher.domain.sync:SyncRunUnit",
     "sync_runs": "usher.domain.sync:SyncRun",
     "titles": "usher.domain.title:Title",
     "user_taste": "usher.domain.taste:Centroid",
@@ -2022,9 +2023,9 @@ BUCKETS = ("safe", "translated", "exposed-copy", "exposed-sqlalchemy")
 
 #: The published figures this audit is pinned against, keyed by reading.
 PUBLISHED: Mapping[str, Mapping[str, int]] = {
-    "closure": {"safe": 20, "translated": 33, "exposed-copy": 30, "exposed-sqlalchemy": 1},
-    "path": {"safe": 18, "translated": 34, "exposed-copy": 31, "exposed-sqlalchemy": 1},
-    "pydantic": {"safe": 14, "translated": 34, "exposed-copy": 34, "exposed-sqlalchemy": 2},
+    "closure": {"safe": 22, "translated": 36, "exposed-copy": 30, "exposed-sqlalchemy": 1},
+    "path": {"safe": 20, "translated": 37, "exposed-copy": 31, "exposed-sqlalchemy": 1},
+    "pydantic": {"safe": 16, "translated": 37, "exposed-copy": 34, "exposed-sqlalchemy": 2},
 }
 
 #: Same, at M8's head, which is what the roadmap's corrections are scored
@@ -2040,7 +2041,7 @@ def readings_table() -> str:
     """Every reading's arithmetic at both heads, printed together.
 
     Printed rather than chosen-and-hidden because the choice between them moves
-    published figures: `safe` runs 20/18/14 today and 18/16/12 at `m08b`. A
+    published figures: `safe` runs 22/20/16 today and 18/16/12 at `m08b`. A
     reader who cannot see the other two columns cannot tell a decision from an
     accident.
     """

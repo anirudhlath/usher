@@ -1,10 +1,11 @@
 """In-memory `SyncRunRepository`."""
 
 import uuid
+from collections.abc import Sequence
 
 from pydantic import AwareDatetime
 
-from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus
+from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus, SyncRunUnit, SyncRunUnitStatus
 from usher.ports.errors import RepositoryConflict, RepositoryNotFound
 from usher.ports.repository import SyncRunRepository
 
@@ -12,6 +13,7 @@ from usher.ports.repository import SyncRunRepository
 class FakeSyncRunRepository(SyncRunRepository):
     def __init__(self) -> None:
         self._runs: dict[uuid.UUID, SyncRun] = {}
+        self._units: dict[tuple[uuid.UUID, str], SyncRunUnit] = {}
 
     async def add(self, run: SyncRun) -> None:
         if run.id in self._runs:
@@ -62,6 +64,35 @@ class FakeSyncRunRepository(SyncRunRepository):
             return None
         newest = max(found, key=lambda one: (one.started_at, one.id))
         return None if newest.status is SyncRunStatus.COMPLETED else newest
+
+    async def add_units(self, units: Sequence[SyncRunUnit]) -> None:
+        # All or nothing, as the SAVEPOINT makes it on Postgres.
+        keys = [(unit.run_id, unit.unit_key) for unit in units]
+        if len(set(keys)) != len(keys) or any(key in self._units for key in keys):
+            raise RepositoryConflict(
+                "a walk unit is already stored", constraint="pk_sync_run_units"
+            )
+        if any(unit.run_id not in self._runs for unit in units):
+            raise RepositoryConflict(
+                "a walk unit names no stored run",
+                constraint="fk_sync_run_units_run_id_sync_runs",
+            )
+        self._units.update(zip(keys, units, strict=True))
+
+    async def save_unit(self, unit: SyncRunUnit) -> None:
+        key = (unit.run_id, unit.unit_key)
+        stored = self._units.get(key)
+        if stored is None:
+            raise RepositoryNotFound(
+                f"no unit {unit.unit_key!r} of sync run {unit.run_id} to update"
+            )
+        if stored.status is SyncRunUnitStatus.COMPLETED:
+            return
+        self._units[key] = unit.evolve(position=max(stored.position, unit.position))
+
+    async def units_for(self, run_id: uuid.UUID) -> list[SyncRunUnit]:
+        owned = [unit for (owner, _), unit in self._units.items() if owner == run_id]
+        return sorted(owned, key=lambda unit: unit.unit_key)
 
     async def list_for_source(self, source_id: uuid.UUID, *, limit: int = 20) -> list[SyncRun]:
         found = [run for run in self._runs.values() if run.source_id == source_id]

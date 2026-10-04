@@ -58,6 +58,18 @@ class WalkStage(StrEnum):
 STAGE_ORDER: tuple[WalkStage, ...] = (WalkStage.SEED, WalkStage.TITLES, WalkStage.EPISODES)
 
 
+class SyncRunUnitStatus(StrEnum):
+    """Where one unit of a whole-library walk stands.
+
+    `COMPLETED` is final: the unit's walk ended and its last page committed.
+    """
+
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
 class SyncRun(DomainModel):
     """One attempt at reconciling a source."""
 
@@ -82,3 +94,24 @@ class SyncRun(DomainModel):
     error_code: str | None = None
     started_at: AwareDatetime = Field(default_factory=lambda: datetime.now(UTC))
     finished_at: AwareDatetime | None = None
+    #: Moved on every commit by a whole-library walk's writer, and by the watch lane.
+    #: A running walk whose heartbeat has gone stale is a dead one. An item walk with
+    #: none never planned; a watch-state run with none predates heartbeats.
+    heartbeat_at: AwareDatetime | None = None
+
+
+class SyncRunUnit(DomainModel):
+    """One unit of a whole-library walk's plan, as its writer records it.
+
+    `unit_key` is the adapter's own opaque key. `position` is where the unit
+    resumes, in the adapter's own offsets, and only ever rises.
+    """
+
+    run_id: uuid.UUID
+    unit_key: str = Field(min_length=1)
+    stage: WalkStage
+    label: str
+    position: int = Field(default=0, ge=0)
+    expected_items: int | None = Field(default=None, ge=0)
+    items_seen: int = Field(default=0, ge=0)
+    status: SyncRunUnitStatus = SyncRunUnitStatus.PENDING

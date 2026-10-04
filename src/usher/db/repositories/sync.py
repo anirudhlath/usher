@@ -2,23 +2,30 @@
 
 import json
 import uuid
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any, cast
 
 from pydantic import AwareDatetime
-from sqlalchemy import CursorResult, func, text, update
+from sqlalchemy import CursorResult, func, select, text, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from usher.db.models.sync import SyncRunRow
+from usher.db.models.sync import SyncRunRow, SyncRunUnitRow
 from usher.db.repositories._errors import constraint_name, is_row_refusal
 from usher.domain.ids import new_id
-from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus
+from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus, SyncRunUnit, SyncRunUnitStatus
 from usher.ports.errors import RepositoryConflict, RepositoryNotFound
 from usher.ports.repository import CachedPayload, RawPayloadStore, SyncRunRepository
 
 _MUTABLE = tuple(
     column.name for column in SyncRunRow.__table__.columns if column.name not in {"id"}
+)
+
+_UNIT_MUTABLE = tuple(
+    column.name
+    for column in SyncRunUnitRow.__table__.columns
+    if column.name not in {"run_id", "unit_key"}
 )
 
 # `status = 'completed'` is the whole point: a delta walk resuming from a run
@@ -184,6 +191,68 @@ class PostgresSyncRunRepository(SyncRunRepository):
         # The newest row, and *then* the status test. See the port.
         return None if newest.status is SyncRunStatus.COMPLETED else newest
 
+    async def add_units(self, units: Sequence[SyncRunUnit]) -> None:
+        if not units:
+            return
+        try:
+            # One SAVEPOINT around the whole plan, so a refused unit takes the units
+            # before it with it and leaves the caller's other pending work alone.
+            async with self._session.begin_nested():
+                for unit in units:
+                    self._session.add(SyncRunUnitRow(**unit.model_dump()))
+                await self._session.flush()
+        except DBAPIError as exc:
+            if not is_row_refusal(exc):
+                raise
+            raise RepositoryConflict(
+                f"the plan for sync run {units[0].run_id} conflicts with stored units",
+                constraint=constraint_name(exc),
+            ) from exc
+
+    async def save_unit(self, unit: SyncRunUnit) -> None:
+        stored = unit.model_dump()
+        values: dict[str, Any] = {name: stored[name] for name in _UNIT_MUTABLE}
+        # `save`'s two rules, for `save`'s reasons: the checkpoint only rises, and a
+        # completed unit refuses the whole write.
+        values["position"] = func.greatest(SyncRunUnitRow.position, unit.position)
+        try:
+            async with self._session.begin_nested():
+                result = await self._session.execute(
+                    update(SyncRunUnitRow)
+                    .where(
+                        SyncRunUnitRow.run_id == unit.run_id,
+                        SyncRunUnitRow.unit_key == unit.unit_key,
+                        SyncRunUnitRow.status != SyncRunUnitStatus.COMPLETED,
+                    )
+                    .values(**values)
+                    .execution_options(synchronize_session="fetch")
+                )
+                if cast("CursorResult[Any]", result).rowcount:
+                    return
+                if await self._session.get(SyncRunUnitRow, (unit.run_id, unit.unit_key)) is None:
+                    raise RepositoryNotFound(
+                        f"no unit {unit.unit_key!r} of sync run {unit.run_id} to update"
+                    )
+        except DBAPIError as exc:
+            if not is_row_refusal(exc):
+                raise
+            raise RepositoryConflict(
+                f"unit {unit.unit_key!r} of sync run {unit.run_id} was refused",
+                constraint=constraint_name(exc),
+            ) from exc
+
+    async def units_for(self, run_id: uuid.UUID) -> list[SyncRunUnit]:
+        # `COLLATE "C"`: byte order, so the order is the fake's and never a locale's.
+        statement = (
+            select(SyncRunUnitRow)
+            .where(SyncRunUnitRow.run_id == run_id)
+            .order_by(SyncRunUnitRow.unit_key.collate("C"))
+            .execution_options(populate_existing=True)
+        )
+        with self._session.no_autoflush:
+            rows = (await self._session.execute(statement)).scalars().all()
+        return [_unit_to_domain(row) for row in rows]
+
     async def list_for_source(self, source_id: uuid.UUID, *, limit: int = 20) -> list[SyncRun]:
         if limit <= 0:
             return []
@@ -314,4 +383,10 @@ class PostgresRawPayloadStore(RawPayloadStore):
 def _to_domain(row: SyncRunRow) -> SyncRun:
     return SyncRun.model_validate(
         {column.name: getattr(row, column.name) for column in SyncRunRow.__table__.columns}
+    )
+
+
+def _unit_to_domain(row: SyncRunUnitRow) -> SyncRunUnit:
+    return SyncRunUnit.model_validate(
+        {column.name: getattr(row, column.name) for column in SyncRunUnitRow.__table__.columns}
     )

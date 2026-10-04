@@ -6,7 +6,15 @@ import pytest
 from pydantic import ValidationError
 
 from usher.domain.ids import new_id
-from usher.domain.sync import STAGE_ORDER, SyncRun, SyncRunKind, SyncRunStatus, WalkStage
+from usher.domain.sync import (
+    STAGE_ORDER,
+    SyncRun,
+    SyncRunKind,
+    SyncRunStatus,
+    SyncRunUnit,
+    SyncRunUnitStatus,
+    WalkStage,
+)
 
 SOURCE_ID = new_id()
 
@@ -120,3 +128,27 @@ def test_a_whole_library_walk_runs_its_stages_seed_then_titles_then_episodes() -
     """
     assert STAGE_ORDER == (WalkStage.SEED, WalkStage.TITLES, WalkStage.EPISODES)
     assert set(STAGE_ORDER) == set(WalkStage)
+
+
+def test_a_unit_starts_pending_at_position_zero() -> None:
+    unit = SyncRunUnit(run_id=new_id(), unit_key="all", stage=WalkStage.TITLES, label="all")
+    assert (unit.status, unit.position, unit.items_seen) == (SyncRunUnitStatus.PENDING, 0, 0)
+    assert unit.expected_items is None
+
+
+@pytest.mark.parametrize(
+    "changes", [{"unit_key": ""}, {"position": -1}, {"items_seen": -1}, {"expected_items": -1}]
+)
+def test_a_unit_refuses_an_empty_key_and_negative_counts(changes: dict[str, object]) -> None:
+    fields: dict[str, object] = {
+        "run_id": new_id(),
+        "unit_key": "all",
+        "stage": WalkStage.TITLES,
+        "label": "all",
+    }
+    with pytest.raises(ValidationError):
+        SyncRunUnit.model_validate(fields | changes)
+
+
+def test_a_run_has_no_heartbeat_until_a_writer_gives_it_one() -> None:
+    assert SyncRun(source_id=SOURCE_ID, kind=SyncRunKind.FULL).heartbeat_at is None

@@ -15,7 +15,7 @@ def test_code_head_revision_matches_the_head_migration_on_disk() -> None:
     None", so a migration added without updating this test fails loudly instead
     of silently changing what "the" expected head means.
     """
-    assert code_head_revision() == "m10f"
+    assert code_head_revision() == "m10g"
 
 
 #: Every revision from `ffa` -- the landing that created `test_migrations.py`'s
@@ -37,6 +37,7 @@ _REPOINTING_CHAIN = (
     "m10d",
     "m10e",
     "m10f",
+    "m10g",
 )
 
 #: The English cardinal `.claude/rules/db-and-sql.md` writes out. Keyed by

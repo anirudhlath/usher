@@ -244,7 +244,9 @@ WIDENED_SITES = frozenset(
         ("search.py", "replace"),
         ("search.py", "upsert_many"),
         ("sync.py", "add"),
+        ("sync.py", "add_units"),
         ("sync.py", "save"),
+        ("sync.py", "save_unit"),
         ("title.py", "add"),
         ("title.py", "update"),
     }

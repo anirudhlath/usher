@@ -2,12 +2,13 @@
 
 import uuid
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from pydantic import AwareDatetime
 
-from usher.domain.sync import SyncRun, SyncRunKind
+from usher.domain.sync import SyncRun, SyncRunKind, SyncRunUnit
 
 __all__ = [
     "CachedPayload",
@@ -82,6 +83,26 @@ class SyncRunRepository(ABC):
         `WATCH_STATE` only. The item lanes restart from their cursor; this lane
         resumes, so a long delta that fails costs a page rather than the run.
         """
+
+    @abstractmethod
+    async def add_units(self, units: Sequence[SyncRunUnit]) -> None:
+        """Insert a whole-library walk's plan, all of it or none of it.
+
+        A unit already stored, or one whose run does not exist, raises
+        `RepositoryConflict` and adds nothing.
+        """
+
+    @abstractmethod
+    async def save_unit(self, unit: SyncRunUnit) -> None:
+        """Update one stored unit, under `save`'s two rules.
+
+        `position` never moves back, and a `completed` unit takes no further write.
+        An unknown `(run_id, unit_key)` raises `RepositoryNotFound`.
+        """
+
+    @abstractmethod
+    async def units_for(self, run_id: uuid.UUID) -> list[SyncRunUnit]:
+        """A run's units in `unit_key` order; empty for a run without a plan."""
 
     @abstractmethod
     async def list_for_source(self, source_id: uuid.UUID, *, limit: int = 20) -> list[SyncRun]:
