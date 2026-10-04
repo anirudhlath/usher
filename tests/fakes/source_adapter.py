@@ -119,6 +119,10 @@ class FakeSourceAdapter(SourceAdapter):
     def forget(self, external_id: str) -> None:
         self._items.pop(external_id, None)
         self._changed_at.pop(external_id, None)
+        # Out of every library too, or seeding the id again would silently re-place it.
+        for placed in self._libraries.values():
+            if external_id in placed:
+                placed.remove(external_id)
 
     def recorded(self, external_id: str) -> tuple[int, bool] | None:
         state = self._states.get(external_id)
@@ -276,6 +280,11 @@ class FakeSourceAdapter(SourceAdapter):
         await self._ready()
         if not self._libraries:
             return WHOLE_LIBRARY
+        in_a_library = {one for placed in self._libraries.values() for one in placed}
+        if not in_a_library.issuperset(self._items):
+            # An item in no library would be in no unit, and a plan must cover every
+            # item, so a partly placed source walks as one unit.
+            return WalkPlan(WHOLE_LIBRARY.units, expected_total=len(self._items))
         units = tuple(
             WalkUnit(f"library:{name}", WalkStage.TITLES, f"library {name}", len(placed))
             for name, placed in self._libraries.items()

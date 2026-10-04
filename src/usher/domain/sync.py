@@ -43,8 +43,9 @@ class WalkStage(StrEnum):
     """Which part of a whole-library walk a unit belongs to.
 
     `SEED` is what the account is watching, so the watch lane can run early;
-    `TITLES` is movies and series; `EPISODES` waits until every title has
-    committed, so each episode finds its series.
+    `TITLES` is movies and series, or everything, for an adapter that does not
+    split by kind; `EPISODES` waits until every title has committed, so each
+    episode finds its series.
     """
 
     SEED = "seed"

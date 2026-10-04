@@ -37,6 +37,7 @@ from usher.ports.source import (
     StreamTarget,
     StreamTargetKind,
     UnitPage,
+    WalkPlan,
     pages_of,
     redact_query,
     wrap_deep_link,
@@ -700,6 +701,21 @@ async def test_a_walk_that_fails_mid_page_yields_what_it_had_and_then_raises() -
     assert seen == [(["a", "b"], 2), (["c"], 3)]
 
 
+async def test_a_walk_that_fails_on_a_page_boundary_yields_no_empty_page() -> None:
+    """A failure right after a full page holds nothing, so nothing more is yielded."""
+
+    async def failing() -> AsyncIterator[SourceItem]:
+        for item in _walked("a", "b"):
+            yield item
+        raise PortUnavailable("source went away on a page boundary")
+
+    seen: list[tuple[list[str], int]] = []
+    with pytest.raises(PortUnavailable):
+        async for page in pages_of(failing(), size=2):
+            seen.append(([item.external_id for item in page.items], page.resume_at))
+    assert seen == [(["a", "b"], 2)]
+
+
 async def test_a_walk_is_never_paged_into_an_empty_page() -> None:
     """An empty page would read to the writer as progress that held nothing."""
     assert await _read(pages_of(_stream([]), size=2)) == []
@@ -760,3 +776,57 @@ async def test_the_default_unit_is_list_items_in_pages() -> None:
 def test_the_default_unit_refuses_a_key_it_never_planned() -> None:
     with pytest.raises(PortDataMalformed):
         SourceAdapter.list_unit(_fake(), "library:Films")
+
+
+def _seed(
+    adapter: "FakeSourceAdapter", *external_ids: str, libraries: tuple[str, ...] = ()
+) -> None:
+    """Seed each id as a movie, placed in every one of `libraries`."""
+    for item in _walked(*external_ids):
+        adapter.seed(item, datetime(2026, 7, 1, tzinfo=UTC))
+        adapter.place(item.external_id, *libraries)
+
+
+async def test_the_fake_plans_one_whole_walk_while_an_item_sits_in_no_library() -> None:
+    """A unit per library would leave the loose item out of every unit."""
+    adapter = _fake()
+    _seed(adapter, "m0", libraries=("Films",))
+    premise = await adapter.plan_walk()
+    assert [unit.key for unit in premise.units] == ["library:Films"], "the premise"
+
+    _seed(adapter, "m1")
+    assert await adapter.plan_walk() == WalkPlan(WHOLE_LIBRARY.units, expected_total=2)
+
+
+async def test_the_fake_forgets_an_item_out_of_every_library_it_was_placed_in() -> None:
+    """Seeding a forgotten id again places it nowhere, rather than back where it was."""
+    adapter = _fake()
+    _seed(adapter, "m0", libraries=("Films",))
+    _seed(adapter, "m1", libraries=("Films", "Favourites"))
+
+    async def counts() -> list[tuple[str, int | None]]:
+        return [(unit.key, unit.expected_items) for unit in (await adapter.plan_walk()).units]
+
+    assert await counts() == [("library:Films", 2), ("library:Favourites", 1)]
+    adapter.forget("m1")
+    assert await counts() == [("library:Films", 1), ("library:Favourites", 0)]
+
+    _seed(adapter, "m1")
+    walks = [await _read(adapter.list_unit(f"library:{name}")) for name in ("Films", "Favourites")]
+    assert walks == [[(["m0"], 1)], []]
+
+
+async def test_the_fake_s_own_whole_library_unit_resumes_from_its_start_index() -> None:
+    """The fake's override of the port default, called on the fake itself."""
+    adapter = _fake()
+    _seed(adapter, "m0", "m1", "m2")
+    assert await _read(adapter.list_unit(DEFAULT_UNIT_KEY, start_index=1)) == [(["m1", "m2"], 3)]
+
+
+async def test_the_fake_refuses_a_library_it_was_never_given() -> None:
+    adapter = _fake()
+    _seed(adapter, "m0", libraries=("Films",))
+    with pytest.raises(PortDataMalformed):
+        async with aclosing(adapter.list_unit("library:Nope")) as pages:
+            async for _ in pages:
+                pass

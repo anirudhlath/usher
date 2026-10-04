@@ -203,7 +203,7 @@ class SourceAdapterContract:
         assert walked == whole
 
     async def test_a_unit_the_plan_never_named_is_refused(self, harness: SourceHarness) -> None:
-        """A key this adapter never planned raises rather than walking nothing.
+        """A key no plan of this adapter's could name raises rather than walking nothing.
 
         An empty unit reads to the writer as a unit that completed, and a full walk
         would then sweep everything that unit should have held.

@@ -462,7 +462,8 @@ class SourceAdapter(ABC):
 
         Each page's `resume_at` is the `start_index` that resumes after it. Never
         yields an empty page, and raises rather than truncating, as `list_items`
-        does. A key this adapter never planned raises `PortDataMalformed`.
+        does. A key outside this adapter's key space, one no plan of its could name,
+        raises `PortDataMalformed`; a key from an earlier plan stays walkable.
         """
         if key != DEFAULT_UNIT_KEY:
             raise PortDataMalformed(f"no walk unit {key!r} in this adapter's plan")
