@@ -32,7 +32,7 @@ The five inputs most likely to hurt a person running this, none of which the spe
 
 1. **Items deleted from the source mid-walk shrink the library below the first page's total.** The walk ends a page or two later instead of paging out `MAX_PAGES` (~7 h of requests) and failing. Task 3: `test_a_walk_that_deletions_left_short_of_its_total_ends_on_its_tail`.
 2. **A server that caps `Limit` at or below `PAGE_OVERLAP`.** The walk still advances and reads everything, rather than re-reading one page until `MAX_PAGES`. Task 3: `test_a_limit_capped_below_the_overlap_still_advances`.
-3. **A server that ignores `Filters`.** The first watch walk still yields only played or in-progress states, each once, and walks the library once rather than twice, saying so in a WARNING; a played listing holding a few entries that read unwatched is not taken for one. Task 6: `test_a_server_that_ignores_the_filter_still_yields_only_watched_states_once`, `test_a_played_listing_is_judged_unfiltered_only_when_mostly_unwatched` and `test_a_series_reading_unwatched_in_the_played_listing_keeps_the_in_progress_one`.
+3. **A server that ignores `Filters`.** The first watch walk still yields only played or in-progress states, each once. When most of the played listing reads unwatched, as most of a library is, it takes the server to ignore the filter: it walks the library once rather than twice and says so in a WARNING. A played listing whose unwatched entries only tie or trail its watched ones is not taken for one. Task 6: `test_a_server_that_ignores_the_filter_still_yields_only_watched_states_once`, `test_a_played_listing_is_judged_unfiltered_only_when_mostly_unwatched` and `test_a_series_reading_unwatched_in_the_played_listing_keeps_the_in_progress_one`.
 4. **The consumer stops after a read-ahead has already failed.** Stopping raises nothing, and asyncio never reports the failure as "never retrieved". Task 4: `test_a_read_ahead_that_failed_is_retrieved_when_the_walk_stops`.
 5. **The consumer is cancelled while a read-ahead is in flight.** The cancellation propagates out of the walk, and the request is cancelled with it. Task 4: `test_cancelling_the_consumer_cancels_the_walk_rather_than_being_swallowed`.
 
@@ -1264,17 +1264,17 @@ git commit -m "emby: overlap each page with the last, so a deletion mid-walk ski
 Spec §1.4. As soon as page N arrives, the walk requests page N+1, then yields page N's items while that request is in flight. The outstanding request is cancelled when the consumer stops. The gate still spaces it.
 
 **Files:**
-- Modify: `src/usher/adapters/emby/adapter.py` (`_walk`, a new `_read` and `_settle`, `aclosing` in `_list_items` and `_watch_state`)
+- Modify: `src/usher/adapters/emby/adapter.py` (`_walk`, a new `_read`, `_settle` and `_retrieve`, `aclosing` in `_list_items` and `_watch_state`)
 - Test: `tests/unit/test_adapters_emby_adapter.py`
 - Modify: `docs/prd/03-sources-and-sync.md`, `CHANGELOG.md`
 
 **Interfaces:**
 - Consumes: Task 3's window.
-- Produces: `EmbyAdapter._read(path: str, query: Mapping[str, str], start: int, *, count: bool) -> asyncio.Task[dict[str, Any]]`; module-level `async def _settle(task: asyncio.Task[Any]) -> None`. Phase 2's listing limiter (Task 15) wraps `_page`, which `_read` schedules.
+- Produces: `EmbyAdapter._read(path: str, query: Mapping[str, str], start: int, *, count: bool) -> asyncio.Task[dict[str, Any]]`; module-level `async def _settle(task: asyncio.Task[Any]) -> None`, and `def _retrieve(task: asyncio.Task[Any]) -> None`, the done-callback `_settle` attaches. Phase 2's listing limiter (Task 15) wraps `_page`, which `_read` schedules.
 
 - [ ] **Step 1: Write the failing tests**
 
-In `tests/unit/test_adapters_emby_adapter.py`, add imports — `contextlib`, `gc`, `time`; `from collections.abc import AsyncGenerator, Coroutine`; `from typing import cast` — and widen `_on`'s handler, since an async handler is what lets a case hold a request open:
+In `tests/unit/test_adapters_emby_adapter.py`, add imports — `contextlib`, `gc`, `time`, `weakref`; `from collections.abc import AsyncGenerator, AsyncIterator, Coroutine`; `from typing import cast` — and widen `_on`'s handler, since an async handler is what lets a case hold a request open:
 
 ```python
 _Handler = (
@@ -1309,6 +1309,34 @@ def _parking_second_listing(
         return server.handle(request)
 
     return handle
+
+
+def _the_read_ahead() -> weakref.ref[asyncio.Task[Any]]:
+    """A weak reference to the walk's read-ahead: the one other task still running.
+
+    asyncio reports an exception nobody retrieved only when the task is destroyed, so
+    a case asserting that nothing was reported first asserts that the read-ahead was
+    collected, and holds nothing that would keep it alive.
+    """
+    others = asyncio.all_tasks() - {asyncio.current_task()}
+    assert len(others) == 1, f"the premise: one read-ahead in flight, found {len(others)} tasks"
+    return weakref.ref(others.pop())
+
+
+def _recording(
+    lost: list[dict[str, Any]],
+) -> Callable[[asyncio.AbstractEventLoop, dict[str, Any]], None]:
+    """A loop exception handler appending each report to `lost`, minus the task it names.
+
+    asyncio reports a lost exception from the task's finalizer, with the task in the
+    report. Keeping it would bring the task back to life, and the premise that the
+    read-ahead was collected would then fail where `lost` should.
+    """
+
+    def record(_loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+        lost.append({key: value for key, value in context.items() if key != "future"})
+
+    return record
 
 
 async def test_the_next_page_is_requested_while_the_current_one_is_handled() -> None:
@@ -1351,21 +1379,38 @@ async def test_the_next_page_is_requested_while_the_current_one_is_handled() -> 
     )
 
 
-async def test_stopping_the_walk_cancels_the_request_it_read_ahead() -> None:
+@pytest.mark.parametrize(
+    "walk",
+    [
+        pytest.param(lambda adapter: adapter.list_items(), id="list_items"),
+        # A delta from `T0`, which every item here carries: one listing, walked from
+        # its start, as `_parking_second_listing` assumes and a first walk need not be.
+        pytest.param(lambda adapter: adapter.watch_state(since=T0), id="watch_state"),
+    ],
+)
+async def test_stopping_the_walk_cancels_the_request_it_read_ahead(
+    walk: Callable[[EmbyAdapter], AsyncIterator[SourceItem | SourceWatchState]],
+) -> None:
     server = FakeEmbyServer()
     for index in range(4):
         server.add_item(_movie(index), T0)
     parked, cancelled = asyncio.Event(), asyncio.Event()
+    reported: list[dict[str, Any]] = []
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: reported.append(context))
     adapter = _on(_parking_second_listing(server, parked, cancelled), page_size=2)
-    items = cast(AsyncGenerator[SourceItem], adapter.list_items())
+    items = cast(AsyncGenerator[SourceItem | SourceWatchState], walk(adapter))
     try:
-        first = await anext(items)
+        first = await asyncio.wait_for(anext(items), timeout=2.0)
         await asyncio.wait_for(parked.wait(), timeout=2.0)
         await asyncio.wait_for(items.aclose(), timeout=2.0)
     finally:
+        loop.set_exception_handler(previous)
         await adapter.aclose()
     assert first.external_id == "movie-0"
     assert cancelled.is_set(), "the request read ahead outlived the walk that asked for it"
+    assert reported == [], f"stopping the walk left asyncio something to report: {reported}"
 
 
 async def test_a_read_ahead_that_failed_is_retrieved_when_the_walk_stops() -> None:
@@ -1392,14 +1437,20 @@ async def test_a_read_ahead_that_failed_is_retrieved_when_the_walk_stops() -> No
     lost: list[dict[str, Any]] = []
     loop = asyncio.get_running_loop()
     previous = loop.get_exception_handler()
-    loop.set_exception_handler(lambda _loop, context: lost.append(context))
+    loop.set_exception_handler(_recording(lost))
     adapter = _on(handle, page_size=2)
     try:
         items = cast(AsyncGenerator[SourceItem], adapter.list_items())
-        await anext(items)
+        await asyncio.wait_for(anext(items), timeout=2.0)
+        ahead = _the_read_ahead()
         await asyncio.wait_for(refused.wait(), timeout=2.0)
         # Long enough for the refused request's task to finish raising.
         await asyncio.sleep(0.05)
+        t = ahead()
+        assert t is not None and t.done() and not t.cancelled(), (
+            "the premise: the refused read had finished failing before the walk stopped"
+        )
+        del t
         await items.aclose()
         del items
         gc.collect()
@@ -1407,6 +1458,55 @@ async def test_a_read_ahead_that_failed_is_retrieved_when_the_walk_stops() -> No
         loop.set_exception_handler(previous)
         await adapter.aclose()
     assert listings == 2, "the premise: the second page was asked for and refused"
+    assert ahead() is None, "the premise: the read-ahead was collected"
+    assert lost == [], f"asyncio reported a read-ahead failure nobody retrieved: {lost}"
+
+
+async def test_a_read_ahead_that_fails_once_cancelled_is_retrieved_too() -> None:
+    """Cancelling asks a read to stop, and a read can answer with a failure instead.
+
+    `cancel()` alone silences a failure that is already in, so a read-ahead that failed
+    before the walk stopped is quiet whether or not the walk reads what it raised. Here
+    the second listing is held open until it is cancelled and then refused: the task
+    ends raising, after the cancel.
+    """
+    server = FakeEmbyServer()
+    for index in range(4):
+        server.add_item(_movie(index), T0)
+    parked, refused = asyncio.Event(), asyncio.Event()
+    listings = 0
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal listings
+        if request.url.path.endswith("/Items"):
+            listings += 1
+            if listings == 2:
+                parked.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    refused.set()
+                return httpx.Response(404, json={"Error": "gone"})
+        return server.handle(request)
+
+    lost: list[dict[str, Any]] = []
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(_recording(lost))
+    adapter = _on(handle, page_size=2)
+    try:
+        items = cast(AsyncGenerator[SourceItem], adapter.list_items())
+        await asyncio.wait_for(anext(items), timeout=2.0)
+        ahead = _the_read_ahead()
+        await asyncio.wait_for(parked.wait(), timeout=2.0)
+        await asyncio.wait_for(items.aclose(), timeout=2.0)
+        del items
+        gc.collect()
+    finally:
+        loop.set_exception_handler(previous)
+        await adapter.aclose()
+    assert refused.is_set(), "the premise: the read-ahead was cancelled, then refused"
+    assert ahead() is None, "the premise: the read-ahead was collected"
     assert lost == [], f"asyncio reported a read-ahead failure nobody retrieved: {lost}"
 
 
@@ -1429,25 +1529,164 @@ async def test_cancelling_the_consumer_cancels_the_walk_rather_than_being_swallo
     finally:
         await adapter.aclose()
     assert cancelled.is_set(), "the request in flight survived its consumer's cancellation"
+
+
+async def test_a_read_ahead_that_fails_after_its_walk_was_cancelled_is_retrieved() -> None:
+    """The walk is cancelled while it waits on its read-ahead, which fails afterwards.
+
+    A lane shutting down: the task closing the walk is cancelled mid-wait and the
+    adapter closed, and only then does the read-ahead, slow to stop, fail. That
+    cancellation leaves the walk rather than ending there, and asyncio must still not
+    report the read-ahead's failure as lost, though nothing waits on it any more.
+    """
+    server = FakeEmbyServer()
+    for index in range(4):
+        server.add_item(_movie(index), T0)
+    parked, stopping = asyncio.Event(), asyncio.Event()
+    release, failing = asyncio.Event(), asyncio.Event()
+    listings = 0
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal listings
+        if request.url.path.endswith("/Items"):
+            listings += 1
+            if listings == 2:
+                parked.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    stopping.set()
+                    await release.wait()
+                failing.set()
+                raise httpx.ReadError("the connection dropped while the read was stopping")
+        return server.handle(request)
+
+    lost: list[dict[str, Any]] = []
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(_recording(lost))
+    adapter = _on(handle, page_size=2)
+    items = cast(AsyncGenerator[SourceItem], adapter.list_items())
+
+    async def stop(walk: AsyncGenerator[SourceItem]) -> None:
+        await walk.aclose()
+
+    try:
+        await asyncio.wait_for(anext(items), timeout=2.0)
+        ahead = _the_read_ahead()
+        await asyncio.wait_for(parked.wait(), timeout=2.0)
+        closing = asyncio.create_task(stop(items))
+        await asyncio.wait_for(stopping.wait(), timeout=2.0)
+        assert not closing.done(), "the premise: the walk is still waiting on its read-ahead"
+        closing.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(closing, timeout=2.0)
+        # Closed first, as a lane shutting down closes it, so `_page` passes the
+        # failure on rather than asking again.
+        await adapter.aclose()
+        release.set()
+        await asyncio.wait_for(failing.wait(), timeout=2.0)
+        # Long enough for the read-ahead's task to finish raising.
+        await asyncio.sleep(0.05)
+        del items, closing
+        gc.collect()
+    finally:
+        loop.set_exception_handler(previous)
+        await adapter.aclose()
+        # Released on every path, or a read-ahead first cancelled at teardown, by a
+        # walk that never stopped it, waits on this forever and hangs the session.
+        release.set()
+    assert ahead() is None, "the premise: the read-ahead was collected"
+    assert lost == [], f"asyncio reported a read-ahead failure nobody retrieved: {lost}"
+
+
+async def test_the_page_that_ends_the_walk_is_the_last_one_asked_for() -> None:
+    """Nothing is read ahead past the end, however long the consumer takes.
+
+    The consumer waits on every item, which is when a page read ahead reaches the
+    server: the second arrives during the first item, so one asked for past the end
+    would arrive during the last.
+    """
+    server = FakeEmbyServer()
+    for index in range(5):
+        server.add_item(_movie(index), T0)
+    seen: list[str] = []
+    arrivals: list[int] = []
+
+    def spy(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/Items"):
+            arrivals.append(len(seen))
+        return server.handle(request)
+
+    adapter = _on(spy, page_size=4)
+    try:
+        async for item in adapter.list_items():
+            seen.append(item.external_id)
+            await asyncio.sleep(0.01)
+    finally:
+        await adapter.aclose()
+    assert sorted(seen) == [f"movie-{index}" for index in range(5)]
+    assert arrivals[:2] == [0, 1], "the premise: a page read ahead arrives while the consumer waits"
+    assert len(arrivals) == 2, f"a page was asked for after the one that ended the walk: {arrivals}"
+
+
+async def test_the_last_page_the_bound_allows_is_the_last_one_asked_for() -> None:
+    """A walk at its page bound reads nothing ahead, however long the consumer takes.
+
+    Every page here is new, so the listing never ends and each page has an item for
+    the consumer to wait on, which is when a page read past the bound would arrive.
+    """
+    seen: list[str] = []
+    arrivals: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        authenticated = _authenticated(request)
+        if authenticated is not None:
+            return authenticated
+        arrivals.append(len(seen))
+        # The escape hatch, so a walk with no bound fails this case instead of
+        # hanging it.
+        if len(arrivals) > 20:
+            return httpx.Response(200, json={"Items": []})
+        index = len(arrivals) - 1
+        entry = {"Id": f"movie-{index}", "Type": "Movie", "Name": f"M{index}"}
+        return httpx.Response(200, json={"Items": [entry]})
+
+    adapter = _on(handler, max_pages=3)
+    try:
+        with pytest.raises(PortDataMalformed, match="never ended"):
+            async for item in adapter.list_items():
+                seen.append(item.external_id)
+                await asyncio.sleep(0.01)
+    finally:
+        await adapter.aclose()
+    assert seen == ["movie-0", "movie-1", "movie-2"]
+    assert arrivals[:3] == [0, 1, 2], "the premise: each page read ahead arrives mid-item"
+    assert len(arrivals) == 3, f"a page was asked for past the bound: {arrivals}"
 ```
 
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_adapters_emby_adapter.py -k "read_ahead or requested_while or stopping_the_walk or cancelling_the_consumer"`
-Expected: FAIL — the first on its interval message after the 2 s deadline; the second with `TimeoutError` at `parked.wait()`, because nothing is read ahead to park. The last two may pass today; Step 4's plants prove they can fail.
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_adapters_emby_adapter.py -k "read_ahead or requested_while or stopping_the_walk or cancelling_the_consumer or last_one_asked_for"`
+Expected: FAIL — `test_the_next_page_is_requested_while_the_current_one_is_handled` on its interval message after the 2 s deadline; the stopping case with `TimeoutError` at `parked.wait()`, because nothing is read ahead to park; and the three read-ahead failure cases on a `TimeoutError` at a premise wait or on `_the_read_ahead`'s premise, since no read-ahead is in flight. The consumer-cancellation case and the two last-page cases may pass today; Step 4's plants prove they can fail.
 
 - [ ] **Step 2: Read ahead**
 
-In `src/usher/adapters/emby/adapter.py`, import `aclosing` from `contextlib` beside `AbstractAsyncContextManager`. Add, beside `_segment`:
+In `src/usher/adapters/emby/adapter.py`, import `aclosing` from `contextlib` beside `AbstractAsyncContextManager`. Add, beside `_segment`, `_settle` and the callback it attaches:
 
 ```python
 async def _settle(task: asyncio.Task[Any]) -> None:
     """Cancel a read-ahead the walk no longer wants, and retrieve what it raised.
 
     Waited on rather than awaited, so its failure is never raised over whatever is
-    ending the walk, and the caller's own cancellation still propagates. Retrieved,
-    because asyncio reports an exception nobody read as lost.
+    ending the walk, and the caller's own cancellation still propagates. Retrieved
+    by a callback, because asyncio reports an exception nobody read as lost, and
+    the caller may be cancelled before the read-ahead finishes.
     """
+    task.add_done_callback(_retrieve)
     task.cancel()
     await asyncio.wait({task})
+
+
+def _retrieve(task: asyncio.Task[Any]) -> None:
     if not task.cancelled():
         task.exception()
 ```
@@ -1542,11 +1781,26 @@ Expected: PASS. `test_a_walk_whose_adapter_is_closed_under_it_is_not_retried` st
 
 - [ ] **Step 4: Plant and verify**
 
-1. `_settle` reduced to `pass`. Expect `test_stopping_the_walk_cancels_the_request_it_read_ahead` and `test_a_read_ahead_that_failed_is_retrieved_when_the_walk_stops` ("nobody retrieved") to fail. If the second does not, its premise (the read-ahead finished failing before `aclose`) is false: lengthen the settle sleep and re-run the plant before trusting the case. The case asserts that premise itself before `aclose` (`t.done() and not t.cancelled()` on the read-ahead task); hold the refused read open with `await asyncio.sleep(1)` in the handler to see that guard fail on its own line. A shorter settle sleep is not that plant: the refused read finishes failing in the event-loop step that sets `refused`.
-2. `_settle` with `task.exception()` removed. Expect only `test_a_read_ahead_that_failed_is_retrieved_when_the_walk_stops` to fail.
-3. In `_walk`, `body = await pending` wrapped as `try: body = await pending` / `except BaseException as exc: raise PortUnavailable("page failed") from exc`. Expect `test_cancelling_the_consumer_cancels_the_walk_rather_than_being_swallowed` to fail with `PortUnavailable` where `CancelledError` was expected.
-4. The request for the next page moved to after the `for payload in page.fresh` loop (no read-ahead). Expect `test_the_next_page_is_requested_while_the_current_one_is_handled` to fail on its interval message.
-5. `aclosing` removed from `_list_items` (a bare `async for` over `self._walk(...)`). Expect `test_stopping_the_walk_cancels_the_request_it_read_ahead` to fail: the inner walk is closed only when collected, after the assertion.
+Each plant names the cases it fails. Every case fails under at least one plant of its own.
+
+1. `_settle` reduced to `pass`. Expect both arms of `test_stopping_the_walk_cancels_the_request_it_read_ahead`, `test_a_read_ahead_that_failed_is_retrieved_when_the_walk_stops`, `test_a_read_ahead_that_fails_once_cancelled_is_retrieved_too` and `test_a_read_ahead_that_fails_after_its_walk_was_cancelled_is_retrieved` to fail.
+2. `task.cancel()` removed from `_settle`. Expect both stopping arms, `test_a_read_ahead_that_fails_once_cancelled_is_retrieved_too` and `test_a_read_ahead_that_fails_after_its_walk_was_cancelled_is_retrieved` to fail, each on a `TimeoutError` at a close or premise deadline rather than a hang.
+3. `_retrieve` attached only in an `except asyncio.CancelledError`. Expect `test_a_read_ahead_that_fails_once_cancelled_is_retrieved_too` alone to fail ("nobody retrieved").
+4. The `add_done_callback(_retrieve)` dropped. Expect `test_a_read_ahead_that_fails_once_cancelled_is_retrieved_too` and `test_a_read_ahead_that_fails_after_its_walk_was_cancelled_is_retrieved` to fail ("nobody retrieved").
+5. A trailing `if not task.cancelled(): task.exception()` in place of the callback. Expect `test_a_read_ahead_that_fails_after_its_walk_was_cancelled_is_retrieved` alone to fail: its walk is cancelled before the read-ahead finishes, so nothing after the wait runs.
+6. A bare `task.exception()` in `_retrieve`, without the `cancelled()` check. Expect both stopping arms to fail ("stopping the walk left asyncio something to report").
+7. `_settle` as `task.cancel()` / `try: await task` / `except asyncio.CancelledError: pass`. Expect `test_a_read_ahead_that_failed_is_retrieved_when_the_walk_stops`, `test_a_read_ahead_that_fails_once_cancelled_is_retrieved_too` and `test_a_read_ahead_that_fails_after_its_walk_was_cancelled_is_retrieved` to fail: the read-ahead's refusal is raised out of `aclose()`, or on "DID NOT RAISE CancelledError".
+8. The same with `except BaseException: pass`. Expect `test_a_read_ahead_that_fails_once_cancelled_is_retrieved_too` (on its premise that the read-ahead was collected) and `test_a_read_ahead_that_fails_after_its_walk_was_cancelled_is_retrieved` ("DID NOT RAISE CancelledError") to fail.
+9. In `_walk`, `body = await pending` wrapped as `try: body = await pending` / `except BaseException as exc: raise PortUnavailable("page failed") from exc`, or the same with `except asyncio.CancelledError`. Expect `test_cancelling_the_consumer_cancels_the_walk_rather_than_being_swallowed` to fail with `PortUnavailable` where `CancelledError` was expected.
+10. The request for the next page moved to after the `for payload in page.fresh` loop (no read-ahead). Expect `test_the_next_page_is_requested_while_the_current_one_is_handled` to fail on its interval message, both stopping arms, the three read-ahead failure cases on "the premise: one read-ahead in flight, found 0 tasks", and `test_the_page_that_ends_the_walk_is_the_last_one_asked_for`.
+11. `aclosing` removed from `_list_items` (a bare `async for` over `self._walk(...)`). Expect the `list_items` arm of the stopping case to fail — the inner walk is closed only when collected, after the assertion — and the three read-ahead failure cases on their premises.
+12. `aclosing` removed from `_watch_state`. Expect the `watch_state` arm of the stopping case alone to fail.
+13. `if number < self._max_pages:`, dropping `not page.ended`. Expect `test_the_page_that_ends_the_walk_is_the_last_one_asked_for` alone to fail.
+14. `if not page.ended:`, dropping the page bound. Expect `test_the_last_page_the_bound_allows_is_the_last_one_asked_for` alone to fail.
+15. `range(1, self._max_pages)`, one page fewer. Expect `test_a_server_that_ignores_start_index_ends_the_walk_rather_than_running_forever` and `test_the_last_page_the_bound_allows_is_the_last_one_asked_for` to fail.
+16. In each read-ahead failure case, hold a strong reference to the read-ahead (`_kept = ahead()`). Expect that case alone to fail, on "the premise: the read-ahead was collected".
+17. `_parking_second_listing` parking the first listing instead. Expect both stopping arms to fail with `TimeoutError`.
+18. In `test_a_read_ahead_that_failed_is_retrieved_when_the_walk_stops`'s handler, `await asyncio.sleep(1)` before refusing, so the refused read is still pending at `aclose`. Expect its premise to fail on its own line: "the refused read had finished failing before the walk stopped". A shorter settle sleep is not that plant: the refused read finishes failing in the event-loop step that sets `refused`.
 
 - [ ] **Step 5: Say it in the PRD and the changelog**
 
@@ -1925,7 +2179,7 @@ Spec §1.6. With `since=None`, `watch_state` makes two walks — `Filters=IsPlay
 
 Live facts, recorded 2026-10-01 on the account behind Shared Emby: `IsPlayed` listed 765 items, all played, 21 of them also holding a position; `IsResumable` listed 208, all holding a position, 21 of them played. The two overlap by exactly those 21. A filtered listing pages normally: the page at `StartIndex` 700 of the 765 held 65.
 
-**Review Focus 3** lives here: a server that ignores `Filters` lists the whole library on the first walk. The adapter still yields only non-default states, and skips the second walk, because the first has already seen every resume position. It judges the played listing unfiltered only when its unwatched entries strictly outnumber its watched ones, and logs a WARNING when it does. One entry reading unwatched is not enough: a Series marked played that has since gained an episode may match `IsPlayed` and still read unwatched, and taking it for an unfiltered server would cost the walk every resume position. A tie or an empty listing goes on to the second listing, whose repeats the `yielded` set drops.
+**Review Focus 3** lives here: a server that ignores `Filters` lists the whole library on the first walk. The adapter still yields only non-default states, and skips the second walk, because the first has already seen every resume position. It judges the played listing unfiltered only when its unwatched entries strictly outnumber its watched ones, and logs a WARNING when it does. So a few entries reading unwatched among watched ones are not enough: a Series marked played that has since gained an episode may match `IsPlayed` and still read unwatched, and taking it for an unfiltered server would cost the walk every resume position. A played listing of nothing but such entries is still judged unfiltered. A tie or an empty listing goes on to the second listing, whose repeats the `yielded` set drops.
 
 The fake adapter changes shape with the port, which is what breaks eight watch-sync cases and one integration case below: each walked a first walk over items with no state and expected zeros. They become deltas — a completed run first — which is the shape whose behaviour they were written about.
 
@@ -2259,7 +2513,7 @@ async def test_a_server_that_ignores_the_filter_still_yields_only_watched_states
 
 
 async def test_a_series_reading_unwatched_in_the_played_listing_keeps_the_in_progress_one() -> None:
-    """A Series marked played that has since gained an episode can match `IsPlayed`.
+    """A Series marked played that has since gained an episode may match `IsPlayed`.
 
     Its entry reads unwatched, with no position. One such entry beside one played
     movie is a tie, not a server that ignored `Filters`, so the walk still asks for
@@ -2485,7 +2739,7 @@ Replace `watch_state` and `_watch_state`:
                 # Unwatched entries strictly outnumbering watched ones mean the server
                 # ignored `Filters` and listed everything, resume positions included, so
                 # a second walk would only repeat it. A tie or an empty listing goes on:
-                # a Series marked played that has since gained an episode can match
+                # a Series marked played that has since gained an episode may match
                 # `IsPlayed` and still read unwatched.
                 logger.warning(
                     "{source} appears to ignore Filters: its first watch walk's played "
@@ -2636,7 +2890,7 @@ Expected: PASS.
 8. Drop the WARNING. Expect the `unwatched-outnumber-watched` arm alone to fail, on "the walk listed once without a WARNING, or warned anyway".
 9. Log `watched=unwatched`. Expect the same arm alone to fail, on "the WARNING miscounted the entries".
 10. In the fake's rendered user data, drop the derived `Played`. Expect the fake's Series case to fail, and the Series case's premise about the played listing.
-11. Flip the third entry of the ignored-filter case to `Played: True`. Expect its premise to fail: "the library listed is mostly unwatched".
+11. Flip the fourth entry (`movie-3`) of the ignored-filter case to `Played: True`. Expect its premise to fail: "the library listed is mostly unwatched".
 
 - [ ] **Step 10: Say it in the PRD, the changelog and the rules**
 
@@ -2654,8 +2908,9 @@ libraries — and merges nothing else. Nothing schedules that first walk.
 ```markdown
 - **A source's first watch-state walk asks only for what was watched.** It lists
   played items, then in-progress ones: a few requests, where it used to walk the
-  whole library, which on a million-item library took most of a day. On a server
-  that ignores the filter, the walk lists once and logs a WARNING.
+  whole library, which on a million-item library took most of a day. If most of
+  the played listing reads unwatched, the server is taken to ignore the filter,
+  and the walk lists once and logs a WARNING.
 ```
 
 `.claude/rules/emby-push-and-ingest.md`, "Gap-closing walks are unasked-for work" — replace the `⚠️ **And that guard reads the item lane's cursor only…` sentence with:
@@ -3020,7 +3275,7 @@ docker exec usher-postgres-1 psql -U usher -d ffs_first_watch -Atc \
   "WITH gone AS (DELETE FROM watch_states WHERE origin = 'source' AND position_seconds > 0 AND NOT played RETURNING 1) SELECT count(*) FROM gone"
 ```
 
-Expected: `alembic` ends at the repository's head, and the last query prints only a `running|<n>|f` row. Those are unfinished first walks with no cursor. With every completed watch run gone, the next watch walk has no cursor to resume from, and it supersedes the newest of them. The last command prints how many in-progress states the clone held and deletes them. Only the walk's second listing, the in-progress one, can put them back, so Step 3 counts them.
+Expected: `alembic` ends at the repository's head, and the `sync_runs` query prints only a `running|<n>|f` row. Those are unfinished first walks with no cursor. With every completed watch run gone, the next watch walk has no cursor to resume from, and it supersedes the newest of them. The last command prints how many in-progress states the clone held and deletes them. Only the walk's second listing, the in-progress one, can put them back, so Step 3 counts them.
 
 - [ ] **Step 3: A first watch walk under a minute — with the owner's go-ahead**
 
