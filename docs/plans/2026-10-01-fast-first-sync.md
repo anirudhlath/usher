@@ -6315,7 +6315,7 @@ git commit -m "emby: plan a whole-library walk as each library's titles, then it
 Spec §2.2, "SEED". One unit, first in the plan: the `Filters=IsPlayed` items, the `Filters=IsResumable` items and `/Shows/NextUp`, each with full `ITEM_FIELDS`, with the series they belong to fetched by `Ids` and yielded ahead of their episodes. Task 18 runs the watch lane as soon as it has committed, which is what puts a household's own shelves within the 2-minute target.
 
 **Departures from the spec's letter (8, 9, 10):**
-- **The seed streams.** Each page is led by the series its episodes need that neither it nor an earlier page holds, fetched by `Ids` there and then, instead of every listing first and every series after. Memory stays at one page however much the account has watched, and an episode still lands with its series or after it — which is all ingest needs, because it resolves a series from the whole batch it arrives in.
+- **The seed streams.** Each page is led by the series its episodes need that neither it nor an earlier page holds, fetched by `Ids` there and then, instead of every listing first and every series after. Memory stays at one page however much the account has watched. A page's own series then move ahead of its other items, so every episode still lands after its series. The one exception is a series `Ids` did not return: `_series_for` keeps only the series it asked for, and one WARNING counts the rest.
 - **A resumed seed starts again; every seed page resumes at 0.** A count into listings that may have changed since could skip an item the watch lane is about to look for. The seed is small and ingest upserts, so starting again costs seconds.
 - **The seed is planned only when both watch filters narrow the library.** Two more counts — `Filters=IsPlayed` and `Filters=IsResumable` over the whole source — ride the planner's concurrent batch, 18 counts in all. A server that ignored a filter, or a library watched end to end, would make the seed a whole-library walk ahead of the real one.
 - **A fallback plan keeps its seed.** The fallback replaces the library units only, so a library whose views do not cover it still gets its watch state early.
@@ -6461,17 +6461,19 @@ In `tests/unit/test_adapters_emby_adapter.py`, import `IDS_PER_REQUEST, SEED_UNI
 
 
 def _watching(server: FakeEmbyServer) -> None:
-    """Three movies and two episodes watched, one of each untouched, one episode up next.
+    """Three movies, three episodes and a series watched, two items untouched, one up next.
 
     `movie-3` is both played and part-way through, so two listings carry it.
-    `next-0` belongs to `series-1`, which no watched item does.
+    `next-0` belongs to `series-1`, which no watched item does. `series-2` is played,
+    and the played listing's page carries it after its own `episode-003`.
     """
     for index in range(4):
         server.add_item(_movie(index), T0)
-    server.add_item(_series(0), T0)
-    server.add_item(_series(1), T0)
+    for index in range(3):
+        server.add_item(_series(index), T0)
     for index in range(3):
         server.add_item(_episode(index), T0)
+    server.add_item(replace(_episode(3), series_external_id="series-2"), T0)
     server.add_item(
         replace(_episode(9), external_id="next-0", name="Next 0", series_external_id="series-1"),
         T0,
@@ -6483,6 +6485,8 @@ def _watching(server: FakeEmbyServer) -> None:
         ("movie-3", True, 320),
         ("episode-000", True, 0),
         ("episode-001", False, 640),
+        ("series-2", True, 0),
+        ("episode-003", True, 0),
     ]:
         server.set_watch_state(
             SourceWatchState(external_id=external_id, position_seconds=position, played=played)
@@ -6504,7 +6508,12 @@ async def test_a_plan_starts_with_the_seed_and_so_does_its_fallback() -> None:
         fallback = await falling_back.plan_walk()
     finally:
         await falling_back.aclose()
-    assert [unit.key for unit in fallback.units] == [SEED_KEY, DEFAULT_UNIT_KEY], (
+    # Both premises leave the seed out, so a seed gone missing fails the loop instead.
+    assert [unit.stage for unit in covered.units if unit.key != SEED_KEY] == [
+        WalkStage.TITLES,
+        WalkStage.EPISODES,
+    ], "the premise: the first plan walked the library"
+    assert [unit.key for unit in fallback.units if unit.key != SEED_KEY] == [DEFAULT_UNIT_KEY], (
         "the premise: the second plan fell back"
     )
     for plan in (covered, fallback):
@@ -6512,18 +6521,20 @@ async def test_a_plan_starts_with_the_seed_and_so_does_its_fallback() -> None:
         assert [unit.stage for unit in plan.units].count(WalkStage.SEED) == 1
 
 
-@pytest.mark.parametrize("ignored", ["IsPlayed", "IsResumable"])
-async def test_a_filter_the_server_ignores_leaves_the_plan_without_a_seed(ignored: str) -> None:
+@pytest.mark.parametrize("ignored", [None, "IsPlayed", "IsResumable"])
+async def test_a_filter_the_server_ignores_leaves_the_plan_without_a_seed(
+    ignored: str | None,
+) -> None:
     """A seed its filter did not narrow would walk the whole library ahead of the walk.
 
-    Each filter is ignored on its own, so neither half of the check can go missing;
-    the library is the one the case above planned a seed for.
+    Each filter is ignored on its own, so neither half of the check can go missing,
+    and the control ignores neither, so this library is one a seed is planned for.
     """
     server = FakeEmbyServer()
     _library(server, 1, "Films", [_movie(0), _movie(1)])
 
     def ignoring(request: httpx.Request) -> httpx.Response:
-        if request.url.params.get("Filters") != ignored:
+        if ignored is None or request.url.params.get("Filters") != ignored:
             return server.handle(request)
         unfiltered = request.url.copy_remove_param("Filters")
         return server.handle(httpx.Request(request.method, unfiltered, headers=request.headers))
@@ -6533,32 +6544,59 @@ async def test_a_filter_the_server_ignores_leaves_the_plan_without_a_seed(ignore
         plan = await adapter.plan_walk()
     finally:
         await adapter.aclose()
-    assert [unit.stage for unit in plan.units] == [WalkStage.TITLES, WalkStage.EPISODES]
+    if ignored is None:
+        # Membership only: where the seed goes, and its stage, are the case above's to pin.
+        assert SEED_KEY in {unit.key for unit in plan.units}, (
+            "the premise: a server honouring both filters gets a seed"
+        )
+    else:
+        assert [unit.stage for unit in plan.units] == [WalkStage.TITLES, WalkStage.EPISODES]
 
 
 async def test_the_seed_holds_what_the_account_watched_and_watches_next_each_series_first() -> None:
     """Each item once, every episode after its series, and no untouched item.
 
+    The server lists `series-2` after its own episode, so the seed has to move it.
     The fake refuses a NextUp that names no user, so this case also holds the
     adapter to sending one.
     """
     server = FakeEmbyServer()
     _watching(server)
-    adapter = _adapter(server, page_size=100)
+    carried: dict[str, list[str]] = {}
+
+    def carrying(request: httpx.Request) -> httpx.Response:
+        response = server.handle(request)
+        filters = request.url.params.get("Filters")
+        if filters is not None:
+            entries = json.loads(response.content)["Items"]
+            carried.setdefault(filters, []).extend(entry["Id"] for entry in entries)
+        return response
+
+    adapter = _on(carrying, page_size=100)
     try:
         pages = [page async for page in adapter.list_unit(SEED_KEY)]
     finally:
         await adapter.aclose()
     walked = [item for page in pages for item in page.items]
+    assert {filters for filters, ids in carried.items() if "movie-3" in ids} == {
+        "IsPlayed",
+        "IsResumable",
+    }, "the premise: both listings carry movie-3"
+    played = carried["IsPlayed"]
+    assert played.index("episode-003") < played.index("series-2"), (
+        "the premise: the server lists series-2 after its own episode"
+    )
     assert sorted(item.external_id for item in walked) == [
         "episode-000",
         "episode-001",
+        "episode-003",
         "movie-0",
         "movie-2",
         "movie-3",
         "next-0",
         "series-0",
         "series-1",
+        "series-2",
     ]
     before: set[str] = set()
     for item in walked:
@@ -6606,14 +6644,71 @@ async def test_the_seed_asks_only_for_series_no_page_held_a_hundred_at_a_time() 
         }
     finally:
         await adapter.aclose()
-    asked = [
-        request.url.params["Ids"].split(",")
-        for request in _listings(seen)
-        if "Ids" in request.url.params
-    ]
+    reads = [request.url.params for request in _listings(seen) if "Ids" in request.url.params]
+    asked = [params["Ids"].split(",") for params in reads]
     assert sorted(len(ids) for ids in asked) == [1, IDS_PER_REQUEST]
+    assert [params["Limit"] for params in reads] == [str(len(ids)) for ids in asked], (
+        "a read by Ids asks for no more items than its own ids"
+    )
     assert {one for ids in asked for one in ids} == {f"series-{index}" for index in range(count)}
     assert {"series-done", *(f"series-{index}" for index in range(count))} <= walked
+
+
+async def test_a_server_ignoring_ids_seeds_only_the_series_asked_for_and_warns() -> None:
+    """Whatever else it sends is dropped, `Limit` caps it, and a WARNING counts the rest.
+
+    Sorted by name, the unfiltered answer leads with `series-9`, a series nobody asked
+    for, then `series-0`, which was asked for; `series-1` never comes.
+    """
+    server = FakeEmbyServer()
+    server.add_item(replace(_series(9), name="An Unwatched Series"), T0)
+    for index in range(2):
+        server.add_item(_series(index), T0)
+        # Named to sort after every series, so the two that lead are both series.
+        episode = replace(
+            _episode(index), name=f"Zed {index}", series_external_id=f"series-{index}"
+        )
+        server.add_item(episode, T0)
+        server.set_watch_state(
+            SourceWatchState(external_id=episode.external_id, position_seconds=0, played=True)
+        )
+    asked: list[httpx.Request] = []
+    served: list[str] = []
+
+    def ignoring(request: httpx.Request) -> httpx.Response:
+        if "Ids" not in request.url.params:
+            return server.handle(request)
+        asked.append(request)
+        unfiltered = request.url.copy_remove_param("Ids").copy_set_param("SortBy", "SortName")
+        response = server.handle(httpx.Request(request.method, unfiltered, headers=request.headers))
+        served.extend(entry["Id"] for entry in json.loads(response.content)["Items"])
+        return response
+
+    lines: list[str] = []
+    handle = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        adapter = _on(ignoring)
+        try:
+            walked = [
+                item.external_id
+                async for page in adapter.list_unit(SEED_KEY)
+                for item in page.items
+            ]
+        finally:
+            await adapter.aclose()
+    finally:
+        logger.remove(handle)
+    assert [(request.url.params["Ids"], request.url.params["Limit"]) for request in asked] == [
+        ("series-0,series-1", "2")
+    ]
+    assert served == ["series-9", "series-0"], (
+        "the premise: the server sent a series that was not asked for"
+    )
+    assert walked == ["series-0", "episode-000", "episode-001"]
+    assert [line.rstrip("\n") for line in lines] == [
+        "Living Room Emby did not return 1 of the 2 series the seed asked for by Ids; "
+        "their episodes are seeded without them"
+    ]
 
 
 async def test_a_resumed_seed_starts_again() -> None:
@@ -6630,6 +6725,32 @@ async def test_a_resumed_seed_starts_again() -> None:
     assert [[item.external_id for item in page.items] for page in resumed] == [
         [item.external_id for item in page.items] for page in first
     ]
+
+
+async def test_a_seed_s_reads_by_ids_and_next_up_keep_the_list_label() -> None:
+    """Both are listing pages, so the request metric times them with the other pages."""
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    trace.set_tracer_provider(provider)
+    server = FakeEmbyServer()
+    _watching(server)
+    adapter, seen = _recorded(server, page_size=100)
+    try:
+        _ = [page async for page in adapter.list_unit(SEED_KEY)]
+    finally:
+        await adapter.aclose()
+    reads = [request for request in seen if request.url.path != "/Users/AuthenticateByName"]
+    assert any("Ids" in request.url.params for request in reads), "the premise: a read by Ids"
+    assert any(request.url.path == "/Shows/NextUp" for request in reads), (
+        "the premise: a NextUp read"
+    )
+    labels = [
+        span.attributes["usher.op"]
+        for span in exporter.get_finished_spans()
+        if span.name == "source.request" and span.attributes is not None
+    ]
+    assert labels == ["list"] * len(reads)
 ```
 
 In `test_every_path_this_adapter_issues_redacts_to_a_route_with_no_identifier`, after Task 13's two lines inside the `try`:
@@ -6639,6 +6760,13 @@ In `test_every_path_this_adapter_issues_redacts_to_a_route_with_no_identifier`, 
 ```
 
 and add `"/Shows/NextUp",` to the pinned set. (By then `push_watch_state` has played `movie-1`, the library's only item, so the plan holds no seed — which is why the seed is walked by name.)
+
+In Task 13's `test_a_plan_s_views_read_and_counts_carry_their_own_operation_labels`, the planning line counts the two filtered counts too:
+
+```python
+    # The source total, each watch filter's share of it, and the one library.
+    assert planning == ["views", "count", "count", "count", "count"]
+```
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_adapters_emby_adapter.py`
 Expected: FAIL — `ImportError: cannot import name 'IDS_PER_REQUEST'`.
@@ -6655,7 +6783,7 @@ SEED_KEY = "seed"
 
 `src/usher/adapters/emby/session.py` — add `"NextUp",` to `_ROUTE_WORDS`.
 
-`src/usher/adapters/emby/adapter.py` — `Sequence` joins the `collections.abc` import, `SEED_KEY` joins the `usher.adapters.emby.planning` import, and `from itertools import batched` is added. After `NOT_LIBRARIES`:
+`src/usher/adapters/emby/adapter.py` — `Sequence` joins the `collections.abc` import, `SEED_KEY` joins the `usher.adapters.emby.planning` import, `SourceItemKind` joins the `usher.ports.source` import, and `from itertools import batched` is added. After `NOT_LIBRARIES`:
 
 ```python
 # Series asked for by `Ids` in one request: a hundred ids keep the URL short.
@@ -6742,11 +6870,13 @@ After `_library_unit`:
     async def _seed(self) -> AsyncGenerator[UnitPage]:
         """What the account is watching: played, then in progress, then up next.
 
-        Each page is led by the series its episodes need that neither it nor an
-        earlier page holds, fetched by `Ids`, so every episode lands with its
-        series or after it, and only one page is ever held. Every page resumes at
-        0, so a resumed seed starts again: a count into listings that may have
-        changed since could skip an item the watch lane is about to look for.
+        Each page leads with its series: first those its episodes need that neither
+        it nor an earlier page holds, fetched by `Ids`, then its own, in the server's
+        order. So every episode comes after its series, save one whose series `Ids`
+        did not return, which `_series_for` warns of. Only one page is ever held.
+        Every page resumes at 0, so a resumed seed starts again: a count into
+        listings that may have changed since could skip an item the watch lane is
+        about to look for.
         """
         user_id = await self._session.user_id()
         listings: list[tuple[str | None, dict[str, str]]] = [
@@ -6764,26 +6894,49 @@ After `_library_unit`:
                         if item is not None and item.external_id not in yielded
                     ]
                     series = await self._series_for(fresh, yielded)
-                    page = (*series, *fresh)
+                    own = [item for item in fresh if item.kind is SourceItemKind.SERIES]
+                    rest = [item for item in fresh if item.kind is not SourceItemKind.SERIES]
+                    page = (*series, *own, *rest)
                     if page:
                         yielded.update(item.external_id for item in page)
                         yield UnitPage(page, resume_at=0)
 
     async def _series_for(self, items: Sequence[SourceItem], yielded: set[str]) -> list[SourceItem]:
-        """The series of `items`' episodes that neither they nor an earlier page hold."""
+        """The series of `items`' episodes that neither they nor an earlier page hold.
+
+        Only a series asked for is kept, whatever else comes back, and one WARNING
+        counts those asked for that did not come back.
+        """
         held = yielded | {item.external_id for item in items}
         missing = sorted(
             {item.series_external_id for item in items if item.series_external_id} - held
         )
         series: list[SourceItem] = []
-        for chunk in batched(missing, IDS_PER_REQUEST):
-            # `Limit` is the chunk's length: every id asked for comes back, and no more.
+        absent = 0
+        for chunk in batched(missing, IDS_PER_REQUEST, strict=False):
+            # `Limit` is the chunk's length, so a server that ignores `Ids` sends no
+            # more items than were asked for.
             params = {"Ids": ",".join(chunk), "Fields": ITEM_FIELDS, "Limit": str(len(chunk))}
             body = await self._page(await self._items_path(), params, 0)
             entries = body.get("Items")
             if not isinstance(entries, list):
                 raise PortDataMalformed("Emby's series listing carried no Items array")
-            series.extend(item for item in map(to_source_item, entries) if item is not None)
+            # Each series asked for is kept once; `asked` ends holding those that did not
+            # come back.
+            asked = set(chunk)
+            for item in map(to_source_item, entries):
+                if item is not None and item.external_id in asked:
+                    asked.discard(item.external_id)
+                    series.append(item)
+            absent += len(asked)
+        if absent:
+            logger.warning(
+                "{source} did not return {absent} of the {count} series the seed asked for "
+                "by Ids; their episodes are seeded without them",
+                source=self._source.name,
+                absent=absent,
+                count=len(missing),
+            )
         return series
 ```
 
@@ -6816,24 +6969,39 @@ Task 10 found `Ids` answering with and without `Recursive=true`, so `params` car
 - [ ] **Step 6: Run everything this task touched**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_fakes_emby_server.py tests/unit/test_adapters_emby_adapter.py tests/unit/test_adapters_emby_planning.py tests/unit/test_adapters_emby_contract.py tests/unit/test_source_adapter_contract.py`
-Expected: PASS. Task 13's planner cases still hold: each filters out the seed, or reads only `EPISODES` units, and the two new counts carry no `ParentId`.
+Expected: PASS. Task 13's planner cases still hold, the labels case with Step 4's planning line: each filters out the seed, or reads only `EPISODES` units, and the two new counts carry no `ParentId`.
 
 - [ ] **Step 7: Plant and verify**
 
-1. `seed = (SEED_UNIT,)` unconditionally. Expect both parametrisations of `test_a_filter_the_server_ignores_leaves_the_plan_without_a_seed` to fail.
+1. `seed = (SEED_UNIT,)` unconditionally, and the `watched` binding with it (ruff F841 kills the plant that keeps it). Expect the `IsPlayed` and `IsResumable` parametrisations of `test_a_filter_the_server_ignores_leaves_the_plan_without_a_seed` to fail, on `<WalkStage.SEED: 'seed'> != <WalkStage.TITLES: 'titles'>`, and its `None` control to pass.
 2. `all(count < total for count in watched[:1])`. Expect only the `IsResumable` parametrisation to fail.
 3. Append the seed after the library units (`units.extend(seed)` at the end, `units: list[WalkUnit] = []` at the start). Expect `test_a_plan_starts_with_the_seed_and_so_does_its_fallback` to fail on `plan.units[0] == SEED_UNIT`.
-4. `WalkPlan((whole,), …)` in the fallback. Expect the same case to fail on its premise line.
-5. `series: list[SourceItem] = []; return series` at the top of `_series_for`. Expect `test_the_seed_holds_what_the_account_watched_and_watches_next_each_series_first` to fail on the sorted ids (`series-0` and `series-1` missing).
-6. `held = yielded` in `_series_for`. Expect `test_the_seed_asks_only_for_series_no_page_held_a_hundred_at_a_time` to fail first on `[2, 100] == [1, 100]`, the sizes line ahead of the asked set: `series-done` is asked for too, so the second chunk holds two.
-7. `batched(missing, len(missing) or 1)`. Expect the same case to fail on `[101] == [1, 100]`.
-8. Drop the `item.external_id not in yielded` filter. Expect the watched case to fail on the sorted ids (`movie-3` twice).
-9. Drop the `listings.append(...)` line. Expect the watched case to fail (`next-0` and `series-1` missing).
-10. `page = (*fresh, *series)`. Expect the watched case to fail on `episode-000 came before its series`.
+4. `WalkPlan((whole,), …)` in the fallback. Expect the same case to fail on the same line: both premises leave the seed out, so a seed gone missing fails the loop.
+5. `return []` at the top of `_series_for`, below its docstring (mypy's no-redef kills the plant that declares `series` a second time). Expect four cases to fail: the watched case on its sorted ids (`series-0` and `series-1` missing), `test_the_seed_asks_only_for_series_no_page_held_a_hundred_at_a_time` on `[] == [1, 100]`, `test_a_server_ignoring_ids_seeds_only_the_series_asked_for_and_warns` on its `(Ids, Limit)` line, and `test_a_seed_s_reads_by_ids_and_next_up_keep_the_list_label` on `the premise: a read by Ids`.
+6. `held = yielded` in `_series_for`. Expect the hundred-series case to fail first on `[2, 100] == [1, 100]`, the sizes line ahead of the asked set: `series-done` is asked for too, so the second chunk holds two. The watched case fails with it, on `series-2` twice: a page's own series is asked for as well.
+7. `batched(missing, len(missing) or 1, strict=False)`. Expect the hundred-series case to fail on `[101] == [1, 100]`.
+8. Drop the `item.external_id not in yielded` filter. Expect the watched case to fail on the sorted ids (`movie-3` twice), after its `movie-3` premise holds.
+9. Drop the `listings.append(...)` line, and the `user_id` read with it (ruff F841). Expect four cases to fail: the watched case (`next-0` and `series-1` missing), the resumed case on `the premise: three listings, a page each`, the redaction case (`/Shows/NextUp` absent) and the seed's labels case on `the premise: a NextUp read`.
+10. `page = (*own, *rest, *series)`. Expect the watched case to fail on `episode-000 came before its series`, and the `Ids`-ignoring case on `'episode-000' != 'series-0'`.
 11. Make the seed honour `start_index` by skipping that many items. Expect `test_a_resumed_seed_starts_again` to fail.
 12. Remove `"NextUp"` from `_ROUTE_WORDS`. Expect the redaction case to fail on `/Shows/{id}`.
-13. In the fake, drop the `ids` check. Expect `test_ids_lists_only_the_named_items` to fail.
+13. In the fake, drop the `ids` check, and the line that reads `ids` with it (ruff F841). Expect `test_ids_lists_only_the_named_items` to fail on `['m0', 'm1', 'm2'] == ['m0', 'm2']`, and the watched, hundred-series and resumed cases with it.
 14. In the fake, drop the `UserId` check. Expect `test_next_up_refuses_a_request_that_names_no_user` to fail with `DID NOT RAISE`.
+15. `count <= total` in the seed's condition. Expect the `IsPlayed` and `IsResumable` parametrisations to fail: the case stands on the threshold, a filter that narrows nothing.
+16. `"Limit": str(self._page_size)` in `_series_for`. Expect the `Ids`-ignoring case to fail on its `(Ids, Limit)` line, and the hundred-series case on `a read by Ids asks for no more items than its own ids`.
+17. `if item is not None:` in place of `_series_for`'s asked-for test. Expect the `Ids`-ignoring case to fail on its walked ids, `'series-9' != 'series-0'`.
+18. `if absent > 1:` in place of `if absent:`. Expect the same case to fail on its WARNING list.
+19. `page = (*series, *fresh)`, dropping `own`, `rest` and the `SourceItemKind` import (ruff F401 kills the plant that keeps the import). Expect the watched case to fail on `episode-003 came before its series`.
+20. `sum(held) <= total` in the fallback's condition. Expect seven cases to fail: the fallback case on its first premise, `the premise: the first plan walked the library`, the `IsPlayed` and `IsResumable` parametrisations, and four of Task 13's planner cases, whose libraries hold exactly the total.
+21. `all(count > total for count in watched)`. Expect the `None` control to fail on `the premise: a server honouring both filters gets a seed`, and the fallback case on `plan.units[0] == SEED_UNIT`.
+22. In the fake, `IsResumable` passes only items that are not played. Expect the watched case to fail on `the premise: both listings carry movie-3`.
+23. `op="series"` on `_series_for`'s read. Expect the seed's labels case to fail on its labels list.
+24. In `_read`, label a NextUp read `"next_up"`. Expect the same case to fail on `'next_up' != 'list'`.
+25. In `_watching`, `replace(_series(index), name=f"A Series {index}")`, so every series sorts first. Expect the watched case to fail on `the premise: the server lists series-2 after its own episode`.
+26. `item.kind is SourceItemKind.SERIES` in place of `_series_for`'s asked-for test. Expect the `Ids`-ignoring case to fail on its walked ids, `'series-9' != 'series-0'`.
+27. `"Limit": str(len(missing))`. Expect the hundred-series case to fail on `a read by Ids asks for no more items than its own ids`, with `['101', '101'] == ['100', '1']`.
+28. `"Limit": str(len(items))`. Expect the same line to fail, with `['103', '103']`.
+29. `SEED_UNIT` staged `WalkStage.TITLES`. Expect the fallback case to fail on its loop's `count(WalkStage.SEED) == 1`, its premises and the `None` control holding, and four more with it: three of Task 13's planner cases, on a `TITLES` unit keyed `seed`, and the contract's resume case.
 
 - [ ] **Step 8: Commit**
 
@@ -7466,7 +7634,7 @@ USHER_SYNC_WALKERS=4
     group: 'ingest',
     def: '4',
     about:
-      'The most listing requests one walk has in flight to a source. A failure that is asked again drops it to one, and each ten pages that succeed raise it a step, back to this. 1 is one request at a time. Against a real Emby at the default gate, four walkers read <p4> pages/s and two read <p2>.',
+      'The most listing requests one walk has in flight to a source. A failure that is asked again drops it to one, and each ten pages that succeed raise it a step, back to this. 1 is one request at a time. Against a real Emby at the default gate, four walkers read 0.37 pages/s and two read 0.34.',
     secret: false,
     measured: true,
   },
@@ -8642,7 +8810,7 @@ USHER_SYNC_WALKERS=4
 USHER_SYNC_UNIT_MAX_ITEMS=100000
 ```
 
-`web/src/features/operator/Config.settings.ts` — `USHER_SYNC_BATCH_SIZE`'s `about` becomes `'Items per committed batch during a sync walk. A whole-library walk commits whole pages, so its batches can run past this by less than a page.'`. `USHER_SYNC_WALKERS`'s `about` replaces its first three sentences with `How many units a whole-library walk fetches at once, and the most listing requests it has in flight to a source. A failure that is asked again drops the requests to one, and each ten pages that succeed raise them a step, back to this. 1 is one request at a time.`, keeping Task 15's closing sentence of readings. After that entry, with `<head>`, `<middle>` and `<deep>` from the fixtures README's "Pages inside one library" row (Task 10):
+`web/src/features/operator/Config.settings.ts` — `USHER_SYNC_BATCH_SIZE`'s `about` becomes `'Items per committed batch during a sync walk. A whole-library walk commits whole pages, so its batches can run past this by less than a page.'`. `USHER_SYNC_WALKERS`'s `about` replaces its first three sentences with `How many units a whole-library walk fetches at once, and the most listing requests it has in flight to a source. A failure that is asked again drops the requests to one, and each ten pages that succeed raise them a step, back to this. 1 is one request at a time.`, keeping Task 15's closing sentence of readings. After that entry, with the readings from the fixtures README's "Pages inside one library" row (Task 10):
 
 ```ts
   {
@@ -8650,7 +8818,7 @@ USHER_SYNC_UNIT_MAX_ITEMS=100000
     group: 'ingest',
     def: '100000',
     about:
-      'A whole-library walk reads a library’s episodes in chunks of this many items, several at once. Against a real Emby, a 1,000-item page inside a library took <head> s at its head, <middle> s in the middle and <deep> s at the deep end.',
+      'A whole-library walk reads a library’s episodes in chunks of this many items, several at once. Against a real Emby, a 1,000-item page inside a library took 2.3 s at its head, 3.7 s in the middle and 4.0 s at the deep end.',
     secret: false,
     measured: true,
   },
