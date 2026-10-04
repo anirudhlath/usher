@@ -817,10 +817,13 @@ async def test_the_fake_forgets_an_item_out_of_every_library_it_was_placed_in() 
 
 
 async def test_the_fake_s_own_whole_library_unit_resumes_from_its_start_index() -> None:
-    """The fake's override of the port default, called on the fake itself."""
+    """The fake's override of the port default, called on the fake itself, in its own pages."""
     adapter = _fake()
-    _seed(adapter, "m0", "m1", "m2")
-    assert await _read(adapter.list_unit(DEFAULT_UNIT_KEY, start_index=1)) == [(["m1", "m2"], 3)]
+    _seed(adapter, "m0", "m1", "m2", "m3")
+    assert await _read(adapter.list_unit(DEFAULT_UNIT_KEY, start_index=1)) == [
+        (["m1", "m2"], 3),
+        (["m3"], 4),
+    ]
 
 
 async def test_the_fake_refuses_a_library_it_was_never_given() -> None:
