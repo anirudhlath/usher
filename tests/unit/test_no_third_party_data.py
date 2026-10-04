@@ -57,6 +57,10 @@ _ID_KEYS = frozenset(
         "Etag",
         "Guid",
         "PresentationUniqueKey",
+        # And the push fixtures, three more: a user id is never committed.
+        "UserId",
+        "DeviceId",
+        "MessageId",
     }
 )
 

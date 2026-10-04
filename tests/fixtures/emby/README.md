@@ -119,9 +119,9 @@ The rows from `/Users/{id}/Views` on were recorded on 2026-10-04 by Phase
 2's probe, a second read-only script outside the repository, which printed
 counts, seconds, booleans, type names, and one view's keys with their
 types, never an id, a name or a token. The recorded account's NextUp was
-empty, so the `Ids` row comes from a three-request follow-up that took its
-series from a listing. The one shape kept is `view_item.json`, every value
-in it invented.
+empty, so the `Ids` row comes from a follow-up that took its series from a
+listing: a sign-in and three requests. The one shape kept is
+`view_item.json`, every value in it invented.
 
 | Behaviour | What the server does | What depends on it |
 |---|---|---|
