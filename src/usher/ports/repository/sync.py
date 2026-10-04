@@ -28,7 +28,7 @@ class SyncRunRepository(ABC):
 
     `latest_incomplete_run` is the one affordance that reads against that
     grain, and only for `WATCH_STATE`: it hands a walk back its own unfinished
-    row so the next attempt continues it in place.
+    row, which the next attempt continues in place when the walk is a delta.
     """
 
     @abstractmethod

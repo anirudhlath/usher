@@ -29,6 +29,10 @@ _backfilled = _meter.create_counter(
     "usher.watch_state.backfilled", unit="1", description="Play histories recovered by a backfill"
 )
 
+# What a superseded first walk's row says. A constant, so a test and an operator
+# grepping `sync_runs.error` read the same words.
+SUPERSEDED_ERROR = "superseded: a first watch walk restarts"
+
 
 @dataclass(frozen=True, slots=True)
 class MergedState:
@@ -153,11 +157,14 @@ class WatchStateSyncService:
             # keeps the instant the logical walk began while the merges carry the
             # instant this attempt began.
             attempt_started = datetime.now(UTC)
-            # The newest incomplete run is resumed in place: its id, its `cursor_at`
+            # The newest incomplete delta is resumed in place: its id, its `cursor_at`
             # and -- load-bearing -- its `started_at`, so that when the walk finally
             # completes, `latest_completed_cursor` reads an instant covering
             # everything saved since the logical walk *began*.
             incomplete = await self._runs.latest_incomplete_run(source.id, SyncRunKind.WATCH_STATE)
+            if incomplete is not None and incomplete.cursor_at is None:
+                await self._supersede(incomplete, attempt_started)
+                incomplete = None
             if incomplete is None:
                 cursor = await self._runs.latest_completed_cursor(
                     source.id, SyncRunKind.WATCH_STATE
@@ -282,6 +289,19 @@ class WatchStateSyncService:
                 await self._commit()
                 recovered += 1
         return recovered
+
+    async def _supersede(self, run: SyncRun, now: AwareDatetime) -> None:
+        """Close an unfinished first walk instead of resuming it.
+
+        A first walk is a few hundred states, so its position means nothing to the
+        next one, and an old-style walk's 300,000 would skip its whole played
+        listing. `save` only ever raises `position`, so the row is closed rather
+        than reset. One already `FAILED` is closed already, and keeps its own error.
+        """
+        if run.status is SyncRunStatus.RUNNING:
+            await self._runs.save(
+                run.evolve(status=SyncRunStatus.FAILED, error=SUPERSEDED_ERROR, finished_at=now)
+            )
 
     async def _walk(
         self,

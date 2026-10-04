@@ -24,7 +24,6 @@ websocket, and `WatchWriteService` the client's own writes back out.
 uv run pytest tests/unit/test_adapters_emby_contract.py \
   tests/unit/test_services_{push,watch_write}.py         # the contract suite
 uv run pytest tests/integration/test_services_{ingest,reconcile,push,watch_sync}.py
-uv run usher sync --source "Living Room Emby"   # items, then watch state
 uv run python scripts/measure_ingest.py --items 50000   # NOT a test; real database
 ```
 
@@ -124,9 +123,10 @@ records `COMPLETED`, so everything it never reached is skipped by every later
 delta, permanently.
 ⚠️ **And that guard reads the item lane's cursor only, while `_close_gap` also
 runs `watch.sync(...)`** (#41): a source with completed delta runs and no
-completed `watch_state` run passes it and runs the watch lane's first walk —
-two filtered listings (`IsPlayed`, then `IsResumable`, which overlap) — and
-**neither log line names it**.
+completed `watch_state` run passes it and runs the watch lane's first walk, two
+filtered listings (`FIRST_WALK_FILTERS`), and **neither log line names it**.
+An unfinished first walk is superseded, never resumed (`SUPERSEDED_ERROR`):
+`save` only raises `position`, so its row cannot be reset.
 
 ## The match ladder
 

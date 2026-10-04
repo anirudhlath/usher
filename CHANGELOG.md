@@ -26,6 +26,10 @@ Versioning is `0.x` while the wire contract may still move —
 - **A source's first watch-state walk asks only for what was watched.** It lists
   played items, then in-progress ones: a few requests, where it used to walk the
   whole library, which on a million-item library took most of a day.
+- **An unfinished first watch-state walk starts again rather than resuming.**
+  Its position counted the old whole-library walk, so resuming it would skip
+  every played item that is not also in progress; its row is closed `failed`
+  as superseded.
 - **`USHER_PUSH_STALE_AFTER_SECONDS` defaults to 300, up from 90.** An idle
   library's push channel routinely went longer than 90 s between messages, and
   every such gap cost a reconnect. `usher push --probe` listens for one window,

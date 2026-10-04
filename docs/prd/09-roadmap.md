@@ -45,9 +45,8 @@ Known open issues that no milestone owns.
   owed, and the crash itself has no ticket.
 - **The suggest evaluation's three `fuzzy recall_at_5` bars stay pending**,
   blocked on the ordering defect in [05](05-search-and-similarity.md).
-- **The watch-state walk has never been run to completion.** The lane is
-  resumable, nothing schedules one, and the first walk is the operator's step
-  ([03](03-sources-and-sync.md)).
+- **The watch-state walk has never been run to completion.** Nothing schedules
+  one, and the first walk is the operator's step ([03](03-sources-and-sync.md)).
 
 ## Post-v1 candidates
 

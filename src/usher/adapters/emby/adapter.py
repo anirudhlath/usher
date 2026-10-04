@@ -508,7 +508,8 @@ class EmbyAdapter(SourceAdapter):
                         yield state
             return
         # A resumed first walk starts its first listing at `start_index` and its
-        # second at 0, which keeps the port's promise.
+        # second at 0. `WatchStateSyncService` never resumes one -- it starts
+        # again -- so this only keeps the port's promise.
         yielded: set[str] = set()
         for number, filters in enumerate(FIRST_WALK_FILTERS):
             query = _listing_query(USER_DATA_SINCE_PARAM, None, filters=filters)
