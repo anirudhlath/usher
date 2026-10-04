@@ -3607,7 +3607,7 @@ asyncio.run(main())
 - [ ] **Step 4: Run it inside the production container and keep the raw output**
 
 ```bash
-(cd ~/code/usher-deploy && docker compose cp /var/tmp/sync-speed/facts2.py usher:/tmp/facts2.py >/dev/null 2>&1 \
+(cd ~/code/usher-deploy && docker compose cp /var/tmp/sync-speed/facts2.py usher:/tmp/facts2.py >/dev/null \
   && timeout 1200 docker compose exec -T usher python /tmp/facts2.py 2>&1 | grep -v '^{"text"') \
   | tee /var/tmp/sync-speed/facts2.out
 sha256sum /var/tmp/sync-speed/facts2.out | tee /var/tmp/sync-speed/facts2.out.sha256
@@ -3615,6 +3615,61 @@ grep -c -E '[0-9a-f]{32}' /var/tmp/sync-speed/facts2.out
 ```
 
 Expected: every section printed, and the last command prints `0` — no 32-hex identifier reached the output. If it prints anything else, delete the output file and fix the script before going on.
+
+Section 9 takes its series from NextUp, so it prints nothing when the account's NextUp is empty. Then run this follow-up, `/var/tmp/sync-speed/facts2b.py` (outside the repository; never committed), which takes three series from a listing instead and makes three requests in all:
+
+```python
+# Throwaway, read-only: facts2.py's section 9 with series taken from a listing, since the
+# account's NextUp is empty. Prints counts only -- no ids, names, tokens, user ids or hosts.
+import asyncio
+
+from usher.adapters.emby.adapter import ITEM_FIELDS
+from usher.cli import _open_adapter, _session_for, build_pipeline, selected_sources
+from usher.config import Settings
+
+
+async def main() -> None:
+    settings = Settings()
+    async with _session_for(settings) as session:
+        pipeline = build_pipeline(session, settings)
+        [source] = await selected_sources(pipeline, "Shared Emby")
+        adapter = await _open_adapter(pipeline, source)
+        s = adapter._session
+        try:
+            uid = await s.user_id()
+            items = f"/Users/{uid}/Items"
+            listed = await s.json_body("GET", items, params={
+                "Recursive": "true", "IncludeItemTypes": "Series", "Limit": "3",
+                "Fields": ITEM_FIELDS}, op="probe")
+            series = [entry["Id"] for entry in listed.get("Items", [])]
+            asked = ",".join(series)
+            await asyncio.sleep(3.0)
+            plain = await s.json_body("GET", items, params={"Ids": asked, "Fields": ITEM_FIELDS},
+                                      op="probe")
+            await asyncio.sleep(3.0)
+            deep = await s.json_body("GET", items, params={
+                "Ids": asked, "Fields": ITEM_FIELDS, "Recursive": "true",
+                "IncludeItemTypes": "Series"}, op="probe")
+            print(f"ids asked={len(series)} plain={len(plain.get('Items', []))} "
+                  f"recursive={len(deep.get('Items', []))} "
+                  f"plain_types={sorted({e.get('Type') for e in plain.get('Items', [])})}",
+                  flush=True)
+        finally:
+            await adapter.aclose()
+
+
+asyncio.run(main())
+```
+
+```bash
+(cd ~/code/usher-deploy && docker compose cp /var/tmp/sync-speed/facts2b.py usher:/tmp/facts2b.py >/dev/null \
+  && timeout 300 docker compose exec -T usher python /tmp/facts2b.py 2>&1 | grep -v '^{"text"') \
+  | tee /var/tmp/sync-speed/facts2b.out
+sha256sum /var/tmp/sync-speed/facts2b.out | tee /var/tmp/sync-speed/facts2b.out.sha256
+grep -c -E '[0-9a-f]{32}' /var/tmp/sync-speed/facts2b.out
+```
+
+Expected: one `ids asked=3 …` line, and the last command prints `0`. Step 5 reads its `Ids` verdict from it.
 
 - [ ] **Step 5: Read the verdicts, and stop where a gate says stop**
 
@@ -3652,7 +3707,9 @@ counts, seconds, booleans and type names, never an id, a name or a token.
 The one shape it kept is `view_item.json`, every value in it invented.
 ```
 
-Fill every `<…>` from `facts2.out`, and `<date>` with the day Step 4 ran, before committing — nothing in angle brackets survives this step.
+If Step 4's follow-up ran, the paragraph says so before its last sentence: ``The recorded account's NextUp was empty, so the `Ids` row comes from a three-request follow-up that took its series from a listing.``
+
+Fill every `<…>` from `facts2.out` (the `Ids` row from `facts2b.out`, if the follow-up ran), and `<date>` with the day Step 4 ran, before committing — nothing in angle brackets survives this step.
 
 In the intro paragraph, change `**Every value in these seven files is invented**` to `**Every value in these eight files is invented**`, and add a row to the file table:
 
@@ -3705,7 +3762,7 @@ git add tests/fixtures/emby/view_item.json tests/fixtures/emby/README.md tests/u
 git commit -m "emby: record the library, seed and concurrency facts the unit walk rests on"
 ```
 
-Post `facts2.out` and `measure_ingest.out`, raw and with their sha256 lines, as the first comment on PR 2 when it opens (Task 20); until then keep them under `/var/tmp/sync-speed/`.
+Post `facts2.out`, `facts2b.out` (when Step 4's follow-up ran) and `measure_ingest.out`, raw and with their sha256 lines, as the first comment on PR 2 when it opens (Task 20); until then keep them under `/var/tmp/sync-speed/`.
 
 ---
 
@@ -11405,11 +11462,11 @@ Expected: the probe raises `RuntimeError: NETWORK BLOCKED`, and the suite's firs
 
 - [ ] **Step 4: Status cells**
 
-Task 9's row first. Its item walk on production, Task 9 Step 4, has to have run by now. If it has not, it runs now, with the owner's go-ahead as that step says, and this step waits for its number. If the walk missed Task 9 Step 4's pass line, stop: post its numbers on PR 1 and open no PR, because Task 9 Step 5 says Phase 2's targets assume Phase 1's. Otherwise, in `docs/plans/progress.md`, this plan's table, the Task 9 row becomes `✅ passed: the first watch walk in <s> s, the item walk on production in <h> h`, with `<s>` the time its cell already carries and `<h>` the hours Task 9 Step 4's query printed.
+Task 9's row first. Its item walk on production passed on 2026-10-04 in 2.36 h against 6.00 h, so Task 10's fix round already flipped it: in `docs/plans/progress.md`, this plan's table, the Task 9 row reads `✅ passed: the first watch walk in 5 s, the item walk on production in 2.36 h`. Check that it still does.
 
 The Tasks 10–20 row → `🔨 in review (PR #<n>)` until the PR merges. Task 21 flips it to `✅ landed (PR #<n>)`.
 
-`docs/prd/README.md` holds one row for this plan, and says both in its one cell: `🔨 Phase 1 landed (PR #<p1>) and passed: its first watch walk in <s> s, its item walk on production in <h> h. Phase 2 in review (PR #<n>)`, with `<p1>` the number the cell already carries.
+`docs/prd/README.md` holds one row for this plan, and says both in its one cell: `🔨 Phase 1 landed (PR #94) and passed: its first watch walk in 5 s, its item walk on production in 2.36 h. Phase 2 in review (PR #<n>)`. Task 10's fix round wrote everything before `Phase 2`, so only `in progress` changes, to `in review (PR #<n>)`.
 
 - [ ] **Step 5: Push and open the PR**
 
@@ -11433,15 +11490,15 @@ The body ends with:
 
 - [ ] **Step 6: Post Task 10's raw output as the PR's first comment**
 
-Both files were written before any Phase 2 code existed. Check them again before they go anywhere public:
+All three files were written before any Phase 2 code existed. Check them again before they go anywhere public:
 
 ```bash
-grep -c -E '[0-9a-f]{32}' /var/tmp/sync-speed/facts2.out /var/tmp/sync-speed/measure_ingest.out
-grep -n -E 'https?://|([0-9]{1,3}\.){3}[0-9]{1,3}' /var/tmp/sync-speed/facts2.out /var/tmp/sync-speed/measure_ingest.out
-sha256sum -c /var/tmp/sync-speed/facts2.out.sha256 /var/tmp/sync-speed/measure_ingest.out.sha256
+grep -c -E '[0-9a-f]{32}' /var/tmp/sync-speed/facts2.out /var/tmp/sync-speed/facts2b.out /var/tmp/sync-speed/measure_ingest.out
+grep -n -E 'https?://|([0-9]{1,3}\.){3}[0-9]{1,3}' /var/tmp/sync-speed/facts2.out /var/tmp/sync-speed/facts2b.out /var/tmp/sync-speed/measure_ingest.out
+sha256sum -c /var/tmp/sync-speed/facts2.out.sha256 /var/tmp/sync-speed/facts2b.out.sha256 /var/tmp/sync-speed/measure_ingest.out.sha256
 ```
 
-Expected: both counts are `0`, the second command prints nothing, and both checksums read `OK`: Task 10 saved each when it wrote the file, and a checksum taken now would attest nothing. If any of these fails, post nothing: fix the output (or the script) and say why on the PR.
+Expected: every count is `0`, the second command prints nothing, and every checksum reads `OK`: Task 10 saved each when it wrote the file, and a checksum taken now would attest nothing. If any of these fails, post nothing: fix the output (or the script) and say why on the PR.
 
 Then post one comment, each file raw in its own fence followed by its `sha256sum` line:
 
@@ -11449,7 +11506,7 @@ Then post one comment, each file raw in its own fence followed by its `sha256sum
 gh pr comment <n> --repo anirudhlath/usher --body-file /var/tmp/sync-speed/pr2-facts-comment.md
 ```
 
-where `/var/tmp/sync-speed/pr2-facts-comment.md` holds the two fences and two sha lines, and nothing else.
+where `/var/tmp/sync-speed/pr2-facts-comment.md` holds the three fences and three sha lines, and nothing else.
 
 - [ ] **Step 7: Commit the status cells, and ask**
 
