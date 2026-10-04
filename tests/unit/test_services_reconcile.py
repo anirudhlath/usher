@@ -3,7 +3,7 @@
 import asyncio
 import contextlib
 import uuid
-from collections.abc import AsyncGenerator, Iterator
+from collections.abc import AsyncGenerator, Callable, Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from itertools import groupby, pairwise
 
@@ -28,7 +28,14 @@ from usher.adapters.emby.adapter import EmbyAdapter
 from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
 from usher.domain.source import Source
-from usher.domain.sync import SyncRunKind, SyncRunStatus, SyncRunUnitStatus, WalkStage
+from usher.domain.sync import (
+    SyncRun,
+    SyncRunKind,
+    SyncRunStatus,
+    SyncRunUnit,
+    SyncRunUnitStatus,
+    WalkStage,
+)
 from usher.ports.credentials import SourceCredentials
 from usher.ports.errors import PortDataMalformed, PortUnavailable, UsherPortError
 from usher.ports.events import ClientEventKind
@@ -39,6 +46,7 @@ from usher.services.reconcile import (
     CEILING_ERROR_CODE,
     RETRACTION_ERROR_CODE,
     ReconcileService,
+    WalkRefused,
     _recorded_failure,
 )
 
@@ -78,6 +86,7 @@ class _Fixture:
         max_retract_fraction: float = 0.25,
         walkers: int = 4,
         heartbeat_seconds: float = 60.0,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.source = Source(
             kind=SourceKind.EMBY,
@@ -119,7 +128,7 @@ class _Fixture:
             max_retract_fraction=max_retract_fraction,
             walkers=walkers,
             heartbeat_seconds=heartbeat_seconds,
-            clock=_Ticks(),
+            clock=clock if clock is not None else _Ticks(),
         )
 
     async def _commit(self) -> None:
@@ -1431,3 +1440,266 @@ def test_a_service_whose_heartbeat_is_not_positive_is_refused(heartbeat_seconds:
     """Its beat would always be due, so the writer would beat and never read its queue."""
     with pytest.raises(ValueError, match=f"a positive period, not {heartbeat_seconds} seconds"):
         _Fixture(heartbeat_seconds=heartbeat_seconds)
+
+
+# -- an unfinished whole-library walk: resumed, refused or superseded --------
+
+NOW = datetime(2026, 10, 1, 12, tzinfo=UTC)
+
+
+class _Clock:
+    """A clock that reads whatever the case last set."""
+
+    def __init__(self, now: datetime) -> None:
+        self.now = now
+
+    def __call__(self) -> datetime:
+        return self.now
+
+
+async def _given_walk(
+    fixture: _Fixture,
+    *,
+    heartbeat_at: datetime | None,
+    status: SyncRunStatus = SyncRunStatus.RUNNING,
+    kind: SyncRunKind = SyncRunKind.FULL,
+    units: Sequence[tuple[str, SyncRunUnitStatus, int]] = (),
+    error: str | None = None,
+) -> SyncRun:
+    """An unfinished whole-library walk, as a killed or a failed attempt left it.
+
+    Each unit is `(library, status, position)`, planned in `TITLES`.
+    """
+    run = SyncRun(
+        source_id=fixture.source.id,
+        kind=kind,
+        status=status,
+        error=error,
+        heartbeat_at=heartbeat_at,
+        started_at=T0,
+    )
+    await fixture.runs.add(run)
+    if units:
+        await fixture.runs.add_units(
+            [
+                SyncRunUnit(
+                    run_id=run.id,
+                    unit_key=f"library:{library}",
+                    stage=WalkStage.TITLES,
+                    label=f"library {library}",
+                    position=position,
+                    items_seen=position,
+                    status=unit_status,
+                )
+                for library, unit_status, position in units
+            ]
+        )
+    return run
+
+
+async def test_a_failed_whole_library_walk_resumes_in_place_from_each_units_position() -> None:
+    """The same row and `started_at`, and nothing fetched or counted twice.
+
+    The first attempt leaves Films complete at 5 and Shows failed at 2. The second
+    fetches Shows' last two items only, and its sweep spares all nine rows: under a
+    fresh `started_at` it would retract the seven an earlier instant stamped, more
+    than the ceiling allows, and the run would fail.
+    """
+    fixture = _Fixture(batch_size=2, walkers=1)
+    _shelve(fixture, "Films", range(10, 15))
+    _shelve(fixture, "Shows", range(4))
+    fixture.adapter.fail_unit_after("Shows", 3)
+    first = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    assert first.status is SyncRunStatus.FAILED, "the premise: the first attempt failed"
+    fixture.adapter.clear_failure()
+    fixture.adapter.unit_starts.clear()
+
+    second = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+
+    assert (second.id, second.started_at) == (first.id, first.started_at)
+    assert second.status is SyncRunStatus.COMPLETED
+    assert (second.error, second.error_code) == (None, None)
+    assert second.items_seen == 9
+    assert second.items_retracted == 0
+    assert fixture.adapter.unit_starts == [("library:Shows", 2)]
+    units = await fixture.runs.units_for(first.id)
+    assert [(unit.unit_key, unit.status, unit.position) for unit in units] == [
+        ("library:Films", SyncRunUnitStatus.COMPLETED, 5),
+        ("library:Shows", SyncRunUnitStatus.COMPLETED, 4),
+    ]
+    assert [run.id for run in await fixture.runs.list_for_source(fixture.source.id)] == [first.id]
+
+
+@pytest.mark.parametrize(
+    ("age", "refused"),
+    [(timedelta(minutes=10) - timedelta(seconds=1), True), (timedelta(minutes=10), False)],
+)
+async def test_a_running_walk_is_refused_until_its_heartbeat_is_ten_minutes_old(
+    age: timedelta, refused: bool
+) -> None:
+    """A killed walk's row still says `running`; only its heartbeat tells it from a live one."""
+    fixture = _Fixture(clock=_Clock(NOW))
+    _shelve(fixture, "Films", range(3))
+    walking = await _given_walk(
+        fixture, heartbeat_at=NOW - age, units=[("Films", SyncRunUnitStatus.RUNNING, 2)]
+    )
+    if refused:
+        with pytest.raises(
+            WalkRefused, match="a whole-library walk of Living Room Emby is already running"
+        ):
+            await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+        assert fixture.journal == [], "a refused walk asked the source for something"
+        assert await fixture.runs.get(walking.id) == walking, "a refused walk wrote the live row"
+        assert len(await fixture.runs.list_for_source(fixture.source.id)) == 1
+        return
+    run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    assert (run.id, run.status) == (walking.id, SyncRunStatus.COMPLETED)
+    assert fixture.checkpoints[0] == (0, NOW), "the claim's commit kept the dead walk's heartbeat"
+    assert fixture.adapter.unit_starts == [("library:Films", 2)]
+
+
+async def test_a_failed_walk_resumes_however_fresh_its_heartbeat() -> None:
+    """A `failed` row recorded its own end, so its heartbeat says nothing about a live walk."""
+    fixture = _Fixture(clock=_Clock(NOW))
+    _shelve(fixture, "Films", range(3))
+    failed = await _given_walk(
+        fixture,
+        heartbeat_at=NOW,
+        status=SyncRunStatus.FAILED,
+        error="GET /Users/{user_id}/Items returned HTTP 502",
+        units=[("Films", SyncRunUnitStatus.FAILED, 2)],
+    )
+    run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    assert (run.id, run.status, run.error) == (failed.id, SyncRunStatus.COMPLETED, None)
+
+
+async def test_a_walk_killed_while_planning_is_superseded_once_its_heartbeat_is_stale() -> None:
+    """Its run and heartbeat were committed and its units never were.
+
+    Refused while the heartbeat is fresh, as a walk still planning must be; then closed
+    and replaced, because a run with no plan has nothing to resume.
+    """
+    clock = _Clock(NOW)
+    fixture = _Fixture(clock=clock)
+    _shelve(fixture, "Films", range(2))
+    planning = await _given_walk(fixture, heartbeat_at=NOW)
+    clock.now = NOW + timedelta(minutes=10) - timedelta(seconds=1)
+    with pytest.raises(WalkRefused):
+        await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    clock.now = NOW + timedelta(minutes=10)
+
+    run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+
+    assert run.id != planning.id
+    assert run.status is SyncRunStatus.COMPLETED
+    assert [unit.unit_key for unit in await fixture.runs.units_for(run.id)] == ["library:Films"]
+    closed = await fixture.runs.get(planning.id)
+    assert closed is not None
+    assert (closed.status, closed.error) == (
+        SyncRunStatus.FAILED,
+        "superseded: a whole-library walk restarts",
+    )
+
+
+async def test_a_full_walk_left_running_from_before_units_is_superseded() -> None:
+    """No units and no heartbeat: an older release's walk, which nothing can resume."""
+    fixture = _Fixture()
+    _shelve(fixture, "Films", range(2))
+    legacy = await _given_walk(fixture, heartbeat_at=None)
+
+    run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+
+    assert run.id != legacy.id
+    assert run.status is SyncRunStatus.COMPLETED
+    closed = await fixture.runs.get(legacy.id)
+    assert closed is not None
+    assert (closed.status, closed.error, closed.error_code) == (
+        SyncRunStatus.FAILED,
+        "superseded: a whole-library walk restarts",
+        None,
+    )
+    assert closed.finished_at is not None
+
+
+async def test_a_superseded_walk_that_had_already_failed_keeps_its_own_error() -> None:
+    """Closed already, so it is not relabelled: its error says why that walk failed."""
+    fixture = _Fixture()
+    _shelve(fixture, "Films", range(2))
+    failed = await _given_walk(
+        fixture,
+        heartbeat_at=None,
+        status=SyncRunStatus.FAILED,
+        error="GET /Users/{user_id}/Items returned HTTP 502",
+    )
+    run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    assert run.id != failed.id
+    assert await fixture.runs.get(failed.id) == failed
+
+
+async def test_an_unfinished_delta_with_no_plan_is_left_alone() -> None:
+    """A single walk's row: a whole-library walk neither resumes nor closes it."""
+    fixture = _Fixture()
+    _shelve(fixture, "Films", range(2))
+    delta = await _given_walk(fixture, heartbeat_at=None, kind=SyncRunKind.DELTA)
+    run = await fixture.service.reconcile(fixture.source, SyncRunKind.DELTA, fixture.adapter)
+    assert run.id != delta.id
+    assert [unit.unit_key for unit in await fixture.runs.units_for(run.id)] == ["library:Films"], (
+        "the premise: a cursorless delta walks the plan"
+    )
+    assert await fixture.runs.get(delta.id) == delta
+
+
+async def test_a_walk_whose_sweep_was_refused_walks_again_rather_than_resuming() -> None:
+    """Four rows the walk never saw are two thirds of the source, so the sweep refuses.
+
+    Every unit completed, so a resume would re-run the sweep on what that walk saw.
+    """
+    fixture = _Fixture()
+    _shelve(fixture, "Films", range(2))
+    await fixture.ingest.ingest_batch(
+        fixture.source.id, [_item(f"m9{index}") for index in range(4)], observed_at=T0
+    )
+    refused = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    assert refused.error_code == RETRACTION_ERROR_CODE, "the premise: the sweep refused"
+    fixture.journal.clear()
+
+    run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+
+    assert run.id != refused.id
+    fetched = [key for event, key in fixture.journal if event == "fetched"]
+    assert fetched == ["library:Films"] * 2, "the library was not read again"
+    assert await fixture.runs.get(refused.id) == refused
+
+
+async def test_a_resumed_unit_that_yields_nothing_completes() -> None:
+    """A unit whose committed position is already its end: one empty walk, then complete."""
+    fixture = _Fixture()
+    _shelve(fixture, "Films", range(3))
+    failed = await _given_walk(
+        fixture,
+        heartbeat_at=None,
+        status=SyncRunStatus.FAILED,
+        units=[("Films", SyncRunUnitStatus.RUNNING, 3)],
+    )
+    run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    assert (run.id, run.status, run.items_seen) == (failed.id, SyncRunStatus.COMPLETED, 0)
+    assert fixture.adapter.unit_starts == [("library:Films", 3)]
+    [unit] = await fixture.runs.units_for(run.id)
+    assert (unit.status, unit.position) == (SyncRunUnitStatus.COMPLETED, 3)
+
+
+async def test_a_cursored_delta_walks_beside_a_live_whole_library_walk() -> None:
+    """Only a whole-library walk claims; a delta with a cursor never waits on one."""
+    fixture = _Fixture(clock=_Clock(NOW))
+    _shelve(fixture, "Films", range(2))
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    live = await _given_walk(
+        fixture,
+        heartbeat_at=NOW,
+        kind=SyncRunKind.DELTA,
+        units=[("Films", SyncRunUnitStatus.RUNNING, 1)],
+    )
+    delta = await fixture.service.reconcile(fixture.source, SyncRunKind.DELTA, fixture.adapter)
+    assert delta.cursor_at is not None, "the premise: the full walk gave the delta its cursor"
+    assert delta.status is SyncRunStatus.COMPLETED
+    assert await fixture.runs.get(live.id) == live

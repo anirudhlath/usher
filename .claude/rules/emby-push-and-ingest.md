@@ -125,8 +125,10 @@ delta, permanently.
 runs `watch.sync(...)`** (#41): a source with completed delta runs and no
 completed `watch_state` run passes it and runs the watch lane's first walk, two
 filtered listings (`FIRST_WALK_FILTERS`), and **neither log line names it**.
-An unfinished first walk is superseded, never resumed (`SUPERSEDED_ERROR`):
-`save` only raises `position`, so its row cannot be reset.
+An unfinished first walk is superseded, never resumed
+(`watch_sync.SUPERSEDED_ERROR`): `save` only raises `position`, so its row
+cannot be reset. A watch run whose heartbeat is under `STALE_AFTER` old is
+alive, first walk or delta, and is left alone: the next run walks beside it.
 
 ## The match ladder
 
@@ -143,8 +145,7 @@ job is enqueued at `BACKFILL` for that remote search.
   job**, and `IngestService` attaches it as `MatchMethod.SERIES_PARENT`.
 - **Tier 4 is not the fallback its position suggests** — name+year out-resolves
   the `tmdb_id` tier on a real library, most catalog titles carrying no
-  `tmdb_id`. A probe with **no** year resolves nothing at all: the year
-  `BETWEEN` propagates `NULL`, so "0.0%" there is not a bug.
+  `tmdb_id`.
 - **A malformed `ProviderIds.Imdb` is real** (bare digits, no `tt`), and
   **`_as_imdb` is the guard, not `_usable_ids`**: removing the latter's filtering
   raises nothing, while dropping `_as_imdb`'s pattern check raises a
@@ -183,6 +184,8 @@ job is enqueued at `BACKFILL` for that remote search.
   instant is later than `run.started_at`, so the sweep still spares everything and
   no retraction test fails; what breaks is the column's meaning. **Assert
   `stored.last_seen_at == run.started_at`.**
+- **A resumed whole-library walk keeps its run's `started_at`**: every item an
+  earlier attempt saw carries that instant, and a fresh one retracts them all.
 - **An episode's `MediaItem` carries two ids and its `WatchState` may carry one**
   (`num_nonnulls(title_id, episode_id) = 1`), so `_watch_target` collapses the
   pair with the episode winning: passing both raises `PortDataMalformed` and
@@ -191,8 +194,7 @@ job is enqueued at `BACKFILL` for that remote search.
 - **A history backfill must carry its own fresh `observed_at`, and both test
   layers are blind to why.** The trigger stamps the *write* instant, so a backfill
   carrying the walk's instant is refused by the row it exists to repair; the fake
-  accepts what Postgres refuses and `now()` is frozen per transaction, so the
-  integration suite stages it with `clock_timestamp()` in a raw `INSERT`.
+  accepts what Postgres refuses and `now()` is frozen per transaction.
   **Skipping `resolve_seasons`/`resolve_episodes`** is the same shape: unit cases
   stay green — a dict has no foreign keys — and the FK fails on walk two.
 

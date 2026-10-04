@@ -83,7 +83,7 @@ from usher.services.curation_validate import DropReason
 from usher.services.genres import GenreNormalisationService
 from usher.services.home import ComposeReport, HomeService
 from usher.services.jobs import JobWorker, WorkerLoop
-from usher.services.reconcile import RETRACTION_ERROR_CODE
+from usher.services.reconcile import RETRACTION_ERROR_CODE, WalkRefused
 from usher.services.restore import RestoreRefused, RestoreReport, RestoreService
 from usher.services.rotation import RotationReport, RotationService
 from usher.services.rows import ROW_PROVIDERS, enabled_row_providers, row_provider_settings
@@ -310,6 +310,7 @@ async def _sync(
         user_id = await ensure_default_user(session)
         await session.commit()
         failed: list[SyncRun] = []
+        refused: list[str] = []
         for source in sources:
             adapter = await _open_adapter(pipeline, source)
             if adapter is None:
@@ -334,19 +335,23 @@ async def _sync(
                     + (f" error={watch.error}" if watch.error else "")
                 )
                 failed.extend(one for one in (run, watch) if one.status is SyncRunStatus.FAILED)
+            except WalkRefused as exc:
+                # Another process is walking this source, and runs its watch lane after.
+                print(f"{source.name}: refused: {exc}")
+                refused.append(source.name)
             finally:
                 await adapter.aclose()
-        if failed:
-            raise SystemExit(_sync_failed(failed))
+        if failed or refused:
+            raise SystemExit(_sync_failed(failed, refused))
 
 
-def _sync_failed(runs: Sequence[SyncRun]) -> str:
-    """The exit line for a sync in which at least one run recorded `FAILED`.
+def _sync_failed(runs: Sequence[SyncRun], refused: Sequence[str] = ()) -> str:
+    """The exit line for a sync in which a run recorded `FAILED` or a walk was refused.
 
     The per-run detail is already on stdout above -- including each `error`,
     which for a refusal is the two numbers and the ceiling. This says *which*
     lanes failed and stops the command claiming success, rather than repeating
-    what was printed a line earlier.
+    what was printed a line earlier. A refused walk is another process's, still alive.
 
     **`--allow-full-retraction` is named only when a refusal is among them**,
     and that is the whole reason `RETRACTION_ERROR_CODE` exists. It is the one
@@ -356,14 +361,22 @@ def _sync_failed(runs: Sequence[SyncRun]) -> str:
     English, because that sentence is built from three numbers in
     `ports/ingest.py` and is a standing candidate for rewording.
     """
-    lanes = ", ".join(f"{one.kind.value}" for one in runs)
-    line = f"{len(runs)} sync run(s) failed: {lanes}; see the lines above and `usher sync-status`"
+    lines: list[str] = []
+    if runs:
+        lanes = ", ".join(f"{one.kind.value}" for one in runs)
+        lines.append(
+            f"{len(runs)} sync run(s) failed: {lanes}; see the lines above and `usher sync-status`"
+        )
+    if refused:
+        lines.append(
+            f"refused for {', '.join(refused)}: a whole-library walk of each is already running"
+        )
     if any(one.error_code == RETRACTION_ERROR_CODE for one in runs):
-        line += (
-            "\nthe availability sweep refused: if the removal was intended, "
+        lines.append(
+            "the availability sweep refused: if the removal was intended, "
             "re-run with `usher sync --allow-full-retraction`"
         )
-    return line
+    return "\n".join(lines)
 
 
 async def _sync_status(settings: Settings) -> None:

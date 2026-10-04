@@ -18,6 +18,7 @@ from usher.ports.ingest import MediaItemTarget, WatchStateMerge
 from usher.ports.jobs import JobQueue, JobRequest
 from usher.ports.repository import MediaItemRepository, SyncRunRepository, WatchStateRepository
 from usher.ports.source import SourceAdapter, SourceWatchState
+from usher.services.reconcile import STALE_AFTER
 from usher.telemetry import current_traceparent
 
 _tracer = trace.get_tracer("usher.watch_sync")
@@ -32,6 +33,10 @@ _backfilled = _meter.create_counter(
 # What a superseded first walk's row says. A constant, so a test and an operator
 # grepping `sync_runs.error` read the same words.
 SUPERSEDED_ERROR = "superseded: a first watch walk restarts"
+
+
+def _now() -> datetime:
+    return datetime.now(UTC)
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +140,7 @@ class WatchStateSyncService:
         commit: Callable[[], Awaitable[None]],
         *,
         batch_size: int = 1_000,
+        clock: Callable[[], datetime] = _now,
     ) -> None:
         self._media_items = media_items
         self._watch_states = watch_states
@@ -142,11 +148,13 @@ class WatchStateSyncService:
         self._queue = queue
         self._commit = commit
         self._batch_size = batch_size
+        self._clock = clock
 
     async def sync(self, source: Source, adapter: SourceAdapter, *, user_id: uuid.UUID) -> SyncRun:
         """Walk this source's watch state into the catalog.
 
-        Never raises a `UsherPortError`.
+        A run another process is still walking is left to it, and this walk runs
+        beside it in a row of its own. Never raises a `UsherPortError`.
         """
         started = time.perf_counter()
         with _tracer.start_as_current_span("sync.watch_state") as span:
@@ -162,6 +170,17 @@ class WatchStateSyncService:
             # completes, `latest_completed_cursor` reads an instant covering
             # everything saved since the logical walk *began*.
             incomplete = await self._runs.latest_incomplete_run(source.id, SyncRunKind.WATCH_STATE)
+            if (
+                incomplete is not None
+                and incomplete.status is SyncRunStatus.RUNNING
+                and incomplete.heartbeat_at is not None
+                and self._clock() - incomplete.heartbeat_at < STALE_AFTER
+            ):
+                # Another process's walk, alive. Closing or resuming its row would write
+                # under that walk, so this one runs in a row of its own, both merging on
+                # one key under one conflict rule. A row with no heartbeat predates
+                # heartbeats, and is taken for dead.
+                incomplete = None
             if incomplete is not None and incomplete.cursor_at is None:
                 await self._supersede(incomplete, attempt_started)
                 incomplete = None
@@ -174,6 +193,7 @@ class WatchStateSyncService:
                     kind=SyncRunKind.WATCH_STATE,
                     cursor_at=cursor,
                     started_at=attempt_started,
+                    heartbeat_at=self._clock(),
                 )
                 # Committed `RUNNING` before the walk: an operator watching a
                 # long sync needs a row to watch, and a killed process must
@@ -183,7 +203,12 @@ class WatchStateSyncService:
                 cursor = incomplete.cursor_at
                 # `error` and `finished_at` cleared, so a resumed run does not read
                 # as one that already ended.
-                run = incomplete.evolve(status=SyncRunStatus.RUNNING, error=None, finished_at=None)
+                run = incomplete.evolve(
+                    status=SyncRunStatus.RUNNING,
+                    error=None,
+                    finished_at=None,
+                    heartbeat_at=self._clock(),
+                )
                 await self._runs.save(run)
             # What this attempt inherited, for the telemetry below only.
             # `_walk` reads the resume point off `progress.run` rather than
@@ -401,6 +426,7 @@ class WatchStateSyncService:
             # Committed progress, saved with the batch it describes: a crash
             # re-walks the batch in flight and nothing before it.
             position=position,
+            heartbeat_at=self._clock(),
         )
         await self._runs.save(run)
         # One commit per batch, exactly like `ReconcileService`: a crash

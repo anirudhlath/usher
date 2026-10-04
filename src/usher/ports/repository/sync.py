@@ -28,8 +28,9 @@ class SyncRunRepository(ABC):
     cleanly.
 
     `latest_incomplete_run` is the one affordance that reads against that
-    grain, and only for `WATCH_STATE`: it hands a walk back its own unfinished
-    row, which the next attempt continues in place when the walk is a delta.
+    grain: it hands the watch lane, or a whole-library walk, back its own
+    unfinished row, which the next attempt continues in place -- the watch
+    lane's only when its walk is a delta.
     """
 
     @abstractmethod
@@ -80,8 +81,9 @@ class SyncRunRepository(ABC):
         once a later run has completed, so every later walk resumes from a
         position that run already passed.
 
-        `WATCH_STATE` only. The item lanes restart from their cursor; this lane
-        resumes, so a long delta that fails costs a page rather than the run.
+        The watch lane's, and a whole-library walk's: a cursored delta restarts
+        from its cursor, but a walk of the whole library has to cost a page
+        rather than the run when it fails.
         """
 
     @abstractmethod

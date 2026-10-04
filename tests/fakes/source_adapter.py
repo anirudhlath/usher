@@ -83,6 +83,8 @@ class FakeSourceAdapter(SourceAdapter):
         self._holds: dict[str, asyncio.Event] = {}
         #: `("fetched", "library:<name>")` for every item a library's unit yields.
         self.journal: list[tuple[str, str]] = []
+        #: `(key, start_index)` for every unit walk the port was asked for, in order.
+        self.unit_starts: list[tuple[str, int]] = []
         # The session model. `_server_token` is what the source currently
         # accepts; `_token` is what this adapter last obtained. Expiring a
         # session rotates the former, so the next call sees a mismatch and
@@ -320,6 +322,9 @@ class FakeSourceAdapter(SourceAdapter):
         return WalkPlan(units, expected_total=len(self._items))
 
     def list_unit(self, key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage]:
+        # Recorded here rather than in `_walk_library`, so that it is what the port
+        # was asked for.
+        self.unit_starts.append((key, start_index))
         if key == DEFAULT_UNIT_KEY:
             return pages_of(self._walk_items(None), start_index=start_index, size=self.page_size)
         name = key.removeprefix("library:")

@@ -48,7 +48,7 @@ from usher.services.handlers import (
     watch_writeback_handler,
 )
 from usher.services.matching import MatchService
-from usher.services.reconcile import ReconcileService
+from usher.services.reconcile import ReconcileService, WalkRefused
 from usher.services.watch_sync import WatchStateSyncService
 from usher.services.watch_write import WatchWriteService
 
@@ -693,6 +693,31 @@ async def test_the_sync_handler_closes_the_adapter_even_when_reconcile_raises(
     assert events == ["reconcile"], "the watch lane ran after the item lane raised"
     # The port's own `aclose` contract: afterwards every method raises
     # `PortUnavailable` rather than whatever the underlying transport would.
+    with pytest.raises(PortUnavailable):
+        await adapter.get_item("anything")
+
+
+async def test_a_refused_walk_fails_the_job_so_the_queue_retries_it(
+    source: Source, adapter: FakeSourceAdapter
+) -> None:
+    """`PortUnavailable`, which `JobWorker` fails as retryable rather than logging as a crash.
+
+    A walk whose process died is then resumed once its heartbeat is stale.
+    """
+    sources = FakeSourceRepository()
+    await sources.add(source)
+    events: list[str] = []
+    refusal = WalkRefused(f"a whole-library walk of {source.name} is already running")
+    reconcile = _RecordingReconcile(events, raises=refusal)
+    watch = _RecordingWatch(events)
+
+    with pytest.raises(PortUnavailable, match="is already running") as caught:
+        await sync_handler(sources, reconcile, watch, _Opener(adapter), user_id=_USER)(
+            Job(kind=JobKind.SYNC, key=f"{source.id}:full")
+        )
+
+    assert caught.value.__cause__ is refusal
+    assert events == ["reconcile"], "the watch lane ran after the walk was refused"
     with pytest.raises(PortUnavailable):
         await adapter.get_item("anything")
 

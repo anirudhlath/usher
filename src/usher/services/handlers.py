@@ -11,7 +11,7 @@ from usher.domain.jobs import Job
 from usher.domain.source import MediaItem, Source
 from usher.domain.sync import SyncRunKind
 from usher.domain.watch import WatchState
-from usher.ports.errors import PortDataMalformed
+from usher.ports.errors import PortDataMalformed, PortUnavailable
 from usher.ports.repository import MediaItemRepository, SourceRepository, WatchStateRepository
 from usher.ports.source import SourceAdapter, WatchStateUpdate
 from usher.services.curation import CurationService
@@ -20,7 +20,7 @@ from usher.services.enrich import EnrichService
 from usher.services.index import IndexService
 from usher.services.jobs import Handler
 from usher.services.matching import MatchService
-from usher.services.reconcile import ReconcileService
+from usher.services.reconcile import ReconcileService, WalkRefused
 from usher.services.watch_sync import WatchStateSyncService
 
 #: `SyncRunKind` has a third member, `WATCH_STATE`, which is never a lane an
@@ -228,6 +228,8 @@ def sync_handler(
 
     `POST /admin/sources/{id}/sync` lands here as an enqueue rather than as a
     synchronous walk.
+
+    A walk refused because another is alive fails the job, and the queue retries it.
     """
 
     async def handle(job: Job) -> None:
@@ -255,6 +257,11 @@ def sync_handler(
             return
         try:
             await reconcile.reconcile(source, lane, adapter)
+        except WalkRefused as exc:
+            # A port failure, so `JobWorker` fails the job for a retry instead of logging
+            # a crash: a walk whose process died is resumed once its heartbeat is stale.
+            raise PortUnavailable(str(exc)) from exc
+        else:
             await watch.sync(source, adapter, user_id=user_id)
         finally:
             await adapter.aclose()

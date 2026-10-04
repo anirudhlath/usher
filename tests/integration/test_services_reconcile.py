@@ -419,6 +419,40 @@ async def test_a_whole_library_walk_persists_its_units_against_real_sql(
     assert stored.heartbeat_at is not None and stored.heartbeat_at == run.heartbeat_at
 
 
+async def test_a_failed_whole_library_walk_resumes_in_place_against_real_sql(
+    service: ReconcileService,
+    runs: PostgresSyncRunRepository,
+    source: Source,
+    adapter: _Adapter,
+) -> None:
+    """Postgres takes the reclaimed row back to `running`, then on to `completed`."""
+    for index in range(5):
+        adapter.items[f"m{index}"] = _item(f"m{index}")
+    adapter.fail_after = 3
+    first = await service.reconcile(source, SyncRunKind.FULL, adapter)  # type: ignore[arg-type]
+    [unit] = await runs.units_for(first.id)
+    assert (first.status, unit.status, unit.position) == (
+        SyncRunStatus.FAILED,
+        SyncRunUnitStatus.FAILED,
+        2,
+    ), "the premise: one page committed, then the walk failed"
+    adapter.fail_after = None
+
+    second = await service.reconcile(source, SyncRunKind.FULL, adapter)  # type: ignore[arg-type]
+
+    assert second.id == first.id
+    stored = await runs.get(first.id)
+    assert stored is not None
+    assert (stored.started_at, stored.status, stored.items_seen) == (
+        first.started_at,
+        SyncRunStatus.COMPLETED,
+        5,
+    )
+    assert (stored.error, stored.error_code) == (None, None)
+    [unit] = await runs.units_for(first.id)
+    assert (unit.status, unit.position, unit.items_seen) == (SyncRunUnitStatus.COMPLETED, 5, 5)
+
+
 async def test_a_run_that_failed_does_not_move_the_delta_cursor(
     service: ReconcileService,
     runs: PostgresSyncRunRepository,

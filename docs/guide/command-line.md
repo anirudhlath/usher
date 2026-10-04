@@ -123,8 +123,11 @@ usher sync-status                       # recent walks, queue depth, parked jobs
   whole library on its own. `USHER_PUSH_GAP_CLOSE` changes that behaviour.
 - **The watch-state walk follows the item walk.** Each watch state has to match
   an item first.
-- **`usher sync` exits non-zero if any walk failed**, after it has tried every
-  source, so cron can notice.
+- **`usher sync` exits non-zero if any walk failed or was refused**, after it
+  has tried every source, so cron can notice. A walk of a whole library is
+  refused while another of the same kind is still running for that source.
+- **A walk of a whole library that stops part-way resumes.** The next walk of
+  the same kind continues where each piece stopped, rather than starting again.
 - **The retraction guard** refuses a walk that would mark more than
   `USHER_SYNC_MAX_RETRACT_FRACTION` (25%) of a source's items unavailable, and
   changes nothing. If you really did remove that much, run the walk with

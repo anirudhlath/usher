@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.fakes.embedding import FakeEmbedder
 from tests.fakes.llm_client import FakeLLMClient, usage
+from tests.fakes.source_adapter import FakeSourceAdapter
 from usher.cli import (
     _curate,
     _home,
@@ -27,6 +28,7 @@ from usher.cli import (
     _session_for,
     _similar,
     _suggest,
+    _sync,
     _sync_status,
     _unmatched,
     _work,
@@ -34,16 +36,19 @@ from usher.cli import (
 from usher.composition import build_pipeline, nothing, selected_sources
 from usher.config import Settings, get_settings
 from usher.db.repositories.source import PostgresSourceRepository
+from usher.db.repositories.sync import PostgresSyncRunRepository
 from usher.db.users import DEFAULT_USER_NAME, ensure_default_user
 from usher.domain.enums import EnrichmentState, SourceKind, TitleKind
 from usher.domain.ids import new_id
 from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.source import Source
+from usher.domain.sync import SyncRun, SyncRunKind, SyncRunUnit, WalkStage
 from usher.domain.title import Title
 from usher.ports.ingest import MediaItemUpsert
 from usher.ports.jobs import JobRequest
 from usher.ports.repository import ScoredNeighbor, TitleEmbeddingUpsert
 from usher.ports.search import SearchFilters, SuggestTier
+from usher.ports.source import DEFAULT_UNIT_KEY
 from usher.services.curation_validate import (
     ITEM_IDS_KEY,
     REASON_KEY,
@@ -732,6 +737,56 @@ def test_allow_full_retraction_is_the_only_way_past_the_ceiling(session: AsyncSe
     opened = build_pipeline(session, settings, max_retract_fraction=1.0)
     assert guarded.reconcile._max_retract_fraction == 0.1
     assert opened.reconcile._max_retract_fraction == 1.0
+
+
+async def test_usher_sync_exits_non_zero_when_a_live_walk_refuses_it(
+    cli_settings: Settings,
+    clean_slate: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Another process's walk, its heartbeat this instant: no walk here, and no watch lane."""
+    source = Source(
+        kind=SourceKind.EMBY,
+        name="cli-walking",
+        base_url="https://emby.invalid",
+        credentials_ref=f"ref-{new_id()}",
+        device_id=str(new_id()),
+    )
+    live = SyncRun(source_id=source.id, kind=SyncRunKind.FULL, heartbeat_at=datetime.now(UTC))
+    async with _session_for(cli_settings) as session:
+        await PostgresSourceRepository(session).add(source)
+        runs = PostgresSyncRunRepository(session)
+        await runs.add(live)
+        await runs.add_units(
+            [
+                SyncRunUnit(
+                    run_id=live.id,
+                    unit_key=DEFAULT_UNIT_KEY,
+                    stage=WalkStage.TITLES,
+                    label="the whole library",
+                )
+            ]
+        )
+        await session.commit()
+    adapter = FakeSourceAdapter(source)
+
+    async def _opened(pipeline: object, chosen: Source) -> FakeSourceAdapter:
+        return adapter
+
+    monkeypatch.setattr("usher.cli._open_adapter", _opened)
+
+    with pytest.raises(SystemExit) as exited:
+        await _sync(
+            cli_settings, source_name="cli-walking", kind="full", allow_full_retraction=False
+        )
+
+    out = capsys.readouterr().out
+    assert "cli-walking: refused: a whole-library walk of cli-walking is already running" in out
+    assert "watch_state" not in out, "the watch lane ran after the walk was refused"
+    assert exited.value.code == (
+        "refused for cli-walking: a whole-library walk of each is already running"
+    )
 
 
 async def test_push_probe_reports_nothing_to_probe_before_it_opens_anything(

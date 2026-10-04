@@ -20,6 +20,11 @@ Versioning is `0.x` while the wire contract may still move —
   `USHER_SYNC_WALKERS` units are fetched at once while one writer commits them;
   each unit's position is kept in `sync_run_units`, and the run's
   `heartbeat_at` shows the writer is alive.
+- A whole-library walk that fails or is killed resumes where it stopped: the
+  same run, each unit from the position it committed. While one is alive — its
+  heartbeat under 10 minutes old — a second is refused, and `usher sync` exits
+  non-zero. A watch-state walk started while another is alive runs beside it
+  instead of closing or resuming the other's run.
 
 ### Changed
 

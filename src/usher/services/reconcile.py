@@ -6,7 +6,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from loguru import logger
 from opentelemetry import metrics, trace
@@ -63,6 +63,16 @@ CEILING_ERROR_CODE = "gap_delta_ceiling"
 
 # The same device for the *other* failure an operator has a command for.
 RETRACTION_ERROR_CODE = "availability_ceiling"
+
+#: How long a walk's heartbeat may stand still before the walk is taken for dead.
+STALE_AFTER = timedelta(minutes=10)
+
+#: What a superseded whole-library walk's row says.
+WALK_SUPERSEDED_ERROR = "superseded: a whole-library walk restarts"
+
+
+class WalkRefused(Exception):
+    """A whole-library walk of this source and kind is already running."""
 
 
 def _recorded_failure(exc: UsherPortError) -> tuple[str, str | None]:
@@ -168,6 +178,9 @@ class ReconcileService:
         adapter's plan, unless `max_items` bounds it or `plan` is false; every other
         walk is one stream.
 
+        A whole-library walk resumes its kind's unfinished run in place and raises
+        `WalkRefused` while that run is alive; see `_claim`.
+
         Never raises a `UsherPortError`.
         """
         started = time.perf_counter()
@@ -176,24 +189,37 @@ class ReconcileService:
             span.set_attribute("usher.sync.kind", kind.value)
             cursor = await self.cursor_for(source, kind)
             planned = plan and not max_items and (kind is SyncRunKind.FULL or cursor is None)
-            run = SyncRun(
-                source_id=source.id,
-                kind=kind,
-                cursor_at=cursor,
-                # A planned walk's first heartbeat rides the insert, so one that dies
-                # while planning still leaves a row saying when it was last alive.
-                heartbeat_at=self._clock() if planned else None,
-            )
-            # Inserted and committed before the walk begins, `RUNNING`: an
-            # operator watching a six-hour sync needs a row to watch, and a
-            # process killed mid-walk must leave a trace rather than nothing.
-            await self._runs.add(run)
+            claimed = await self._claim(source, kind) if planned else None
+            if claimed is None:
+                run = SyncRun(
+                    source_id=source.id,
+                    kind=kind,
+                    cursor_at=cursor,
+                    # A planned walk's first heartbeat rides the insert, so one that dies
+                    # while planning still leaves a row saying when it was last alive.
+                    heartbeat_at=self._clock() if planned else None,
+                )
+                # Inserted and committed before the walk begins, `RUNNING`: an
+                # operator watching a six-hour sync needs a row to watch, and a
+                # process killed mid-walk must leave a trace rather than nothing.
+                await self._runs.add(run)
+            else:
+                # The same row and the same `started_at`: every item either attempt saw
+                # carries the instant the sweep compares against.
+                run = claimed.evolve(
+                    status=SyncRunStatus.RUNNING,
+                    error=None,
+                    error_code=None,
+                    finished_at=None,
+                    heartbeat_at=self._clock(),
+                )
+                await self._runs.save(run)
             await self._commit()
             progress = _Progress(run)
             try:
                 truncated = False
                 if planned:
-                    await self._walk_plan(source, progress, adapter)
+                    await self._walk_plan(source, progress, adapter, resumed=claimed is not None)
                 else:
                     truncated = await self._walk(source, progress, adapter, cursor, max_items)
                 if truncated:
@@ -301,6 +327,43 @@ class ReconcileService:
         ]
         return max(cursors) if cursors else None
 
+    async def _claim(self, source: Source, kind: SyncRunKind) -> SyncRun | None:
+        """The unfinished whole-library walk this one resumes, or `None` for a fresh one.
+
+        A `running` row whose heartbeat is under `STALE_AFTER` old is a live walk, and
+        raises `WalkRefused`. A row with units resumes, unless its sweep was refused:
+        its walk is what that refusal doubts, so the library is read again. Every
+        other unfinished row of a whole-library walk -- one that died before its plan
+        was stored, or a full walk from before units existed -- is superseded. A delta
+        with neither units nor a heartbeat is a single walk's, and is left alone.
+
+        Not atomic: the check is a read and the claim a later write, with nothing
+        locking between them, so two walks that start together can both proceed.
+        """
+        newest = await self._runs.latest_incomplete_run(source.id, kind)
+        if newest is None:
+            return None
+        if (
+            newest.status is SyncRunStatus.RUNNING
+            and newest.heartbeat_at is not None
+            and self._clock() - newest.heartbeat_at < STALE_AFTER
+        ):
+            raise WalkRefused(f"a whole-library walk of {source.name} is already running")
+        has_units = bool(await self._runs.units_for(newest.id))
+        if has_units and newest.error_code != RETRACTION_ERROR_CODE:
+            return newest
+        if has_units or newest.heartbeat_at is not None or kind is SyncRunKind.FULL:
+            await self._supersede(newest)
+        return None
+
+    async def _supersede(self, run: SyncRun) -> None:
+        """Close an unfinished walk the next one will not resume, in the fresh run's commit.
+
+        One already `failed` is closed already, and keeps its own error.
+        """
+        if run.status is SyncRunStatus.RUNNING:
+            await self._runs.save(self._failed(run, WALK_SUPERSEDED_ERROR, code=None))
+
     async def _walk(
         self,
         source: Source,
@@ -331,43 +394,52 @@ class ReconcileService:
             progress.run = await self._flush(source, progress.run, batch)
         return truncated
 
-    async def _walk_plan(self, source: Source, progress: _Progress, adapter: SourceAdapter) -> None:
-        """Walk the adapter's plan, one stage at a time.
+    async def _walk_plan(
+        self, source: Source, progress: _Progress, adapter: SourceAdapter, *, resumed: bool
+    ) -> None:
+        """Walk the adapter's plan, or a resumed run's stored units, one stage at a time.
 
         The plan's own requests can sit out a retry, so the heartbeat beats every
         `heartbeat_seconds` while the plan is made. Those requests never touch the
         session, which is what lets a beat commit beside them. However the wait
         ends, a plan still being made is cancelled and awaited first.
 
-        The units are stored with the heartbeat that follows the plan. A stage
-        starts only once every unit of the stages before it has committed
-        complete, so every episode finds its series.
+        A fresh plan's units are stored with the heartbeat that follows the plan. A
+        stage starts only once every unit of the stages before it has committed
+        complete, so every episode finds its series. A unit already complete is skipped.
         """
-        planning = asyncio.create_task(adapter.plan_walk())
-        try:
-            pending = {planning}
-            while pending:
-                _, pending = await asyncio.wait(pending, timeout=self._heartbeat_seconds)
-                if pending:
-                    await self._beat(progress)
-        finally:
-            planning.cancel()
-            await asyncio.gather(planning, return_exceptions=True)
-        plan = planning.result()
-        units = [
-            SyncRunUnit(
-                run_id=progress.run.id,
-                unit_key=unit.key,
-                stage=unit.stage,
-                label=unit.label,
-                expected_items=unit.expected_items,
-            )
-            for unit in plan.units
-        ]
-        await self._runs.add_units(units)
-        await self._beat(progress)
+        if resumed:
+            units = await self._runs.units_for(progress.run.id)
+        else:
+            planning = asyncio.create_task(adapter.plan_walk())
+            try:
+                pending = {planning}
+                while pending:
+                    _, pending = await asyncio.wait(pending, timeout=self._heartbeat_seconds)
+                    if pending:
+                        await self._beat(progress)
+            finally:
+                planning.cancel()
+                await asyncio.gather(planning, return_exceptions=True)
+            plan = planning.result()
+            units = [
+                SyncRunUnit(
+                    run_id=progress.run.id,
+                    unit_key=unit.key,
+                    stage=unit.stage,
+                    label=unit.label,
+                    expected_items=unit.expected_items,
+                )
+                for unit in plan.units
+            ]
+            await self._runs.add_units(units)
+            await self._beat(progress)
         for stage in STAGE_ORDER:
-            staged = [unit for unit in units if unit.stage is stage]
+            staged = [
+                unit
+                for unit in units
+                if unit.stage is stage and unit.status is not SyncRunUnitStatus.COMPLETED
+            ]
             if staged:
                 await self._walk_stage(source, progress, adapter, staged)
 
