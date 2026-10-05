@@ -735,11 +735,11 @@ async def test_a_refused_walk_defers_the_job_so_the_queue_tries_it_again(
     sources = FakeSourceRepository()
     await sources.add(source)
     events: list[str] = []
-    refusal = WalkRefused(f"a whole-library walk of {source.name} is live")
+    refusal = WalkRefused(f"a whole-library walk of {source.name} counts as live")
     reconcile = _RecordingReconcile(events, raises=refusal)
     watch = _RecordingWatch(events)
 
-    with pytest.raises(JobDeferred, match="is live") as caught:
+    with pytest.raises(JobDeferred, match="counts as live") as caught:
         await sync_handler(sources, reconcile, watch, _Opener(adapter), user_id=_USER)(
             Job(kind=JobKind.SYNC, key=f"{source.id}:full")
         )

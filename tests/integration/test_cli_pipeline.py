@@ -919,8 +919,8 @@ async def test_usher_sync_exits_non_zero_when_a_live_walk_refuses_it(
 
     out = capsys.readouterr().out
     said = re.search(
-        r"^cli-walking: refused: a whole-library walk of cli-walking is live: its last heartbeat"
-        r" was (.+) ago, and if its process has stopped, it can be resumed in (.+)$",
+        r"^cli-walking: refused: a whole-library walk of cli-walking counts as live: its last"
+        r" heartbeat was (.+) ago, and if its process has stopped, it can be resumed in (.+)$",
         out,
         re.MULTILINE,
     )
@@ -930,7 +930,7 @@ async def test_usher_sync_exits_non_zero_when_a_live_walk_refuses_it(
     )
     assert "watch_state" not in out, "the watch lane ran after the walk was refused"
     assert exited.value.code == (
-        "refused for cli-walking: a whole-library walk of each is live; "
+        "refused for cli-walking: a whole-library walk of each counts as live; "
         "the lines above say how soon a stopped one can be resumed"
     )
 

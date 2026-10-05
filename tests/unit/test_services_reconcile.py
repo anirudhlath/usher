@@ -1569,7 +1569,9 @@ async def test_a_running_walk_is_refused_until_its_heartbeat_is_ten_minutes_old(
         fixture, heartbeat_at=NOW - age, units=[("Films", SyncRunUnitStatus.RUNNING, 2)]
     )
     if refused:
-        with pytest.raises(WalkRefused, match="a whole-library walk of Living Room Emby is live"):
+        with pytest.raises(
+            WalkRefused, match="a whole-library walk of Living Room Emby counts as live"
+        ):
             await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
         assert fixture.journal == [], "a refused walk asked the source for something"
         assert await fixture.runs.get(walking.id) == walking, "a refused walk wrote the live row"
@@ -1620,7 +1622,7 @@ async def test_a_refusal_says_how_long_the_live_walk_has_been_quiet_and_has_left
     with pytest.raises(WalkRefused) as refused:
         await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
     assert str(refused.value) == (
-        f"a whole-library walk of Living Room Emby is live: its last heartbeat was {said}"
+        f"a whole-library walk of Living Room Emby counts as live: its last heartbeat was {said}"
     )
 
 

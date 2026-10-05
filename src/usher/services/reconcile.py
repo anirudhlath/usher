@@ -100,7 +100,7 @@ def _refusal(source: Source, quiet: timedelta) -> str:
     age = _duration(max(0, math.floor(quiet.total_seconds())))
     left = _duration(math.ceil((STALE_AFTER - quiet).total_seconds()))
     return (
-        f"a whole-library walk of {source.name} is live: its last heartbeat was {age} ago, "
+        f"a whole-library walk of {source.name} counts as live: its last heartbeat was {age} ago, "
         f"and if its process has stopped, it can be resumed in {left}"
     )
 

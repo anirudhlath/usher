@@ -374,7 +374,7 @@ def _sync_failed(runs: Sequence[SyncRun], refused: Sequence[str] = ()) -> str:
         )
     if refused:
         lines.append(
-            f"refused for {', '.join(refused)}: a whole-library walk of each is live; "
+            f"refused for {', '.join(refused)}: a whole-library walk of each counts as live; "
             "the lines above say how soon a stopped one can be resumed"
         )
     if any(one.error_code == RETRACTION_ERROR_CODE for one in runs):
