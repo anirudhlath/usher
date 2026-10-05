@@ -1,7 +1,7 @@
 {
   "uid": "usher-pipeline",
   "title": "Usher \u2014 3 Pipeline",
-  "description": "Ten panels, mixed by design: Prometheus for rates and depths, Postgres for the queue's and the reconciler's own breakdowns. Two of these panels read a series whose label is not the one a reader of the title assumes \u2014 the queue-depth pair is two panels because usher.jobs.queued is labelled kind and a priority band exists only in the jobs table, and the enrichment panel splits on outcome because the demand/background split does not exist on that histogram at all.",
+  "description": "Eleven panels, mixed by design: Prometheus for rates and depths, Postgres for the queue's and the reconciler's own breakdowns. Two of these panels read a series whose label is not the one a reader of the title assumes \u2014 the queue-depth pair is two panels because usher.jobs.queued is labelled kind and a priority band exists only in the jobs table, and the enrichment panel splits on outcome because the demand/background split does not exist on that histogram at all.",
   "tags": [
     "usher",
     "pipeline"
@@ -665,6 +665,92 @@
           },
           "expr": "vector(30)",
           "legendFormat": "ceiling \u00b7 USHER_TMDB_REQUESTS_PER_SECOND",
+          "range": true,
+          "instant": false
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Whole-library walks \u2014 listing limit and mean unit duration",
+      "description": "usher.source.listing.concurrency, as usher_source_listing_concurrency_ratio, labelled source: the cap the listing limiter holds now. It reads USHER_SYNC_WALKERS while pages succeed, drops to 1 on an outage or a 429, and climbs back a step for every ten pages in a row that succeed, so a sawtooth is the backoff working. A line held at 1 means pages keep needing another try, or USHER_SYNC_WALKERS is 1.\n\nusher.sync.unit.duration, as usher_sync_unit_duration_seconds, labelled source and stage: the seconds from a walker's claim of a unit to that unit's last commit, recorded once for each unit that completes. A unit that fails records nothing. **It is plotted as a mean, not a quantile**: the histogram declares no bucket boundaries, so it has the SDK's second-scale defaults, and a quantile over those is not a measurement.\n\n\u26a0\ufe0f **Both series exist only in a process that has walked a source.** The gauge is first written by a listing page and the histogram by a unit's completion, so a quiet server shows no series rather than a zero.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "usher-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 32
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "showPoints": "auto"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*mean unit duration.*"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "editorMode": "code",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "usher-prometheus"
+          },
+          "expr": "max by (source) (usher_source_listing_concurrency_ratio)",
+          "legendFormat": "{{source}} \u00b7 listing limit",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "B",
+          "editorMode": "code",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "usher-prometheus"
+          },
+          "expr": "sum by (source, stage) (rate(usher_sync_unit_duration_seconds_sum[15m])) / sum by (source, stage) (rate(usher_sync_unit_duration_seconds_count[15m]))",
+          "legendFormat": "{{source}} {{stage}} \u00b7 mean unit duration",
           "range": true,
           "instant": false
         }

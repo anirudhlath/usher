@@ -648,3 +648,37 @@ class SyncRunRepositoryContract:
             LATER,
             LATER,
         )
+
+    # --- the newest run of a kind, whatever its status ----------------------
+
+    async def test_the_latest_run_is_the_newest_of_its_kind_whatever_its_status(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        """Added newest first, so neither insertion order nor id order gives it away."""
+        newer = run(source_id, status=SyncRunStatus.COMPLETED, started_at=LATER)
+        await repository.add(newer)
+        older = run(source_id, status=SyncRunStatus.FAILED, started_at=EARLIER)
+        await repository.add(older)
+        assert older.started_at < newer.started_at, "the premise: the completed run is the newer"
+        assert newer.id < older.id, "the premise: the newer run holds the smaller id"
+
+        found = await repository.latest_run(source_id, SyncRunKind.FULL)
+
+        assert found is not None
+        assert found.id == newer.id
+        assert found.status is SyncRunStatus.COMPLETED
+
+    async def test_the_latest_run_is_scoped_by_kind_and_by_source(
+        self, repository: SyncRunRepository, source_id: uuid.UUID, other_source_id: uuid.UUID
+    ) -> None:
+        """Both decoys are newer than the run that answers, so only the scope keeps them out."""
+        await repository.add(run(source_id, kind=SyncRunKind.DELTA, started_at=LATER))
+        await repository.add(run(other_source_id, started_at=LATER))
+        assert await repository.latest_run(source_id, SyncRunKind.FULL) is None
+
+        own = run(source_id, started_at=EARLIER)
+        await repository.add(own)
+        found = await repository.latest_run(source_id, SyncRunKind.FULL)
+
+        assert found is not None
+        assert found.id == own.id

@@ -144,6 +144,12 @@ change time.
 credentials, unreachable, and reachable-but-push-blocked as separate states,
 and the server's version as `server_version`.
 
+The status also carries `last_sync`, the source's newest full or delta walk,
+and for a whole-library walk where its plan stands: the stage being walked,
+units done of units planned, and the items the plan expected. `usher
+sync-status` prints the same under each of a source's recent runs, and every
+`sync.progress` frame carries it ([07](07-client-api.md)).
+
 `push_available` is three-valued: `null` ("not probed") when no push lane is
 running for the source, otherwise the live answer — a connection *and* at least
 one received message *and* a recent one. The status check opens no socket.

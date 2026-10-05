@@ -5,18 +5,21 @@ from typing import Any, Final, Literal
 
 from fastapi import APIRouter, Response, status
 
-from usher.api.deps import JobQueueDep, SourceRepositoryDep, SourceServiceDep
+from usher.api.deps import JobQueueDep, SourceRepositoryDep, SourceServiceDep, SyncRunRepositoryDep
 from usher.api.dto.problem import ProblemCode, ProblemResponse
 from usher.api.dto.source import (
     SourceCreateRequest,
     SourceResponse,
     SourceStatusResponse,
+    SyncRunResponse,
     SyncTriggerResponse,
 )
 from usher.api.errors import ProblemException
 from usher.domain.jobs import JobKind, JobPriority
+from usher.domain.sync import SyncRunKind, walk_progress
 from usher.ports.credentials import SourceCredentials
 from usher.ports.jobs import JobRequest
+from usher.ports.repository import SyncRunRepository
 from usher.telemetry import current_traceparent
 
 router = APIRouter(prefix="/admin/sources", tags=["admin"])
@@ -49,6 +52,9 @@ _DISABLED_DETAIL = (
     "decline to walk it"
 )
 
+#: The walks `last_sync` reports: the item lanes', never the watch lane's.
+_ITEM_WALKS: Final = (SyncRunKind.FULL, SyncRunKind.DELTA)
+
 
 @router.post(
     "",
@@ -75,7 +81,9 @@ async def list_sources(sources: SourceServiceDep) -> list[SourceResponse]:
 
 
 @router.get("/{source_id}/status", response_model=SourceStatusResponse, responses=_SOURCE_FAILURES)
-async def source_status(source_id: uuid.UUID, sources: SourceServiceDep) -> SourceStatusResponse:
+async def source_status(
+    source_id: uuid.UUID, sources: SourceServiceDep, runs: SyncRunRepositoryDep
+) -> SourceStatusResponse:
     result = await sources.status(source_id)
     if result is None:
         raise ProblemException(
@@ -83,7 +91,18 @@ async def source_status(source_id: uuid.UUID, sources: SourceServiceDep) -> Sour
             code=ProblemCode.NOT_FOUND,
             detail="source not found",
         )
-    return SourceStatusResponse.of(result)
+    return SourceStatusResponse.of(result, await _last_sync(runs, source_id))
+
+
+async def _last_sync(runs: SyncRunRepository, source_id: uuid.UUID) -> SyncRunResponse | None:
+    """The source's newest item walk, with where its plan stands; `None` before the first."""
+    found = [
+        run for kind in _ITEM_WALKS if (run := await runs.latest_run(source_id, kind)) is not None
+    ]
+    if not found:
+        return None
+    newest = max(found, key=lambda run: (run.started_at, run.id))
+    return SyncRunResponse.of(newest, walk_progress(await runs.units_for(newest.id)))
 
 
 @router.delete("/{source_id}", status_code=status.HTTP_204_NO_CONTENT, responses=_SOURCE_FAILURES)

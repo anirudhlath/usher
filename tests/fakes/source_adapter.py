@@ -85,6 +85,8 @@ class FakeSourceAdapter(SourceAdapter):
         self.journal: list[tuple[str, str]] = []
         #: `(key, start_index)` for every unit walk the port was asked for, in order.
         self.unit_starts: list[tuple[str, int]] = []
+        # Libraries whose unit the fake plans with no expected count.
+        self._uncounted: set[str] = set()
         # The session model. `_server_token` is what the source currently
         # accepts; `_token` is what this adapter last obtained. Expiring a
         # session rotates the former, so the next call sees a mismatch and
@@ -139,6 +141,10 @@ class FakeSourceAdapter(SourceAdapter):
         event = asyncio.Event()
         self._holds[library] = event
         return event
+
+    def uncounted(self, library: str) -> None:
+        """Plan `library`'s unit with no expected count, as Emby plans its seed."""
+        self._uncounted.add(library)
 
     def forget(self, external_id: str) -> None:
         self._items.pop(external_id, None)
@@ -315,7 +321,7 @@ class FakeSourceAdapter(SourceAdapter):
                 f"library:{name}",
                 self._stages.get(name, WalkStage.TITLES),
                 f"library {name}",
-                len(placed),
+                None if name in self._uncounted else len(placed),
             )
             for name, placed in self._libraries.items()
         )

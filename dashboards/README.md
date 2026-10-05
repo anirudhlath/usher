@@ -786,7 +786,7 @@ renderer.
 
 # Dashboard 3 — Pipeline
 
-Ten panels, and the mixed one: Prometheus for rates and depths, Postgres for
+Eleven panels, and the mixed one: Prometheus for rates and depths, Postgres for
 the queue's and the reconciler's own breakdowns. Dashboard 1's principle
 ("the catalog *is* the record") does not decide this dashboard on its own,
 because half of what a pipeline does leaves no row behind — a completed job is
@@ -1224,7 +1224,21 @@ request per second. `vector(30)` carries its own legend entry, names the
 setting it comes from, and pulls the axis to the ceiling so headroom is the
 readable quantity.
 
-## ⚠️ Two Dashboard 3 panels plot a mean, not a quantile, and the reason is an instrument
+### 11 — Whole-library walks: listing limit and mean unit duration
+
+`timeseries`, Prometheus, two targets.
+
+```
+max by (source) (usher_source_listing_concurrency_ratio)
+sum by (source, stage) (rate(usher_sync_unit_duration_seconds_sum[15m])) / sum by (source, stage) (rate(usher_sync_unit_duration_seconds_count[15m]))
+```
+
+**Not yet observed.** Both series exist only in a process that has walked a
+source: the gauge is first written by a listing page, the histogram by a unit's
+completion. No whole-library walk has run against a real source since this
+panel was committed, so there is no reading to record.
+
+## ⚠️ Three Dashboard 3 panels plot a mean, not a quantile, and the reason is an instrument
 
 `Enrichment throughput and mean latency` and `Emby request mean latency by op`
 were written as `histogram_quantile` panels and were changed at integration,
@@ -1249,6 +1263,10 @@ Fixing the instruments is the better repair and was not done here: D1's ladder
 was derived from measured distributions, and neither of these two instruments
 had a measured distribution to derive one from. Issue filed; the panels are
 honest in the meantime, and the enrichment panel still plots a mean.
+
+`Whole-library walks — listing limit and mean unit duration` was a mean from the
+start: `usher.sync.unit.duration` declares no boundaries either, so it sits on
+the same defaults.
 
 ## 5 — Cost & Compliance (`05-cost-and-compliance.json`, uid `usher-cost-compliance`)
 

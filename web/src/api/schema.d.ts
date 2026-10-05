@@ -1918,6 +1918,9 @@ export interface components {
          *     path, and a transport error -- never a credential, never a
          *     `credentials_ref` -- which is what makes it safe to hand to a client
          *     verbatim.
+         *
+         *     `last_sync` is the source's newest full or delta walk -- never the watch
+         *     lane's -- or `null` before the first.
          */
         SourceStatusResponse: {
             /** Reachable */
@@ -1932,6 +1935,7 @@ export interface components {
             server_version: string | null;
             /** Detail */
             detail: string | null;
+            last_sync: components["schemas"]["SyncRunResponse"] | null;
         };
         /**
          * StreamTargetKind
@@ -1984,6 +1988,69 @@ export interface components {
          * @enum {string}
          */
         SuggestTier: "prefix" | "fuzzy";
+        /**
+         * SyncRunKind
+         * @description Which of PRD 03's reconciliation lanes this run is.
+         *
+         *     `FULL` is the nightly walk with no `since`; `DELTA` is a walk from a stored
+         *     cursor; `WATCH_STATE` walks `watch_state(since=…)` rather than `list_items`,
+         *     because the two use different upstream filters (`MinDateLastSaved` vs
+         *     `MinDateLastSavedForUser`) and return genuinely different item sets, so a
+         *     single run kind could not record both cursors.
+         * @enum {string}
+         */
+        SyncRunKind: "full" | "delta" | "watch_state";
+        /**
+         * SyncRunResponse
+         * @description `last_sync`: a source's newest full or delta walk, as the status route reports it.
+         *
+         *     `stage`, `units_done`, `units_total` and `items_expected` say where a
+         *     whole-library walk's plan stands -- `walk_progress` -- and are `null` for a walk
+         *     without one. `heartbeat_at` tells a live `running` walk from a dead one: a
+         *     whole-library walk's writer moves it at least once a minute. `error` is the
+         *     run's own sentence, built like `detail` below from translated port errors.
+         */
+        SyncRunResponse: {
+            kind: components["schemas"]["SyncRunKind"];
+            status: components["schemas"]["SyncRunStatus"];
+            /**
+             * Started At
+             * Format: date-time
+             */
+            started_at: string;
+            /** Finished At */
+            finished_at: string | null;
+            /** Heartbeat At */
+            heartbeat_at: string | null;
+            /** Items Seen */
+            items_seen: number;
+            /** Items Matched */
+            items_matched: number;
+            /** Items Unmatched */
+            items_unmatched: number;
+            /** Items Retracted */
+            items_retracted: number;
+            /** Error */
+            error: string | null;
+            stage: components["schemas"]["WalkStage"] | null;
+            /** Units Done */
+            units_done: number | null;
+            /** Units Total */
+            units_total: number | null;
+            /** Items Expected */
+            items_expected: number | null;
+        };
+        /**
+         * SyncRunStatus
+         * @description Running, or one of two terminal outcomes.
+         *
+         *     The distinction between `COMPLETED` and `FAILED` is what the
+         *     availability sweep is gated on -- "only a walk that provably finished
+         *     may retract" is unspellable if a crashed run and a clean one land in the
+         *     same state.
+         * @enum {string}
+         */
+        SyncRunStatus: "running" | "completed" | "failed";
         /**
          * SyncTriggerResponse
          * @description `POST /admin/sources/{id}/sync`'s whole body -- the enqueued job's identity.
@@ -2120,6 +2187,17 @@ export interface components {
          * @enum {string}
          */
         VocabularyState: "no_vectors" | "mixed_releases" | "not_loaded" | "mismatched" | "named";
+        /**
+         * WalkStage
+         * @description Which part of a whole-library walk a unit belongs to.
+         *
+         *     `SEED` is what the account is watching, so the watch lane can run early;
+         *     `TITLES` is movies and series, or everything, for an adapter that does not
+         *     split by kind; `EPISODES` waits until every title has committed, so each
+         *     episode finds its series.
+         * @enum {string}
+         */
+        WalkStage: "seed" | "titles" | "episodes";
         /**
          * WatchStateResponse
          * @description Progress, or `null` -- never a fabricated all-zero record.

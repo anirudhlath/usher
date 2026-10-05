@@ -54,7 +54,7 @@ from usher.domain.bootstrap import BootstrapPhase
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.source import Source
-from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus
+from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus, WalkProgress, walk_progress
 from usher.eval.errors import EvalDependencyMissing
 from usher.eval.goldens.suggest import GATE_SEED
 from usher.ports.errors import (
@@ -415,8 +415,17 @@ def _watch_lane(
     return run
 
 
+def _plan_line(walk: WalkProgress) -> str:
+    """Where a whole-library walk's plan stands, as `sync-status` prints it under its run."""
+    expected = "unknown" if walk.items_expected is None else str(walk.items_expected)
+    return (
+        f"{'':<24} plan: stage={walk.stage.value} "
+        f"units={walk.units_done}/{walk.units_total} expected={expected}"
+    )
+
+
 async def _sync_status(settings: Settings) -> None:
-    """Every source's recent runs, plus queue depth and parked count.
+    """Every source's recent runs and their plans, plus queue depth and parked count.
 
     Must work against an empty database: a command an operator can only run
     *after* a successful sync is no use for diagnosing why the sync did not
@@ -438,6 +447,9 @@ async def _sync_status(settings: Settings) -> None:
                     f"unmatched={run.items_unmatched} retracted={run.items_retracted}"
                     + (f" error={run.error}" if run.error else "")
                 )
+                walk = walk_progress(await pipeline.runs.units_for(run.id))
+                if walk is not None:
+                    report.append(_plan_line(walk))
         depth = await pipeline.queue.depth()
         parked = await pipeline.queue.parked(limit=1000)
     if not sources:

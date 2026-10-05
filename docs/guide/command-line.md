@@ -113,7 +113,7 @@ Register a source through the admin API (see the
 usher sync                              # every enabled source, full walk
 usher sync --source "Living Room"       # one source, by name
 usher sync --kind delta                 # only what changed since the last completed walk
-usher sync-status                       # recent walks, queue depth, parked jobs
+usher sync-status                       # recent walks and their plans, queue depth, parked jobs
 ```
 
 - **A new source needs one `usher sync`.** Once the server is running, it keeps
@@ -128,6 +128,9 @@ usher sync-status                       # recent walks, queue depth, parked jobs
 - **`usher sync` exits non-zero if any walk failed or was refused**, after it
   has tried every source, so cron can notice. A walk of a whole library is
   refused while another of the same kind is still running for that source.
+- **`usher sync-status` shows how far a large walk has got.** Under a walk of a
+  whole library it prints the stage being read, the pieces done of the pieces
+  planned, and how many items the plan expected.
 - **A walk of a whole library that stops part-way resumes.** The next walk of
   the same kind continues where each piece stopped, rather than starting again.
 - **The retraction guard** refuses a walk that would mark more than

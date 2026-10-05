@@ -502,8 +502,8 @@ def test_the_catalogue_scan_reaches_the_row_that_carries_no_usher_prefix() -> No
         "the catalogue scan is still anchored on `usher.`, so an API-latency panel would "
         "fail invariant 2 for naming the one metric PRD 10 says it should"
     )
-    assert len(catalogue) == 43, (
-        f"PRD 10's metric table parsed to {len(catalogue)} rows, not the 43 its own header "
+    assert len(catalogue) == 44, (
+        f"PRD 10's metric table parsed to {len(catalogue)} rows, not the 44 its own header "
         "counts out — the table's shape has moved and both readers need checking"
     )
 
@@ -840,8 +840,8 @@ def test_the_queue_depth_panels_are_two_panels_over_two_datasources() -> None:
     assert "Parked jobs by kind" in titles, (
         f"the known-title anchor is gone, so this scan is reading something else: {titles}"
     )
-    assert len(panels) == 10, (
-        "dashboard 3 is ten panels -- PRD 10's nine items, with queue depth drawn twice -- "
+    assert len(panels) == 11, (
+        "dashboard 3 is eleven panels -- PRD 10's ten items, with queue depth drawn twice -- "
         f"not {len(panels)}: {titles}"
     )
 
@@ -1034,6 +1034,40 @@ def test_the_tmdb_panel_counts_429s_and_denominates_on_every_status_including_er
     )
 
 
+def test_the_walk_panel_draws_the_listing_limit_and_a_mean_unit_duration_by_stage() -> None:
+    """The two series a whole-library walk adds, each split by the labels it carries.
+
+    The unit duration is its sum over its count, both halves keeping `source` and
+    `stage`: the histogram is on the SDK's default boundaries, and a stage summed away
+    hides which part of the plan is slow.
+    """
+    walk = [
+        panel
+        for panel in _live_panels(_PIPELINE)
+        if str(panel["title"]).startswith("Whole-library walks")
+    ]
+    assert len(walk) == 1, f"dashboard 3 has {len(walk)} whole-library walk panels, not one"
+    by_metric = {
+        normalise_metric(token): expr for expr in _exprs(walk[0]) for token in _metric_tokens(expr)
+    }
+    assert set(by_metric) == {"usher_source_listing_concurrency", "usher_sync_unit_duration"}, (
+        f"the walk panel queries {sorted(by_metric)}"
+    )
+
+    duration = by_metric["usher_sync_unit_duration"]
+    assert _metric_tokens(duration) == {
+        "usher_sync_unit_duration_seconds_sum",
+        "usher_sync_unit_duration_seconds_count",
+    }, f"the unit duration is not a sum over a count: {duration}"
+    assert [labels for labels, _operand in _aggregations(duration)] == [
+        {"source", "stage"},
+        {"source", "stage"},
+    ], f"both halves of the mean must keep source and stage: {duration}"
+
+    limit = by_metric["usher_source_listing_concurrency"]
+    assert [labels for labels, _operand in _aggregations(limit)] == [{"source"}], limit
+
+
 def test_the_dashboard_3_prose_claims_are_falsifiable() -> None:
     """The four description checks above are substring scans.
 
@@ -1047,10 +1081,10 @@ def test_the_dashboard_3_prose_claims_are_falsifiable() -> None:
     assert 'status="error"' not in "429s over the total"
     assert "{{outcome}}" not in "{{trigger}}"
 
-    with pytest.raises(AssertionError, match="ten panels"):
-        titles = ["only", "nine", "of", "them", "here", "and", "no", "more", "sadly"]
-        assert len(titles) == 10, (
-            "dashboard 3 is ten panels -- PRD 10's nine items, with queue depth drawn "
+    with pytest.raises(AssertionError, match="eleven panels"):
+        titles = ["only", "ten", "of", "them", "here", "and", "no", "more", "at", "all"]
+        assert len(titles) == 11, (
+            "dashboard 3 is eleven panels -- PRD 10's ten items, with queue depth drawn "
             f"twice -- not {len(titles)}"
         )
 

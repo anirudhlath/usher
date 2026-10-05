@@ -21,7 +21,7 @@ from tests.contract.sync_run_repository_contract import (
 )
 from tests.integration.conftest import Analyze
 from usher.db.repositories.source import PostgresSourceRepository
-from usher.db.repositories.sync import _INCOMPLETE, PostgresSyncRunRepository
+from usher.db.repositories.sync import _NEWEST, PostgresSyncRunRepository
 from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
 from usher.domain.source import Source
@@ -135,7 +135,7 @@ async def test_the_resume_query_uses_the_source_kind_index(
     Not `"Sort" not in plan`, which `Incremental Sort` contains: the two plans are a full
     sort over a source's whole history versus a sort of one tied group at the head of an
     index scan, so this names the node it wants plus the `Presorted Key` that says the
-    index really did supply the leading key. `_INCOMPLETE` is imported rather than
+    index really did supply the leading key. `_NEWEST` is imported rather than
     transcribed so the assertion cannot drift off the statement it describes.
     """
     for index in range(500):
@@ -150,7 +150,7 @@ async def test_the_resume_query_uses_the_source_kind_index(
     plan = "\n".join(
         (
             await session.execute(
-                text("EXPLAIN " + _INCOMPLETE),
+                text("EXPLAIN " + _NEWEST),
                 {"source_id": source_id, "kind": SyncRunKind.WATCH_STATE.value},
             )
         )

@@ -1,6 +1,7 @@
 """Per-source sync bookkeeping (PRD 02's `sync_runs`)."""
 
 import uuid
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from enum import StrEnum
 
@@ -115,3 +116,33 @@ class SyncRunUnit(DomainModel):
     expected_items: int | None = Field(default=None, ge=0)
     items_seen: int = Field(default=0, ge=0)
     status: SyncRunUnitStatus = SyncRunUnitStatus.PENDING
+
+
+class WalkProgress(DomainModel):
+    """Where a whole-library walk's plan stands, as its units say."""
+
+    stage: WalkStage
+    units_done: int = Field(ge=0)
+    units_total: int = Field(ge=1)
+    items_expected: int | None = Field(default=None, ge=0)
+
+
+def walk_progress(units: Iterable[SyncRunUnit]) -> WalkProgress | None:
+    """Where the walk these units plan stands, or `None` for a walk without a plan.
+
+    `stage` is the first stage, in walking order, still holding a unit that has not
+    completed, or the last stage the plan has once every unit has. `items_expected`
+    sums the counts the plan knew, and is `None` when it knew none.
+    """
+    stored = list(units)
+    if not stored:
+        return None
+    open_stages = {unit.stage for unit in stored if unit.status is not SyncRunUnitStatus.COMPLETED}
+    planned = [stage for stage in STAGE_ORDER if any(unit.stage is stage for unit in stored)]
+    counts = [unit.expected_items for unit in stored if unit.expected_items is not None]
+    return WalkProgress(
+        stage=next((stage for stage in planned if stage in open_stages), planned[-1]),
+        units_done=sum(unit.status is SyncRunUnitStatus.COMPLETED for unit in stored),
+        units_total=len(stored),
+        items_expected=sum(counts) if counts else None,
+    )

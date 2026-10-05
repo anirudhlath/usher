@@ -28,6 +28,12 @@ Versioning is `0.x` while the wire contract may still move —
 - The watch lane runs as soon as a whole-library walk has stored what the
   account is watching — played, in progress and next up — so a household's own
   shelves fill long before the walk ends. It still runs after the walk.
+- `GET /admin/sources/{id}/status` carries `last_sync`, the source's newest
+  full or delta walk. It, every `sync.progress` frame and `usher sync-status`
+  say where a whole-library walk's plan stands: the stage being walked, units
+  done of units planned, and the items the plan expected. A histogram,
+  `usher.sync.unit.duration`, and a new Dashboard 3 panel show how long each
+  unit takes beside the listing limit's backoff.
 
 ### Changed
 

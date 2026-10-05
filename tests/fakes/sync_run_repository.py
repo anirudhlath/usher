@@ -52,18 +52,12 @@ class FakeSyncRunRepository(SyncRunRepository):
             return None
         return max(run.started_at for run in completed)
 
-    async def latest_incomplete_run(
-        self, source_id: uuid.UUID, kind: SyncRunKind
-    ) -> SyncRun | None:
-        # The *newest* run, and then a status test. See the port for why the
-        # other spelling is wrong; it is argued there, once.
+    async def latest_run(self, source_id: uuid.UUID, kind: SyncRunKind) -> SyncRun | None:
+        # Newest by `(started_at, id)`, the Postgres arm's `ORDER BY`.
         found = [
             one for one in self._runs.values() if one.source_id == source_id and one.kind is kind
         ]
-        if not found:
-            return None
-        newest = max(found, key=lambda one: (one.started_at, one.id))
-        return None if newest.status is SyncRunStatus.COMPLETED else newest
+        return max(found, key=lambda one: (one.started_at, one.id)) if found else None
 
     async def add_units(self, units: Sequence[SyncRunUnit]) -> None:
         # All or nothing, as the SAVEPOINT makes it on Postgres.

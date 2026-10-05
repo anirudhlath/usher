@@ -3,7 +3,7 @@
 import asyncio
 import time
 from collections import deque
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -20,7 +20,9 @@ from usher.domain.sync import (
     SyncRunStatus,
     SyncRunUnit,
     SyncRunUnitStatus,
+    WalkProgress,
     WalkStage,
+    walk_progress,
 )
 from usher.ports.errors import UsherPortError
 from usher.ports.events import ClientEvent, ClientEventKind, EventPublisher
@@ -42,6 +44,13 @@ _retraction_fraction = _meter.create_histogram(
     "usher.sync.retraction.fraction",
     unit="1",
     description="Fraction of a source's items a full walk retracted, or would have",
+)
+
+#: A whole-library walk's unit, from the walker's claim to the unit's last commit.
+_unit_duration = _meter.create_histogram(
+    "usher.sync.unit.duration",
+    unit="s",
+    description="Wall time per unit of a whole-library walk, from claim to last commit",
 )
 
 
@@ -126,10 +135,12 @@ class _Progress:
     by holding on to it.
     """
 
-    __slots__ = ("run",)
+    __slots__ = ("run", "units")
 
     def __init__(self, run: SyncRun) -> None:
         self.run = run
+        # A planned walk's units by key, as last committed; empty for a single walk.
+        self.units: dict[str, SyncRunUnit] = {}
 
 
 class ReconcileService:
@@ -466,6 +477,7 @@ class ReconcileService:
             ]
             await self._runs.add_units(units)
             await self._beat(progress)
+        progress.units = {unit.unit_key: unit for unit in units}
         for stage in STAGE_ORDER:
             staged = [
                 unit
@@ -498,13 +510,23 @@ class ReconcileService:
         walkers still fetching are cancelled and awaited first.
         """
         claimable = deque(sorted(units, key=lambda unit: unit.expected_items or 0, reverse=True))
+        claimed: dict[str, datetime] = {}
+
+        def claim() -> SyncRunUnit | None:
+            # A unit's duration runs from here, the moment a walker takes it.
+            if not claimable:
+                return None
+            unit = claimable.popleft()
+            claimed[unit.unit_key] = self._clock()
+            return unit
+
         queue: asyncio.Queue[_Fetched] = asyncio.Queue(maxsize=self._walkers)
         walkers = [
-            asyncio.create_task(self._fetch(adapter, claimable, queue))
+            asyncio.create_task(self._fetch(adapter, claim, queue))
             for _ in range(min(self._walkers, len(units)))
         ]
         try:
-            await self._write(source, progress, units, queue)
+            await self._write(source, progress, units, queue, claimed)
         finally:
             for walker in walkers:
                 walker.cancel()
@@ -512,15 +534,16 @@ class ReconcileService:
 
     @staticmethod
     async def _fetch(
-        adapter: SourceAdapter, claimable: deque[SyncRunUnit], queue: asyncio.Queue[_Fetched]
+        adapter: SourceAdapter,
+        claim: Callable[[], SyncRunUnit | None],
+        queue: asyncio.Queue[_Fetched],
     ) -> None:
         """A walker: claim the next unit, put its pages on `queue`, then its end.
 
         A walker never touches the database. A unit that raises puts the error on
         the queue in place of its end, and the walker stops.
         """
-        while claimable:
-            unit = claimable.popleft()
+        while (unit := claim()) is not None:
             try:
                 pages = adapter.list_unit(unit.unit_key, start_index=unit.position)
                 async with aclosing(pages):
@@ -537,6 +560,7 @@ class ReconcileService:
         progress: _Progress,
         units: Sequence[SyncRunUnit],
         queue: asyncio.Queue[_Fetched],
+        claimed: Mapping[str, datetime],
     ) -> None:
         """The one writer: each unit's pages, committed once they add up to a batch.
 
@@ -544,6 +568,7 @@ class ReconcileService:
         ends, then committed with its position, the run's counters and a new
         heartbeat. A beat of the heartbeat alone falls due `heartbeat_seconds`
         after the last commit or beat, whether or not pages are arriving.
+        Each unit that completes records the seconds since a walker claimed it.
         Returns once every unit has committed complete. A unit that failed is
         saved `failed` at its committed position and its error raised; the pages
         held for it are dropped.
@@ -580,6 +605,10 @@ class ReconcileService:
             held[unit.unit_key] = []
             if done:
                 open_units -= 1
+                _unit_duration.record(
+                    (self._clock() - claimed[unit.unit_key]).total_seconds(),
+                    {"source": source.name, "stage": unit.stage.value},
+                )
 
     async def _commit_unit(
         self,
@@ -601,8 +630,13 @@ class ReconcileService:
             items_seen=unit.items_seen + len(items),
             status=SyncRunUnitStatus.COMPLETED if done else SyncRunUnitStatus.RUNNING,
         )
+        progress.units[unit.unit_key] = unit
         progress.run = await self._flush(
-            source, progress.run.evolve(heartbeat_at=self._clock()), items, unit=unit
+            source,
+            progress.run.evolve(heartbeat_at=self._clock()),
+            items,
+            unit=unit,
+            walk=walk_progress(progress.units.values()),
         )
         return unit
 
@@ -619,6 +653,7 @@ class ReconcileService:
         batch: Sequence[SourceItem],
         *,
         unit: SyncRunUnit | None = None,
+        walk: WalkProgress | None = None,
     ) -> SyncRun:
         # `run.started_at`, not `now()`: `last_seen_at` means "the run that
         # saw this item", which is the quantity the sweep's
@@ -638,13 +673,15 @@ class ReconcileService:
         # One commit per batch, exactly like BootstrapService: a crash costs
         # the batch in flight, never the walk.
         await self._commit()
-        if batch:
-            # A unit's end can commit an empty batch, to save the unit `completed`;
-            # it moved no counter, so it is no frame (PRD 07: one per batch).
-            await self._publish_progress(source, run)
+        # Every flush is a frame: a single walk flushes only batches with items (PRD 07:
+        # one per batch), and a planned walk's only empty flush is a unit's end, which
+        # moves no item counter but moves `units_done`, and can move `stage`.
+        await self._publish_progress(source, run, walk)
         return run
 
-    async def _publish_progress(self, source: Source, run: SyncRun) -> None:
+    async def _publish_progress(
+        self, source: Source, run: SyncRun, walk: WalkProgress | None = None
+    ) -> None:
         """One `sync.progress` per batch, scoped to no title.
 
         Per batch rather than per run, because an admin UI's progress bar is the
@@ -670,6 +707,11 @@ class ReconcileService:
                     "items_seen": run.items_seen,
                     "items_matched": run.items_matched,
                     "items_unmatched": run.items_unmatched,
+                    # Where a planned walk's plan stands; a single walk's frame says `None`.
+                    "stage": walk.stage.value if walk is not None else None,
+                    "units_done": walk.units_done if walk is not None else None,
+                    "units_total": walk.units_total if walk is not None else None,
+                    "items_expected": walk.items_expected if walk is not None else None,
                 },
             )
         )

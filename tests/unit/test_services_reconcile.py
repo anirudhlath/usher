@@ -10,7 +10,9 @@ from itertools import groupby, pairwise
 import httpx
 import pytest
 from loguru import logger
-from opentelemetry import trace
+from opentelemetry import metrics, trace
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import HistogramDataPoint, InMemoryMetricReader
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -1302,16 +1304,21 @@ async def test_pages_that_keep_arriving_below_a_batch_still_let_the_heartbeat_mo
     assert len(beats) >= 2, "no beat while pages kept arriving"
 
 
-async def test_a_unit_that_ends_on_a_batch_boundary_publishes_no_second_frame() -> None:
-    """Its end commits an empty batch to save the unit `completed`, and that is no frame.
+async def test_a_unit_that_ends_on_a_batch_boundary_still_says_where_its_plan_stands() -> None:
+    """Its end commits an empty batch to save the unit `completed`, and that is a frame.
 
-    PRD 07 publishes one `sync.progress` per committed batch, and an empty one moved
-    no counter: four items in batches of two are two frames, not three.
+    The empty batch moved no item counter, but it moved `units_done`: four items in
+    batches of two are three frames, the last saying the unit is done.
     """
     fixture = _Fixture(batch_size=2)
     _shelve(fixture, "Films", range(4))
     run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
-    assert _progress(fixture) == [2, 4]
+    frames = [
+        (event.data["items_seen"], event.data["units_done"])
+        for event in fixture.events.published
+        if event.kind is ClientEventKind.SYNC_PROGRESS
+    ]
+    assert frames == [(2, 0), (4, 0), (4, 1)]
     [unit] = await fixture.runs.units_for(run.id)
     assert unit.status is SyncRunUnitStatus.COMPLETED
 
@@ -1951,3 +1958,119 @@ async def test_the_hook_is_handed_a_beat_that_moves_the_walks_heartbeat() -> Non
 
     assert committed[0] == (2, NOW), "the premise: the seed's commits beat at NOW"
     assert committed[1] == (2, NOW + STALE_AFTER)
+
+
+# -- where a planned walk stands: its frames, and each unit's duration -------
+
+
+@pytest.fixture
+def meter_reader() -> Iterator[InMemoryMetricReader]:
+    """A provider of this test's own; `tests/conftest.py` resets the set-once global."""
+    reader = InMemoryMetricReader()
+    metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
+    yield reader
+
+
+def _unit_durations(reader: InMemoryMetricReader) -> dict[tuple[str, str], tuple[int, float]]:
+    """`usher.sync.unit.duration` as `{(source, stage): (count, sum)}`."""
+    found: dict[tuple[str, str], tuple[int, float]] = {}
+    data = reader.get_metrics_data()
+    for resource in data.resource_metrics if data is not None else []:
+        for scope in resource.scope_metrics:
+            for metric in scope.metrics:
+                if metric.name != "usher.sync.unit.duration":
+                    continue
+                for point in metric.data.data_points:
+                    assert isinstance(point, HistogramDataPoint)
+                    labels = dict(point.attributes or {})
+                    found[(str(labels["source"]), str(labels["stage"]))] = (point.count, point.sum)
+    return found
+
+
+async def test_every_frame_of_a_planned_walk_says_where_its_plan_stands() -> None:
+    """The seed's own frames say `seed`; from its last commit on, the walk is in `titles`.
+
+    Watched holds the seed and no count, as Emby's seed does, so `items_expected` is
+    Films' three alone. `items_seen` leads each frame as the premise of its order.
+    """
+    fixture = _Fixture(batch_size=2)
+    _shelve(fixture, "Watched", range(3), stage=WalkStage.SEED)
+    _shelve(fixture, "Films", range(10, 13))
+    fixture.adapter.uncounted("Watched")
+
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+
+    frames = [
+        (
+            event.data["items_seen"],
+            event.data["stage"],
+            event.data["units_done"],
+            event.data["units_total"],
+            event.data["items_expected"],
+        )
+        for event in fixture.events.published
+        if event.kind is ClientEventKind.SYNC_PROGRESS
+    ]
+    assert frames == [
+        (2, "seed", 0, 2, 3),
+        (3, "titles", 1, 2, 3),
+        (5, "titles", 1, 2, 3),
+        (6, "titles", 2, 2, 3),
+    ]
+
+
+async def test_a_single_walks_frames_carry_no_plan() -> None:
+    """Every frame has the same keys; a walk without a plan says `None` for all four."""
+    fixture = _Fixture(batch_size=2)
+    for index in range(3):
+        fixture.adapter.seed(_item(f"m{index}"), T0)
+
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter, plan=False)
+
+    frames = [
+        event.data
+        for event in fixture.events.published
+        if event.kind is ClientEventKind.SYNC_PROGRESS
+    ]
+    assert [frame["items_seen"] for frame in frames] == [2, 3], "the premise: two commits"
+    assert {
+        (frame["stage"], frame["units_done"], frame["units_total"], frame["items_expected"])
+        for frame in frames
+    } == {(None, None, None, None)}
+
+
+async def test_a_unit_is_timed_from_its_walkers_claim_to_its_last_commit(
+    meter_reader: InMemoryMetricReader,
+) -> None:
+    """Once per completed unit, under its stage, from the claim rather than the stage's start.
+
+    One walker, so Shorts is claimed only once Films has completed: the 90 s that pass
+    while Films is held are Films' alone, and Shorts records none of them.
+    """
+    clock = _Clock(NOW)
+    fixture = _Fixture(batch_size=1, walkers=1, clock=clock)
+    _shelve(fixture, "Watched", range(1), stage=WalkStage.SEED)
+    _shelve(fixture, "Films", range(10, 12))
+    _shelve(fixture, "Shorts", range(20, 21))
+    release = fixture.adapter.hold("Films")
+
+    walk = asyncio.create_task(
+        fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    )
+    async with asyncio.timeout(5):
+        while ("library:Films", 0) not in fixture.adapter.unit_starts:
+            await asyncio.sleep(0)
+    clock.now = NOW + timedelta(seconds=90)
+    release.set()
+    run = await asyncio.wait_for(walk, 5)
+
+    assert run.status is SyncRunStatus.COMPLETED, "the premise: the walk finished"
+    assert fixture.adapter.unit_starts == [
+        ("library:Watched", 0),
+        ("library:Films", 0),
+        ("library:Shorts", 0),
+    ], "the premise: Films, the larger, was claimed before Shorts"
+    assert _unit_durations(meter_reader) == {
+        (fixture.source.name, "seed"): (1, 0.0),
+        (fixture.source.name, "titles"): (2, 90.0),
+    }

@@ -31,10 +31,18 @@ from usher.config import Settings
 from usher.db.base import build_engine
 from usher.db.models.source import SourceCredentialRow, SourceRow
 from usher.db.repositories.credentials import build_cipher
+from usher.db.repositories.sync import PostgresSyncRunRepository
 from usher.db.users import ensure_default_user
 from usher.domain.jobs import JobKind
 from usher.domain.source import Source
-from usher.domain.sync import SyncRunKind, SyncRunStatus
+from usher.domain.sync import (
+    SyncRun,
+    SyncRunKind,
+    SyncRunStatus,
+    SyncRunUnit,
+    SyncRunUnitStatus,
+    WalkStage,
+)
 from usher.ports.credentials import SourceCredentials
 from usher.ports.errors import PortUnavailable
 from usher.ports.events import NullEventPublisher
@@ -298,6 +306,7 @@ async def test_status_reports_a_healthy_source(client: AsyncClient) -> None:
     # rendering that as `false` would show an unperformed check as a performed one.
     assert body["is_administrator"] is False
     assert body["server_version"] == SERVER_VERSION
+    assert body["last_sync"] is None, "no walk has run, and the field is there to say so"
 
 
 async def test_status_reports_the_running_lanes_push_health(
@@ -353,6 +362,138 @@ async def _no_work() -> AsyncIterator[Pipeline]:
 
 async def _no_user() -> uuid.UUID:
     raise AssertionError("a status read must not resolve the default user")
+
+
+async def test_status_carries_the_newest_item_walk_and_where_its_plan_stands(
+    client: AsyncClient, app: FastAPI
+) -> None:
+    """The newest full or delta run, never the watch lane's, which is newer than both."""
+    created = (await client.post("/admin/sources", json=_payload())).json()
+    source_id = uuid.UUID(created["id"])
+    older = SyncRun(
+        source_id=source_id,
+        kind=SyncRunKind.DELTA,
+        status=SyncRunStatus.COMPLETED,
+        started_at=datetime(2026, 9, 1, tzinfo=UTC),
+        finished_at=datetime(2026, 9, 1, 1, tzinfo=UTC),
+    )
+    walk = SyncRun(
+        source_id=source_id,
+        kind=SyncRunKind.FULL,
+        items_seen=7,
+        items_matched=6,
+        items_unmatched=1,
+        started_at=datetime(2026, 9, 2, tzinfo=UTC),
+        heartbeat_at=datetime(2026, 9, 2, 0, 5, tzinfo=UTC),
+    )
+    watch = SyncRun(
+        source_id=source_id,
+        kind=SyncRunKind.WATCH_STATE,
+        status=SyncRunStatus.COMPLETED,
+        started_at=datetime(2026, 9, 3, tzinfo=UTC),
+    )
+    factory: async_sessionmaker[AsyncSession] = app.state.session_factory
+    async with factory() as session:
+        runs = PostgresSyncRunRepository(session)
+        for one in (older, walk, watch):
+            await runs.add(one)
+        await runs.add_units(
+            [
+                SyncRunUnit(
+                    run_id=walk.id,
+                    unit_key="seed",
+                    stage=WalkStage.SEED,
+                    label="seed",
+                    status=SyncRunUnitStatus.COMPLETED,
+                ),
+                SyncRunUnit(
+                    run_id=walk.id,
+                    unit_key="titles:a",
+                    stage=WalkStage.TITLES,
+                    label="titles a",
+                    expected_items=4,
+                    status=SyncRunUnitStatus.COMPLETED,
+                ),
+                SyncRunUnit(
+                    run_id=walk.id,
+                    unit_key="episodes:a",
+                    stage=WalkStage.EPISODES,
+                    label="episodes a",
+                    expected_items=6,
+                ),
+            ]
+        )
+        await session.commit()
+
+    body = (await client.get(f"/admin/sources/{created['id']}/status")).json()
+
+    assert body["last_sync"] == {
+        "kind": "full",
+        "status": "running",
+        "started_at": "2026-09-02T00:00:00Z",
+        "finished_at": None,
+        "heartbeat_at": "2026-09-02T00:05:00Z",
+        "items_seen": 7,
+        "items_matched": 6,
+        "items_unmatched": 1,
+        "items_retracted": 0,
+        "error": None,
+        "stage": "episodes",
+        "units_done": 2,
+        "units_total": 3,
+        "items_expected": 10,
+    }
+
+
+async def test_status_of_a_single_walk_carries_no_plan(client: AsyncClient, app: FastAPI) -> None:
+    """A delta newer than the last full walk is the one reported, and it planned nothing.
+
+    The full walk had a plan, so reading its units would put one on the delta.
+    """
+    created = (await client.post("/admin/sources", json=_payload())).json()
+    source_id = uuid.UUID(created["id"])
+    planned = SyncRun(
+        source_id=source_id,
+        kind=SyncRunKind.FULL,
+        status=SyncRunStatus.COMPLETED,
+        started_at=datetime(2026, 9, 1, tzinfo=UTC),
+        finished_at=datetime(2026, 9, 1, 1, tzinfo=UTC),
+    )
+    single = SyncRun(
+        source_id=source_id,
+        kind=SyncRunKind.DELTA,
+        status=SyncRunStatus.COMPLETED,
+        started_at=datetime(2026, 9, 2, tzinfo=UTC),
+        finished_at=datetime(2026, 9, 2, 0, 1, tzinfo=UTC),
+    )
+    factory: async_sessionmaker[AsyncSession] = app.state.session_factory
+    async with factory() as session:
+        runs = PostgresSyncRunRepository(session)
+        await runs.add(planned)
+        await runs.add(single)
+        await runs.add_units(
+            [
+                SyncRunUnit(
+                    run_id=planned.id,
+                    unit_key="titles:a",
+                    stage=WalkStage.TITLES,
+                    label="titles a",
+                    expected_items=4,
+                    status=SyncRunUnitStatus.COMPLETED,
+                )
+            ]
+        )
+        await session.commit()
+
+    last = (await client.get(f"/admin/sources/{created['id']}/status")).json()["last_sync"]
+
+    assert (last["kind"], last["started_at"]) == ("delta", "2026-09-02T00:00:00Z")
+    assert [last[key] for key in ("stage", "units_done", "units_total", "items_expected")] == [
+        None,
+        None,
+        None,
+        None,
+    ]
 
 
 async def test_status_distinguishes_bad_credentials_from_unreachable(

@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import AwareDatetime
 
-from usher.domain.sync import SyncRun, SyncRunKind, SyncRunUnit
+from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus, SyncRunUnit
 
 __all__ = [
     "CachedPayload",
@@ -68,6 +68,12 @@ class SyncRunRepository(ABC):
         """
 
     @abstractmethod
+    async def latest_run(self, source_id: uuid.UUID, kind: SyncRunKind) -> SyncRun | None:
+        """The newest run of this kind, whatever its status; `None` if there is none.
+
+        Newest by `started_at`, then by `id`, which is the order `list_for_source` uses.
+        """
+
     async def latest_incomplete_run(
         self, source_id: uuid.UUID, kind: SyncRunKind
     ) -> SyncRun | None:
@@ -85,6 +91,9 @@ class SyncRunRepository(ABC):
         from its cursor, but a walk of the whole library has to cost a page
         rather than the run when it fails.
         """
+        newest = await self.latest_run(source_id, kind)
+        # The newest row, and *then* the status test -- never "the newest that is not".
+        return None if newest is None or newest.status is SyncRunStatus.COMPLETED else newest
 
     @abstractmethod
     async def add_units(self, units: Sequence[SyncRunUnit]) -> None:

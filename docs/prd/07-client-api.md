@@ -157,7 +157,12 @@ position, not the play count.
 **`GET /admin/sources/{id}/status`** renders a `SourceStatus`, not a bool:
 reachable, authenticated, `push_available` and `is_administrator` are each
 three-valued where `null` means the check did not run
-([03](03-sources-and-sync.md)).
+([03](03-sources-and-sync.md)). Its `last_sync` is the source's newest full or
+delta walk — never the watch lane's — or `null` before the first: `kind`,
+`status`, `started_at`, `finished_at`, `heartbeat_at`, the four item counts and
+`error`, then `stage`, `units_done`, `units_total` and `items_expected`, which
+say where a whole-library walk's plan stands and are `null` for a walk without
+one.
 
 **Every route that enqueues answers 202 with the job's key**, and the key is
 `"{source id}:{lane}"` for a sync, the household id for a curation and the
@@ -364,7 +369,7 @@ holds no `queue_unavailable`, no `database_unavailable` and no
 | `title.updated` | Title id + changed fields | Patch in place |
 | `watchstate.updated` | Title/episode id, position, played | Update progress |
 | `row.invalidated` | Row slug | Refetch that row |
-| `sync.progress` | Source, counts, phase | Admin UI only |
+| `sync.progress` | Source, kind, counts; a whole-library walk's stage, units and expected items | Admin UI only |
 | `bootstrap.progress` | Phase, dataset, rows seen, rows written, cursor position | Admin UI only |
 
 - Subscriptions are scoped by query (`?titles=id1,id2`).
@@ -418,6 +423,12 @@ through the 30 s screen TTL and a demand read
 
 **`sync.progress` and `bootstrap.progress` are one frame per committed batch,
 never one per run**, and never before that batch's own commit.
+A whole-library walk's `sync.progress` says where its plan stands: `stage` is
+the stage being walked (the last one once the walk has finished),
+`units_done` and `units_total` count units, and `items_expected` sums the item
+counts the plan knew, `null` when it knew none. A single walk sends those four
+as `null`. `items_seen` can pass `items_expected`, because the items the seed
+reads are read again in their libraries.
 `bootstrap.progress` carries no percent: its cursor position is a
 dataset-defined offset with no denominator — a byte offset for the IMDb dumps,
 a page number for a SPARQL result set. It is scoped to no title, so no

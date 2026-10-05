@@ -39,9 +39,9 @@ ORDER BY started_at DESC
 LIMIT 1
 """
 
-# No `WHERE status <> 'completed'` -- the status test is in Python, on the one row this
-# returns.
-_INCOMPLETE = """
+# The newest run of a kind, whatever its status. `latest_incomplete_run` tests the status on
+# the one row this returns; see the port for why it never filters on it.
+_NEWEST = """
 SELECT * FROM sync_runs
 WHERE source_id = :source_id AND kind = :kind
 ORDER BY started_at DESC, id DESC
@@ -169,27 +169,21 @@ class PostgresSyncRunRepository(SyncRunRepository):
             ).scalar_one_or_none()
         return found
 
-    async def latest_incomplete_run(
-        self, source_id: uuid.UUID, kind: SyncRunKind
-    ) -> SyncRun | None:
+    async def latest_run(self, source_id: uuid.UUID, kind: SyncRunKind) -> SyncRun | None:
         with self._session.no_autoflush:
             found = (
                 (
                     await self._session.execute(
-                        text(_INCOMPLETE), {"source_id": source_id, "kind": kind.value}
+                        text(_NEWEST), {"source_id": source_id, "kind": kind.value}
                     )
                 )
                 .mappings()
                 .one_or_none()
             )
-        if found is None:
-            return None
         # `model_validate(dict(row))`, which is what `list_for_source` does with
         # a `text()` mapping row -- `_to_domain` takes a `SyncRunRow`, and this
         # statement returns no ORM entity to hand it.
-        newest = SyncRun.model_validate(dict(found))
-        # The newest row, and *then* the status test. See the port.
-        return None if newest.status is SyncRunStatus.COMPLETED else newest
+        return None if found is None else SyncRun.model_validate(dict(found))
 
     async def add_units(self, units: Sequence[SyncRunUnit]) -> None:
         if not units:

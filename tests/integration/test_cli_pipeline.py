@@ -42,7 +42,14 @@ from usher.domain.enums import EnrichmentState, SourceKind, TitleKind
 from usher.domain.ids import new_id
 from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.source import Source
-from usher.domain.sync import SyncRun, SyncRunKind, SyncRunUnit, WalkStage
+from usher.domain.sync import (
+    SyncRun,
+    SyncRunKind,
+    SyncRunStatus,
+    SyncRunUnit,
+    SyncRunUnitStatus,
+    WalkStage,
+)
 from usher.domain.title import Title
 from usher.ports.ingest import MediaItemUpsert
 from usher.ports.jobs import JobRequest
@@ -140,6 +147,74 @@ async def test_sync_status_works_before_any_sync_has_run(
     for kind in JobKind:
         assert f"queue {kind.value}" in printed
     assert "parked jobs: 0" in printed
+
+
+async def test_sync_status_prints_where_a_whole_library_walks_plan_stands(
+    cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A planned run gets a plan line under it; a single walk's run gets none."""
+    source = Source(
+        kind=SourceKind.EMBY,
+        name="cli-planned",
+        base_url="https://emby.invalid",
+        credentials_ref=f"ref-{new_id()}",
+        device_id=str(new_id()),
+    )
+    planned = SyncRun(
+        source_id=source.id, kind=SyncRunKind.FULL, started_at=datetime(2026, 9, 2, tzinfo=UTC)
+    )
+    single = SyncRun(
+        source_id=source.id,
+        kind=SyncRunKind.DELTA,
+        status=SyncRunStatus.COMPLETED,
+        started_at=datetime(2026, 9, 1, tzinfo=UTC),
+    )
+    async with _session_for(cli_settings) as session:
+        await PostgresSourceRepository(session).add(source)
+        runs = PostgresSyncRunRepository(session)
+        await runs.add(single)
+        await runs.add(planned)
+        await runs.add_units(
+            [
+                SyncRunUnit(
+                    run_id=planned.id,
+                    unit_key="seed",
+                    stage=WalkStage.SEED,
+                    label="seed",
+                    status=SyncRunUnitStatus.COMPLETED,
+                ),
+                SyncRunUnit(
+                    run_id=planned.id,
+                    unit_key="titles:a",
+                    stage=WalkStage.TITLES,
+                    label="titles a",
+                    expected_items=4,
+                    status=SyncRunUnitStatus.RUNNING,
+                ),
+                SyncRunUnit(
+                    run_id=planned.id,
+                    unit_key="episodes:a",
+                    stage=WalkStage.EPISODES,
+                    label="episodes a",
+                    expected_items=6,
+                ),
+            ]
+        )
+        await session.commit()
+
+    await _sync_status(cli_settings)
+
+    lines = capsys.readouterr().out.splitlines()
+    at = next(
+        index
+        for index, line in enumerate(lines)
+        if line.startswith("cli-planned") and " full " in line
+    )
+    assert lines[at + 1].strip() == "plan: stage=titles units=1/3 expected=10"
+    assert lines[at + 2].startswith("cli-planned") and " delta " in lines[at + 2], (
+        "the premise: the single walk is listed next"
+    )
+    assert not lines[at + 3].strip().startswith("plan:"), "a single walk printed a plan line"
 
 
 async def test_unmatched_reports_an_empty_review_queue(
