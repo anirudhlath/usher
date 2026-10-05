@@ -1909,10 +1909,10 @@ async def test_a_stalled_page_moves_the_heartbeat_and_awaits_the_beat_before_it_
     await fixture.given_completed_walk()
     for index in range(5):
         await fixture.given_matched(f"movie-{index}")
-    beats: list[tuple[int, SyncRun]] = []
+    beats: list[tuple[int, SyncRun, bool]] = []
 
     async def beat() -> None:
-        beats.append((fixture.commits, fixture.saved[-1]))
+        beats.append((fixture.commits, fixture.saved[-1], adapter.stalled.is_set()))
 
     walk = asyncio.create_task(
         fixture.service.sync(fixture.source, adapter, user_id=fixture.user_id, beat=beat)
@@ -1920,17 +1920,21 @@ async def test_a_stalled_page_moves_the_heartbeat_and_awaits_the_beat_before_it_
     try:
         with contextlib.suppress(TimeoutError):
             async with asyncio.timeout(5):
-                while len(beats) < 4:
+                while sum(stalled for *_, stalled in beats) < 3:
                     await asyncio.sleep(0.01)
         assert adapter.stalled.is_set(), "the premise: the page stalled"
         assert fixture.positions == [2], "the premise: one batch committed, the third state held"
-        assert len(beats) >= 4, "fewer than three beats while the page stalled"
-        commits = [count for count, _ in beats]
-        heartbeats = [saved.heartbeat_at for _, saved in beats if saved.heartbeat_at is not None]
+        stalled_beats = sum(stalled for *_, stalled in beats)
+        assert stalled_beats >= 3, "fewer than three beats while the page stalled"
+        commits = [count for count, *_ in beats]
+        heartbeats = [saved.heartbeat_at for _, saved, _ in beats if saved.heartbeat_at is not None]
         assert commits == sorted(set(commits)), "a beat with no commit of its own before it"
         assert len(heartbeats) == len(beats)
         assert heartbeats == sorted(set(heartbeats)), "a beat with no save of its own before it"
-        assert {(saved.items_seen, saved.position) for _, saved in beats} == {(2, 2)}
+        # A slow process can take a beat before the first batch commits, at position 0.
+        carried = [(saved.items_seen, saved.position) for _, saved, _ in beats]
+        assert set(carried) <= {(0, 0), (2, 2)}, "a beat carried the state held for a batch"
+        assert carried[-1] == (2, 2), "a beat while stalled lost the committed position"
     finally:
         adapter.release.set()
         run = await walk
