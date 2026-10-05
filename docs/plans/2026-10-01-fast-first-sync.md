@@ -3371,9 +3371,9 @@ Each is repeated in the task where it happens.
 8. **The seed streams.** Each page is led by the series its episodes need that neither it nor an earlier page holds, fetched by `Ids` there and then. The spec reads every listing first and fetches the series after. (Task 14.)
 9. **A resumed seed starts again; every seed page resumes at 0.** A count into listings that may have changed could skip an item the watch lane is about to look for. (Task 14.)
 10. **The seed is planned only when both watch filters narrow the library, and a fallback plan keeps its seed.** A server that ignored a filter would make the seed a whole-library walk ahead of the real one. (Task 14.)
-11. **The watch lane after the walk reads back to the instant the walk began.** `WatchStateSyncService.sync` takes `since_at_most`. Without it, the run after the seed has moved the cursor past the walk's start, and a state saved meanwhile for an item not yet stored would be skipped. That run is the after-seed hook's. The item walk waits on it, handing it its beat, which the watch lane awaits with each batch it commits, so a long first watch walk never leaves the item walk looking dead to a second walk. (Task 18.)
+11. **The watch lane after the walk reads back to the instant the walk began.** `WatchStateSyncService.sync` takes `since_at_most`. Without it, the run after the seed has moved the cursor past the walk's start, and a state saved meanwhile for an item not yet stored would be skipped. That run is the after-seed hook's. The item walk waits on it, handing it its beat, which the watch lane awaits with each batch it commits and at least once a minute while it waits on a page, so a long first watch walk never leaves the item walk looking dead to a second walk. (Task 18, and fix 3 after the whole-branch review.)
 12. **A run whose sweep was refused is not resumed.** The next attempt reads the library again, because a resume would re-run the sweep over the same rows and refuse again. (Task 17.)
-13. **A watch-state run carries a heartbeat too, and a live one is left alone.** The spec gives the heartbeat to whole-library walks; a watch-state run's is set when it is inserted or reclaimed and on every batch. A `running` watch run whose heartbeat is younger than 10 minutes is another walk's, alive: a second watch run neither supersedes nor resumes it, and runs beside it in a row of its own — a delta from the latest completed cursor, or a filtered first walk when there is none. Nothing is refused, so no caller changes. Both runs merge on one key under one conflict rule, so they converge, but for a state that changes between their two reads, which can keep the earlier read until it next changes. (Task 17.)
+13. **A watch-state run carries a heartbeat too, and a live one is left alone.** The spec gives the heartbeat to whole-library walks; a watch-state run's is set when it is inserted or reclaimed, on every batch, and at least once a minute while it waits on a page. A `running` watch run whose heartbeat is younger than 10 minutes is another walk's, alive: a second watch run neither supersedes nor resumes it, and runs beside it in a row of its own — a delta from the latest completed cursor, or a filtered first walk when there is none. Nothing is refused, so no caller changes. Both runs merge on one key under one conflict rule, so they converge, but for a state that changes between their two reads, which can keep the earlier read until it next changes. (Task 17.)
 
 ### Review Focus (Phase 2)
 
@@ -6312,6 +6312,8 @@ git commit -m "emby: plan a whole-library walk as each library's titles, then it
 
 ### Task 14: The seed — what the account is watching, first
 
+**Changed after the whole-branch review** (fix 6, after Task 19): a seed's read by `Ids` is timed as `op="series"`, and `test_a_seed_s_reads_by_ids_and_next_up_keep_the_list_label` is replaced.
+
 Spec §2.2, "SEED". One unit, first in the plan: the `Filters=IsPlayed` items, the `Filters=IsResumable` items and `/Shows/NextUp`, each with full `ITEM_FIELDS`, with the series they belong to fetched by `Ids` and yielded ahead of their episodes. Task 18 runs the watch lane as soon as it has committed, which is what puts a household's own shelves within the 2-minute target.
 
 **Departures from the spec's letter (8, 9, 10):**
@@ -9102,6 +9104,8 @@ git commit -m "sync: walk a whole library as its planned units, with walkers and
 
 ### Task 17: Resume in place, refuse a live walk, supersede the rest
 
+**Changed after the whole-branch review** (fixes 1, 2 and 5, after Task 19): a delta's claim reads only planned walks, `STALE_AFTER` and the liveness rule live in `usher.domain.sync`, and the refusal says how long to wait.
+
 Spec §2.5's table, the resume half of §2.6, and §2.7's `started_at`. A whole-library walk first reads `latest_incomplete_run` for its kind. A `running` row whose heartbeat is under 10 minutes old is a live walk, and the new one raises `WalkRefused`. A row with units is resumed in place: the same row, the same `started_at`, its completed units skipped and every other unit continued from its committed position. Every other unfinished row of a whole-library walk is superseded — closed `failed` with `superseded: a whole-library walk restarts` unless it is `failed` already — and a fresh run starts. A delta row with neither units nor a heartbeat is a single walk's, and is left alone.
 
 `usher sync` prints the refusal and exits non-zero. The worker's `sync_handler` re-raises it as `JobDeferred` with `retry_after=STALE_AFTER.total_seconds()`, and `JobWorker` defers the job: back to `pending` without spending an attempt, so it never parks however long the other walk runs, and claimable again no sooner than `STALE_AFTER`. By then a walk whose process died with the job's lease has gone stale, and the retry resumes it rather than waiting for someone to ask again. That takes a queue operation, `JobQueue.defer`, and an exception of the worker's own, `services.jobs.JobDeferred`: a refusal is no `UsherPortError`, so neither `fail` nor the crash path sees it. A refusal also sets `usher.sync.refused` on its `sync.reconcile` span, beside `usher.sync.truncated`: Usher declined, and nothing upstream failed. The gap-closer passes `plan=False` (Task 16), so its item walk never claims and is never refused, which `api/lanes.py`'s comment there now says.
@@ -10632,6 +10636,8 @@ git commit -m "sync: resume an unfinished whole-library walk in place, and refus
 
 ### Task 18: The watch lane runs as soon as the seed has committed
 
+**Changed after the whole-branch review** (fixes 3 and 4, after Task 19): the watch lane reads its listing in a task of its own and beats while it waits on a page, and the run after a walk restarts a watch delta whose cursor is later than `since_at_most`.
+
 Spec §2.4, "The watch lane runs after the seed". `reconcile` takes an optional `after_seed` hook and awaits it once every `SEED` unit has committed complete, before any `TITLES` unit is claimed. It hands the hook a beat that moves the walk's heartbeat, and the watch lane awaits it with each batch it commits, so a long first watch walk never leaves the walk looking dead to a second process. A resumed walk whose seed completed in an earlier attempt awaits it too, because that attempt may have died before its watch run did. A plan with no `SEED` unit, a seed that fails, and every single walk never call it. The hook must not raise a `UsherPortError`, which `reconcile` would record as the walk's failure; `WatchStateSyncService.sync` never raises one. `usher sync` and the worker's `sync_handler` pass a hook that runs `WatchStateSyncService.sync`, and still run the watch lane after the walk. `usher sync` keeps a failed watch run from the hook for its exit line, like any other failed run, and counts a row once: the run after the walk may resume the row the hook's run failed, and what that run ends with is the row's outcome.
 
 Departure 11 happens here. **The watch lane after the walk reads back to the instant the walk began.** `WatchStateSyncService.sync` takes `since_at_most`, and a fresh delta's cursor becomes the earlier of its own and that instant; both callers pass the walk's `started_at`. The run after the seed moved the cursor past the walk's start, so a state saved meanwhile for an item the walk had not yet stored would otherwise be skipped for good. A first walk, which has no cursor, and a resumed delta, whose position counts into the stream its own cursor selects, keep theirs.
@@ -11523,6 +11529,8 @@ git commit -m "sync: run the watch lane as soon as a whole-library walk's seed h
 ---
 
 ### Task 19: Visibility — where a whole-library walk stands
+
+**Changed after the whole-branch review** (fix 2, after this task): `last_sync` and `usher sync-status` prefer a live whole-library walk to newer rows.
 
 Spec §2.8. Where a whole-library walk's plan stands is one computation over its units, `walk_progress`: the stage being walked, units done of units planned, and the items the plan expected. Three readers show it. Every `sync.progress` frame carries it. `GET /admin/sources/{id}/status` gains `last_sync`, the source's newest full or delta run, which carries it. `usher sync-status` prints it under each planned run. A histogram, `usher.sync.unit.duration`, times each unit from the walker's claim to its last commit. Dashboard 3 gains panel 11, which draws that histogram's mean beside Task 15's listing limit.
 
@@ -12935,6 +12943,48 @@ git add src/usher/domain/sync.py src/usher/ports/repository/sync.py \
   docs/prd/10-telemetry-and-dashboards.md CHANGELOG.md docs/guide/command-line.md
 git commit -m "sync: say where a whole-library walk stands, in its frames, the status route and sync-status"
 ```
+
+---
+
+### After the whole-branch review
+
+The whole-branch review of 48a2143d..29e81fcb found no Critical issue, one Important and six Minor. All seven were fixed on this branch before PR 2 opened, and a scoped re-review passed the fixes; the two residuals it raised were fixed after it. The tasks above keep the code they built, and each one this section changes says so at its top.
+
+1. **A delta claims against the newest planned walk only (Important).**
+   - **The defect.** With `USHER_PUSH_GAP_CLOSE=always`, the gap-closer's walk of a source with no cursor, `reconcile(DELTA, max_items=…, plan=False)`, writes a newer delta row with no heartbeat and no units. `_claim` judged only the newest row, so a second walk started beside a live one, and a failed walk restarted from 0.
+   - **The fix.** `SyncRunRepository.latest_planned_run(source_id, kind)` is the newest run of a kind that carries a heartbeat; on the item lanes only a planned walk writes one. `latest_incomplete_run` takes `planned=False` and chooses between that read and `latest_run`, under the same rule: the newest row, then the status test.
+   - **The claim.** `_claim` passes `planned=kind is SyncRunKind.DELTA`. A full walk still reads its newest row, so a pre-`m10g` full row is still superseded, and nothing makes an unplanned full walk. Its supersede is unconditional now: the old guard was true for every row the two reads return.
+   - **Cases.** Unit: `test_a_live_planned_delta_still_refuses_a_second_after_the_gap_closer_walks` and `test_a_failed_planned_delta_still_resumes_in_place_after_the_gap_closer_walks`. Postgres: `test_the_latest_planned_run_passes_over_a_newer_run_without_a_heartbeat` and `test_a_failed_planned_delta_resumes_in_place_after_the_gap_closer_walks_against_real_sql`.
+   - **Plants.** Drop the SQL's `AND heartbeat_at IS NOT NULL`; pass `planned=False` in `_claim`. (5e027532)
+2. **`last_sync` and `usher sync-status` show a live walk that newer rows would hide.**
+   - **One rule.** `STALE_AFTER` and `is_live(run, now)`, `running` with a heartbeat under `STALE_AFTER` old, moved to `usher.domain.sync`: the router may not import `services.reconcile`. `_claim`, the watch lane, the status route and `sync-status` all read it.
+   - **The read.** `SyncRunRepository.live_walk(source_id, now)` is the newer of the item lanes' live planned walks. Live, not merely unfinished: a planned delta orphaned once a cursor exists is never claimed again, and would stand as `last_sync` forever.
+   - **The surfaces.** `_last_sync` prefers the live walk, and otherwise takes the newest item walk as before. `sync-status` lists it, with its plan line, when its five newest runs leave it out.
+   - **Cases.** `test_status_prefers_a_live_whole_library_walk_to_a_newer_delta` (live and stale, both kinds) and `test_sync_status_lists_a_live_whole_library_walk_newer_runs_push_out` (four and five newer runs). (75f68abd)
+3. **A watch walk beats while it waits on a page.**
+   - **The defect.** A page riding out its retries can take about 20 minutes, past `STALE_AFTER`. While the after-seed hook ran, the item walk's heartbeat moved only with the watch lane's batches, so a second walk could resume the live one.
+   - **The fix.** `WatchStateSyncService` takes `heartbeat_seconds` (default 60). `_walk` reads states in a task of its own, under `aclosing`, through a queue bounded at the batch size. The walk's own task, the only one that touches the session, waits on the queue against a deadline: once `heartbeat_seconds` pass after its last commit or beat, `_checkpoint` saves a new heartbeat, commits and awaits `beat`.
+   - **Failure and exit.** An error the reader forwards is raised where the old `async for` raised it, with the partial batch uncommitted. Every exit cancels and awaits the reader. The port's `watch_state` is typed `AsyncGenerator`, which `aclosing` needs.
+   - **Cases.** `test_a_stalled_page_moves_the_heartbeat_and_awaits_the_beat_before_it_arrives`, `test_a_page_that_fails_after_a_stall_fails_the_run_at_its_committed_position`, `test_a_walk_that_fails_on_its_own_side_cancels_a_stalled_reader`, `test_a_walk_that_fails_on_its_own_side_closes_the_listing_its_reader_holds`, and `test_a_service_whose_heartbeat_is_not_positive_is_refused`. The stall case allows a beat at position 0 before the first batch commits, which a slow process can show.
+   - **Plants.** No beat at the deadline; no cancel of the reader; no `aclosing`; a beat that carries the held state's position; a beat that saves a stale copy. (798e98ee, 99a2a2b7)
+4. **The run after a walk restarts a watch delta that would start past the walk's start.**
+   - **The defect.** A resumed delta kept its own cursor. One started during the walk from a later cursor skipped a state saved in between for an item the walk had not yet stored.
+   - **The fix.** `_superseding` closes an unfinished run with no cursor (`SUPERSEDED_ERROR`), or with a cursor later than `since_at_most` (`DELTA_SUPERSEDED_ERROR`, `superseded: a watch delta restarts from an earlier cursor`). The fresh run reads from `min(latest completed cursor, since_at_most)`, and a run at or before `since_at_most` resumes. The CLI's exit count is unchanged (ruling 30).
+   - **Cases.** `test_since_at_most_supersedes_a_delta_whose_cursor_is_later`, and `test_since_at_most_leaves_a_resumed_deltas_cursor_alone` at the boundary. (ccf06fae)
+5. **A refused walk says how long to wait.**
+   - **The message.** `a whole-library walk of <source> counts as live: its last heartbeat was 40 s ago, and if its process has stopped, it can be resumed in 9 min 20 s`. The age is rounded down and clamped at 0, and the time left is rounded up.
+   - **The exit line.** `refused for <names>: a whole-library walk of each counts as live; the lines above say how soon a stopped one can be resumed`.
+   - **Not done.** No run is closed on Ctrl-C: a SIGKILL or a deploy restart leaves one running anyway.
+   - **Cases.** `test_a_refusal_says_how_long_the_live_walk_has_been_quiet_and_has_left` (five ages), the exit-line case, and the pipeline case. (f2ace015, af8c2570)
+6. **The seed's read by `Ids` is timed as `op="series"`.** `test_a_seed_s_read_by_ids_carries_its_own_operation_label` replaces Task 14's `test_a_seed_s_reads_by_ids_and_next_up_keep_the_list_label`. (63f3b8d5)
+7. **The CHANGELOG names the worker deferral.** (8d0501ff)
+
+The PRD moved with each fix:
+- PRD 03: the claim reads planned walks; the refusal gives durations; the heartbeat moves through the hook and through a page's retries; a watch delta restarts; `last_sync`.
+- PRD 07: `last_sync`.
+- PRD 02: `heartbeat_at`.
+
+`README.md`, `docs/guide/command-line.md` and `CHANGELOG.md` match.
 
 ---
 
