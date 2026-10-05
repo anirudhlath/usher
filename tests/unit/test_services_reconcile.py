@@ -31,6 +31,7 @@ from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
 from usher.domain.source import Source
 from usher.domain.sync import (
+    STALE_AFTER,
     SyncRun,
     SyncRunKind,
     SyncRunStatus,
@@ -47,7 +48,6 @@ from usher.services.matching import MatchService
 from usher.services.reconcile import (
     CEILING_ERROR_CODE,
     RETRACTION_ERROR_CODE,
-    STALE_AFTER,
     ReconcileService,
     WalkRefused,
     _recorded_failure,

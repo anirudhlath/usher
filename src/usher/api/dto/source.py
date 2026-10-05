@@ -46,7 +46,7 @@ class SourceResponse(BaseModel):
 
 
 class SyncRunResponse(BaseModel):
-    """`last_sync`: a source's newest full or delta walk, as the status route reports it.
+    """`last_sync`: a source's live whole-library walk, else its newest full or delta walk.
 
     `stage`, `units_done`, `units_total` and `items_expected` say where a
     whole-library walk's plan stands -- `walk_progress` -- and are `null` for a walk
@@ -109,8 +109,8 @@ class SourceStatusResponse(BaseModel):
     `credentials_ref` -- which is what makes it safe to hand to a client
     verbatim.
 
-    `last_sync` is the source's newest full or delta walk -- never the watch
-    lane's -- or `null` before the first.
+    `last_sync` is the source's live whole-library walk if it has one, else its newest
+    full or delta walk -- never the watch lane's -- or `null` before the first.
     """
 
     reachable: bool

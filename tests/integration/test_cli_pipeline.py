@@ -217,6 +217,66 @@ async def test_sync_status_prints_where_a_whole_library_walks_plan_stands(
     assert not lines[at + 3].strip().startswith("plan:"), "a single walk printed a plan line"
 
 
+@pytest.mark.parametrize("newer", [4, 5])
+async def test_sync_status_lists_a_live_whole_library_walk_newer_runs_push_out(
+    cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str], newer: int
+) -> None:
+    """Five newer runs push a live walk out of the five newest, and it is listed after them.
+
+    With four, it is the fifth, and is listed once.
+    """
+    source = Source(
+        kind=SourceKind.EMBY,
+        name="cli-live",
+        base_url="https://emby.invalid",
+        credentials_ref=f"ref-{new_id()}",
+        device_id=str(new_id()),
+    )
+    now = datetime.now(UTC)
+    walk = SyncRun(
+        source_id=source.id,
+        kind=SyncRunKind.FULL,
+        started_at=now - timedelta(hours=3),
+        heartbeat_at=now,
+    )
+    watched = [
+        SyncRun(
+            source_id=source.id,
+            kind=SyncRunKind.WATCH_STATE,
+            status=SyncRunStatus.COMPLETED,
+            started_at=now - timedelta(hours=2, minutes=-index),
+        )
+        for index in range(newer)
+    ]
+    async with _session_for(cli_settings) as session:
+        await PostgresSourceRepository(session).add(source)
+        runs = PostgresSyncRunRepository(session)
+        for one in (walk, *watched):
+            await runs.add(one)
+        await runs.add_units(
+            [
+                SyncRunUnit(
+                    run_id=walk.id,
+                    unit_key="titles:a",
+                    stage=WalkStage.TITLES,
+                    label="titles a",
+                    expected_items=4,
+                    status=SyncRunUnitStatus.RUNNING,
+                )
+            ]
+        )
+        await session.commit()
+        recent = {run.id for run in await runs.list_for_source(source.id, limit=5)}
+    assert (walk.id in recent) is (newer < 5), "the premise: where the five newest end"
+
+    await _sync_status(cli_settings)
+
+    lines = capsys.readouterr().out.splitlines()
+    listed = [index for index, line in enumerate(lines) if line.startswith("cli-live")]
+    assert [lines[index].split()[1] for index in listed] == ["watch_state"] * newer + ["full"]
+    assert lines[listed[-1] + 1].strip() == "plan: stage=titles units=0/1 expected=4"
+
+
 async def test_unmatched_reports_an_empty_review_queue(
     cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
 ) -> None:

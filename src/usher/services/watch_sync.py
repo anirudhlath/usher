@@ -12,13 +12,12 @@ from pydantic import AwareDatetime
 
 from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.source import Source
-from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus
+from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus, is_live
 from usher.ports.errors import UsherPortError
 from usher.ports.ingest import MediaItemTarget, WatchStateMerge
 from usher.ports.jobs import JobQueue, JobRequest
 from usher.ports.repository import MediaItemRepository, SyncRunRepository, WatchStateRepository
 from usher.ports.source import SourceAdapter, SourceWatchState
-from usher.services.reconcile import STALE_AFTER
 from usher.telemetry import current_traceparent
 
 _tracer = trace.get_tracer("usher.watch_sync")
@@ -183,12 +182,7 @@ class WatchStateSyncService:
             # completes, `latest_completed_cursor` reads an instant covering
             # everything saved since the logical walk *began*.
             incomplete = await self._runs.latest_incomplete_run(source.id, SyncRunKind.WATCH_STATE)
-            if (
-                incomplete is not None
-                and incomplete.status is SyncRunStatus.RUNNING
-                and incomplete.heartbeat_at is not None
-                and self._clock() - incomplete.heartbeat_at < STALE_AFTER
-            ):
+            if incomplete is not None and is_live(incomplete, self._clock()):
                 # Another process's walk, alive. Closing or resuming its row would write
                 # under that walk, so this one runs in a row of its own, both merging on
                 # one key under one conflict rule. A row with no heartbeat predates

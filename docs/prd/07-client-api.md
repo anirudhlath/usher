@@ -157,8 +157,9 @@ position, not the play count.
 **`GET /admin/sources/{id}/status`** renders a `SourceStatus`, not a bool:
 reachable, authenticated, `push_available` and `is_administrator` are each
 three-valued where `null` means the check did not run
-([03](03-sources-and-sync.md)). Its `last_sync` is the source's newest full or
-delta walk — never the watch lane's — or `null` before the first: `kind`,
+([03](03-sources-and-sync.md)). Its `last_sync` is the source's live
+whole-library walk if it has one, and otherwise its newest full or delta walk —
+never the watch lane's — or `null` before the first: `kind`,
 `status`, `started_at`, `finished_at`, `heartbeat_at`, the four item counts and
 `error`, then `stage`, `units_done`, `units_total` and `items_expected`, which
 say where a whole-library walk's plan stands and are `null` for a walk without

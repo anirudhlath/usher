@@ -2,7 +2,7 @@
 
 import uuid
 from collections.abc import Iterable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
 from pydantic import AwareDatetime, Field
@@ -99,6 +99,22 @@ class SyncRun(DomainModel):
     #: A running walk whose heartbeat has gone stale is a dead one. An item walk with
     #: none never planned; a watch-state run with none predates heartbeats.
     heartbeat_at: AwareDatetime | None = None
+
+
+#: How long a walk's heartbeat may stand still before the walk is taken for dead.
+STALE_AFTER = timedelta(minutes=10)
+
+
+def is_live(run: SyncRun, now: datetime) -> bool:
+    """Whether `run` is a live walk: `running`, with a heartbeat under `STALE_AFTER` old.
+
+    A row with no heartbeat never is: a single walk's, or one from before heartbeats.
+    """
+    return (
+        run.status is SyncRunStatus.RUNNING
+        and run.heartbeat_at is not None
+        and now - run.heartbeat_at < STALE_AFTER
+    )
 
 
 class SyncRunUnit(DomainModel):

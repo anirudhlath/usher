@@ -9,7 +9,7 @@ from loguru import logger
 from usher.domain.bootstrap import BootstrapPhase
 from usher.domain.jobs import Job
 from usher.domain.source import MediaItem, Source
-from usher.domain.sync import SyncRunKind
+from usher.domain.sync import STALE_AFTER, SyncRunKind
 from usher.domain.watch import WatchState
 from usher.ports.errors import PortDataMalformed
 from usher.ports.repository import MediaItemRepository, SourceRepository, WatchStateRepository
@@ -20,7 +20,7 @@ from usher.services.enrich import EnrichService
 from usher.services.index import IndexService
 from usher.services.jobs import Handler, JobDeferred
 from usher.services.matching import MatchService
-from usher.services.reconcile import STALE_AFTER, ReconcileService, WalkRefused
+from usher.services.reconcile import ReconcileService, WalkRefused
 from usher.services.watch_sync import WatchStateSyncService
 
 #: `SyncRunKind` has a third member, `WATCH_STATE`, which is never a lane an

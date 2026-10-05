@@ -6,7 +6,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 from loguru import logger
 from opentelemetry import metrics, trace
@@ -22,6 +22,7 @@ from usher.domain.sync import (
     SyncRunUnitStatus,
     WalkProgress,
     WalkStage,
+    is_live,
     walk_progress,
 )
 from usher.ports.errors import UsherPortError
@@ -75,9 +76,6 @@ CEILING_ERROR_CODE = "gap_delta_ceiling"
 
 # The same device for the *other* failure an operator has a command for.
 RETRACTION_ERROR_CODE = "availability_ceiling"
-
-#: How long a walk's heartbeat may stand still before the walk is taken for dead.
-STALE_AFTER = timedelta(minutes=10)
 
 #: What a superseded whole-library walk's row says.
 WALK_SUPERSEDED_ERROR = "superseded: a whole-library walk restarts"
@@ -386,11 +384,7 @@ class ReconcileService:
         )
         if newest is None:
             return None
-        if (
-            newest.status is SyncRunStatus.RUNNING
-            and newest.heartbeat_at is not None
-            and self._clock() - newest.heartbeat_at < STALE_AFTER
-        ):
+        if is_live(newest, self._clock()):
             raise WalkRefused(f"a whole-library walk of {source.name} is already running")
         has_units = bool(await self._runs.units_for(newest.id))
         if has_units and newest.error_code != RETRACTION_ERROR_CODE:

@@ -4,7 +4,7 @@ import dataclasses
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -36,6 +36,7 @@ from usher.db.users import ensure_default_user
 from usher.domain.jobs import JobKind
 from usher.domain.source import Source
 from usher.domain.sync import (
+    STALE_AFTER,
     SyncRun,
     SyncRunKind,
     SyncRunStatus,
@@ -494,6 +495,61 @@ async def test_status_of_a_single_walk_carries_no_plan(client: AsyncClient, app:
         None,
         None,
     ]
+
+
+@pytest.mark.parametrize("kind", [SyncRunKind.FULL, SyncRunKind.DELTA])
+@pytest.mark.parametrize("live", [True, False])
+async def test_status_prefers_a_live_whole_library_walk_to_a_newer_delta(
+    client: AsyncClient, app: FastAPI, kind: SyncRunKind, live: bool
+) -> None:
+    """A whole-library walk keeps its first `started_at` for hours, so a delta since is newer.
+
+    Live -- `running`, its heartbeat under `STALE_AFTER` old -- the walk is `last_sync`.
+    A stale one is not: a planned delta orphaned once a cursor exists would stand forever.
+    """
+    created = (await client.post("/admin/sources", json=_payload())).json()
+    source_id = uuid.UUID(created["id"])
+    now = datetime.now(UTC)
+    walk = SyncRun(
+        source_id=source_id,
+        kind=kind,
+        started_at=now - timedelta(hours=3),
+        heartbeat_at=now if live else now - STALE_AFTER - timedelta(minutes=1),
+    )
+    delta = SyncRun(
+        source_id=source_id,
+        kind=SyncRunKind.DELTA,
+        status=SyncRunStatus.COMPLETED,
+        started_at=now - timedelta(hours=1),
+        finished_at=now - timedelta(minutes=59),
+    )
+    factory: async_sessionmaker[AsyncSession] = app.state.session_factory
+    async with factory() as session:
+        runs = PostgresSyncRunRepository(session)
+        await runs.add(walk)
+        await runs.add(delta)
+        await runs.add_units(
+            [
+                SyncRunUnit(
+                    run_id=walk.id,
+                    unit_key="titles:a",
+                    stage=WalkStage.TITLES,
+                    label="titles a",
+                    expected_items=4,
+                    status=SyncRunUnitStatus.RUNNING,
+                )
+            ]
+        )
+        await session.commit()
+    assert walk.started_at < delta.started_at, "the premise: the delta is the newer"
+
+    last = (await client.get(f"/admin/sources/{created['id']}/status")).json()["last_sync"]
+
+    shown = walk if live else delta
+    assert datetime.fromisoformat(last["started_at"]) == shown.started_at
+    assert (last["kind"], last["status"], last["units_total"]) == (
+        (kind.value, "running", 1) if live else ("delta", "completed", None)
+    )
 
 
 async def test_status_distinguishes_bad_credentials_from_unreachable(

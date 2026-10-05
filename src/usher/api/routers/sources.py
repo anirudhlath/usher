@@ -1,6 +1,7 @@
 """Admin routes for configured sources (PRD 07)."""
 
 import uuid
+from datetime import UTC, datetime
 from typing import Any, Final, Literal
 
 from fastapi import APIRouter, Response, status
@@ -95,14 +96,22 @@ async def source_status(
 
 
 async def _last_sync(runs: SyncRunRepository, source_id: uuid.UUID) -> SyncRunResponse | None:
-    """The source's newest item walk, with where its plan stands; `None` before the first."""
-    found = [
-        run for kind in _ITEM_WALKS if (run := await runs.latest_run(source_id, kind)) is not None
-    ]
-    if not found:
-        return None
-    newest = max(found, key=lambda run: (run.started_at, run.id))
-    return SyncRunResponse.of(newest, walk_progress(await runs.units_for(newest.id)))
+    """The source's live whole-library walk, else its newest item walk; `None` before the first.
+
+    With where its plan stands. Live, not merely unfinished: a planned delta orphaned once
+    a cursor exists is never claimed again, and would stand in front of every walk after it.
+    """
+    shown = await runs.live_walk(source_id, datetime.now(UTC))
+    if shown is None:
+        found = [
+            run
+            for kind in _ITEM_WALKS
+            if (run := await runs.latest_run(source_id, kind)) is not None
+        ]
+        if not found:
+            return None
+        shown = max(found, key=lambda run: (run.started_at, run.id))
+    return SyncRunResponse.of(shown, walk_progress(await runs.units_for(shown.id)))
 
 
 @router.delete("/{source_id}", status_code=status.HTTP_204_NO_CONTENT, responses=_SOURCE_FAILURES)

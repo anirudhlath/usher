@@ -4,11 +4,12 @@ import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from pydantic import AwareDatetime
 
-from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus, SyncRunUnit
+from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus, SyncRunUnit, is_live
 
 __all__ = [
     "CachedPayload",
@@ -30,7 +31,7 @@ class SyncRunRepository(ABC):
     `latest_incomplete_run` is the one affordance that reads against that
     grain: it hands the watch lane, or a whole-library walk, back its own
     unfinished row, which the next attempt continues in place -- the watch
-    lane's only when its walk is a delta.
+    lane's only when its walk is a delta. `live_walk` reads it for a report.
     """
 
     @abstractmethod
@@ -106,6 +107,20 @@ class SyncRunRepository(ABC):
         newest = await read(source_id, kind)
         # The newest row, and *then* the status test -- never "the newest that is not".
         return None if newest is None or newest.status is SyncRunStatus.COMPLETED else newest
+
+    async def live_walk(self, source_id: uuid.UUID, now: datetime) -> SyncRun | None:
+        """The source's live whole-library walk, the newer if both item lanes have one.
+
+        Each item lane's `latest_incomplete_run(planned=True)`, kept if `is_live` at
+        `now`. A planned walk keeps its first `started_at` for hours, so newer rows stand
+        in front of it in any report of the newest; this is what finds it.
+        """
+        found: list[SyncRun] = []
+        for kind in (SyncRunKind.FULL, SyncRunKind.DELTA):
+            run = await self.latest_incomplete_run(source_id, kind, planned=True)
+            if run is not None and is_live(run, now):
+                found.append(run)
+        return max(found, key=lambda run: (run.started_at, run.id), default=None)
 
     @abstractmethod
     async def add_units(self, units: Sequence[SyncRunUnit]) -> None:

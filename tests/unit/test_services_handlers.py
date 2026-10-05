@@ -23,7 +23,7 @@ from usher.domain.bootstrap import BootstrapPhase
 from usher.domain.enums import EnrichmentState, MatchMethod, SourceKind, TitleKind
 from usher.domain.jobs import Job, JobKind, JobPriority
 from usher.domain.source import Source
-from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus
+from usher.domain.sync import STALE_AFTER, SyncRun, SyncRunKind, SyncRunStatus
 from usher.domain.title import Title
 from usher.ports.errors import PortDataMalformed, PortUnavailable, UsherPortError
 from usher.ports.ingest import MediaItemUpsert, WatchStateWrite
@@ -50,7 +50,7 @@ from usher.services.handlers import (
 )
 from usher.services.jobs import JobDeferred
 from usher.services.matching import MatchService
-from usher.services.reconcile import STALE_AFTER, AfterSeed, ReconcileService, WalkRefused
+from usher.services.reconcile import AfterSeed, ReconcileService, WalkRefused
 from usher.services.watch_sync import WatchStateSyncService
 from usher.services.watch_write import WatchWriteService
 

@@ -425,7 +425,7 @@ def _plan_line(walk: WalkProgress) -> str:
 
 
 async def _sync_status(settings: Settings) -> None:
-    """Every source's recent runs and their plans, plus queue depth and parked count.
+    """Every source's recent runs and live walk, their plans, queue depth and parked count.
 
     Must work against an empty database: a command an operator can only run
     *after* a successful sync is no use for diagnosing why the sync did not
@@ -440,6 +440,11 @@ async def _sync_status(settings: Settings) -> None:
             if not runs:
                 report.append(f"{source.name}: no sync has been run yet")
                 continue
+            # A live walk keeps its first `started_at` for hours, so newer runs can push it
+            # out of the five; it is listed after them.
+            live = await pipeline.runs.live_walk(source.id, datetime.now(UTC))
+            if live is not None and live.id not in {run.id for run in runs}:
+                runs.append(live)
             for run in runs:
                 report.append(
                     f"{source.name:<24} {run.kind.value:<12} {run.status.value:<10} "

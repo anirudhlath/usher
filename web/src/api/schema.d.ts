@@ -1919,8 +1919,8 @@ export interface components {
          *     `credentials_ref` -- which is what makes it safe to hand to a client
          *     verbatim.
          *
-         *     `last_sync` is the source's newest full or delta walk -- never the watch
-         *     lane's -- or `null` before the first.
+         *     `last_sync` is the source's live whole-library walk if it has one, else its newest
+         *     full or delta walk -- never the watch lane's -- or `null` before the first.
          */
         SourceStatusResponse: {
             /** Reachable */
@@ -2002,7 +2002,7 @@ export interface components {
         SyncRunKind: "full" | "delta" | "watch_state";
         /**
          * SyncRunResponse
-         * @description `last_sync`: a source's newest full or delta walk, as the status route reports it.
+         * @description `last_sync`: a source's live whole-library walk, else its newest full or delta walk.
          *
          *     `stage`, `units_done`, `units_total` and `items_expected` say where a
          *     whole-library walk's plan stands -- `walk_progress` -- and are `null` for a walk
