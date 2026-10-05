@@ -1569,9 +1569,7 @@ async def test_a_running_walk_is_refused_until_its_heartbeat_is_ten_minutes_old(
         fixture, heartbeat_at=NOW - age, units=[("Films", SyncRunUnitStatus.RUNNING, 2)]
     )
     if refused:
-        with pytest.raises(
-            WalkRefused, match="a whole-library walk of Living Room Emby is already running"
-        ):
+        with pytest.raises(WalkRefused, match="a whole-library walk of Living Room Emby is live"):
             await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
         assert fixture.journal == [], "a refused walk asked the source for something"
         assert await fixture.runs.get(walking.id) == walking, "a refused walk wrote the live row"
@@ -1581,6 +1579,49 @@ async def test_a_running_walk_is_refused_until_its_heartbeat_is_ten_minutes_old(
     assert (run.id, run.status) == (walking.id, SyncRunStatus.COMPLETED)
     assert fixture.checkpoints[0] == (0, NOW), "the claim's commit kept the dead walk's heartbeat"
     assert fixture.adapter.unit_starts == [("library:Films", 2)]
+
+
+@pytest.mark.parametrize(
+    ("quiet_for", "said"),
+    [
+        (timedelta(0), "0 s ago, and if its process has stopped, it can be resumed in 10 min"),
+        (
+            timedelta(seconds=40.75),
+            "40 s ago, and if its process has stopped, it can be resumed in 9 min 20 s",
+        ),
+        (
+            timedelta(minutes=1),
+            "1 min ago, and if its process has stopped, it can be resumed in 9 min",
+        ),
+        (
+            timedelta(minutes=10) - timedelta(seconds=1),
+            "9 min 59 s ago, and if its process has stopped, it can be resumed in 1 s",
+        ),
+        (
+            -timedelta(seconds=30),
+            "0 s ago, and if its process has stopped, it can be resumed in 10 min 30 s",
+        ),
+    ],
+)
+async def test_a_refusal_says_how_long_the_live_walk_has_been_quiet_and_has_left(
+    quiet_for: timedelta, said: str
+) -> None:
+    """An interrupted walk stays `running` until it goes stale, and nothing on screen says so.
+
+    So the refusal does, in durations: the heartbeat's age rounded down, and the time
+    left rounded up, so the two add up to the whole ten minutes. A heartbeat stamped
+    by a clock ahead of this one reads as 0 s old, and the time left is still exact.
+    """
+    fixture = _Fixture(clock=_Clock(NOW))
+    _shelve(fixture, "Films", range(3))
+    await _given_walk(
+        fixture, heartbeat_at=NOW - quiet_for, units=[("Films", SyncRunUnitStatus.RUNNING, 2)]
+    )
+    with pytest.raises(WalkRefused) as refused:
+        await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    assert str(refused.value) == (
+        f"a whole-library walk of Living Room Emby is live: its last heartbeat was {said}"
+    )
 
 
 async def test_a_refused_walk_is_marked_on_its_span(spans: InMemorySpanExporter) -> None:

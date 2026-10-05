@@ -208,9 +208,11 @@ continues from the position it committed. Completed units are not read again
 however long ago they ran, so an item removed from one of their libraries since
 then stays available until the next full walk, which starts afresh. A run still
 `running` whose heartbeat is under 10 minutes old is a live walk, and a second
-is refused — `usher sync` exits non-zero, and a worker job is deferred: it
-spends none of its attempts, so it never parks, and tries again no sooner than
-10 minutes later, when a walk whose process died has gone stale and is resumed.
+is refused, saying as durations how long ago that heartbeat moved and how long
+until a walk whose process stopped can be resumed. `usher sync` exits non-zero,
+and a worker job is deferred: it spends none of its attempts, so it never parks,
+and tries again no sooner than 10 minutes later, when a walk whose process died
+has gone stale and is resumed.
 A run whose sweep was refused is not resumed, and neither is one that stopped
 before its units were stored or a full run from before units existed: a fresh
 walk starts, and such a run left `running` is closed `failed` with `superseded:

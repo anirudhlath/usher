@@ -43,6 +43,7 @@ from usher.domain.ids import new_id
 from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.source import Source
 from usher.domain.sync import (
+    STALE_AFTER,
     SyncRun,
     SyncRunKind,
     SyncRunStatus,
@@ -917,11 +918,28 @@ async def test_usher_sync_exits_non_zero_when_a_live_walk_refuses_it(
         )
 
     out = capsys.readouterr().out
-    assert "cli-walking: refused: a whole-library walk of cli-walking is already running" in out
+    said = re.search(
+        r"^cli-walking: refused: a whole-library walk of cli-walking is live: its last heartbeat"
+        r" was (.+) ago, and if its process has stopped, it can be resumed in (.+)$",
+        out,
+        re.MULTILINE,
+    )
+    assert said is not None, out
+    assert _seconds(said[1]) + _seconds(said[2]) == STALE_AFTER.total_seconds(), (
+        "the heartbeat's age and the time left do not add up to the stale window"
+    )
     assert "watch_state" not in out, "the watch lane ran after the walk was refused"
     assert exited.value.code == (
-        "refused for cli-walking: a whole-library walk of each is already running"
+        "refused for cli-walking: a whole-library walk of each is live; "
+        "the lines above say how soon a stopped one can be resumed"
     )
+
+
+def _seconds(duration: str) -> int:
+    """A refusal's duration -- "40 s", "9 min 20 s", "10 min" -- back in seconds."""
+    found = re.fullmatch(r"(?:(\d+) min)? ?(?:(\d+) s)?", duration)
+    assert found is not None and duration, f"not a duration: {duration!r}"
+    return int(found[1] or 0) * 60 + int(found[2] or 0)
 
 
 async def test_usher_sync_runs_the_watch_lane_as_soon_as_the_seed_has_committed(

@@ -2081,7 +2081,8 @@ def test_version_prints_the_package_version_and_reads_no_settings(
 def test_the_exit_line_names_each_source_whose_walk_was_refused() -> None:
     """No run failed, and the command still must not claim success."""
     assert _sync_failed([], ["cli-a", "cli-b"]) == (
-        "refused for cli-a, cli-b: a whole-library walk of each is already running"
+        "refused for cli-a, cli-b: a whole-library walk of each is live; "
+        "the lines above say how soon a stopped one can be resumed"
     )
 
 

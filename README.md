@@ -108,8 +108,9 @@ take hours. The command prints a line as each walk ends, so watch the long one
 from another terminal with `docker compose exec usher usher sync-status`. If
 it's interrupted, run it again: the item walk picks up where it stopped, and
 nothing is duplicated. An interrupted walk counts as running until it has been
-quiet for 10 minutes, and a second run before then is refused. The watch-state
-walk asks only for what was watched, so it is the short one.
+quiet for 10 minutes, and a second run before then is refused with how long is
+left to wait. The watch-state walk asks only for what was watched, so it is the
+short one.
 
 **5. Open the console** at <http://localhost:8100/console>. The API's
 interactive reference is at <http://localhost:8100/docs>.

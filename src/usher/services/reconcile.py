@@ -1,12 +1,13 @@
 """PRD 03's reconciliation lanes: the full walk and the delta walk."""
 
 import asyncio
+import math
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from loguru import logger
 from opentelemetry import metrics, trace
@@ -15,6 +16,7 @@ from pydantic import AwareDatetime
 from usher.domain.source import Source
 from usher.domain.sync import (
     STAGE_ORDER,
+    STALE_AFTER,
     SyncRun,
     SyncRunKind,
     SyncRunStatus,
@@ -85,7 +87,30 @@ AfterSeed = Callable[[Callable[[], Awaitable[None]]], Awaitable[object]]
 
 
 class WalkRefused(Exception):
-    """A whole-library walk of this source and kind is already running."""
+    """A whole-library walk of this source and kind is live, by `is_live`."""
+
+
+def _refusal(source: Source, quiet: timedelta) -> str:
+    """Why a walk is refused: how long ago the live walk beat, and how long until it is stale.
+
+    A walk whose process stopped looks live until then, so this says how long to wait.
+    The age rounds down and the time left rounds up, so a re-run after it is never
+    early. A heartbeat stamped by a clock ahead of this one reads as 0 s old.
+    """
+    age = _duration(max(0, math.floor(quiet.total_seconds())))
+    left = _duration(math.ceil((STALE_AFTER - quiet).total_seconds()))
+    return (
+        f"a whole-library walk of {source.name} is live: its last heartbeat was {age} ago, "
+        f"and if its process has stopped, it can be resumed in {left}"
+    )
+
+
+def _duration(seconds: int) -> str:
+    """`seconds` as a person reads it: "40 s", "9 min 20 s" or "10 min"."""
+    minutes, rest = divmod(seconds, 60)
+    if not minutes:
+        return f"{rest} s"
+    return f"{minutes} min {rest} s" if rest else f"{minutes} min"
 
 
 def _recorded_failure(exc: UsherPortError) -> tuple[str, str | None]:
@@ -384,8 +409,9 @@ class ReconcileService:
         )
         if newest is None:
             return None
-        if is_live(newest, self._clock()):
-            raise WalkRefused(f"a whole-library walk of {source.name} is already running")
+        now = self._clock()
+        if newest.heartbeat_at is not None and is_live(newest, now):
+            raise WalkRefused(_refusal(source, now - newest.heartbeat_at))
         has_units = bool(await self._runs.units_for(newest.id))
         if has_units and newest.error_code != RETRACTION_ERROR_CODE:
             return newest
