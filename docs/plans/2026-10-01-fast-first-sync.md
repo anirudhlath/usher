@@ -9104,7 +9104,7 @@ git commit -m "sync: walk a whole library as its planned units, with walkers and
 
 Spec §2.5's table, the resume half of §2.6, and §2.7's `started_at`. A whole-library walk first reads `latest_incomplete_run` for its kind. A `running` row whose heartbeat is under 10 minutes old is a live walk, and the new one raises `WalkRefused`. A row with units is resumed in place: the same row, the same `started_at`, its completed units skipped and every other unit continued from its committed position. Every other unfinished row of a whole-library walk is superseded — closed `failed` with `superseded: a whole-library walk restarts` unless it is `failed` already — and a fresh run starts. A delta row with neither units nor a heartbeat is a single walk's, and is left alone.
 
-`usher sync` prints the refusal and exits non-zero. The worker's `sync_handler` re-raises it as `PortUnavailable`, so `JobWorker` fails the job as retryable instead of logging a crash, and the queue retries it: a walk whose process died with the job's lease is resumed once its heartbeat goes stale, rather than waiting for someone to ask again. The gap-closer passes `plan=False` (Task 16), so its item walk never claims and is never refused.
+`usher sync` prints the refusal and exits non-zero. The worker's `sync_handler` re-raises it as `JobDeferred` with `retry_after=STALE_AFTER.total_seconds()`, and `JobWorker` defers the job: back to `pending` without spending an attempt, so it never parks however long the other walk runs, and claimable again no sooner than `STALE_AFTER`. By then a walk whose process died with the job's lease has gone stale, and the retry resumes it rather than waiting for someone to ask again. That takes a queue operation, `JobQueue.defer`, and an exception of the worker's own, `services.jobs.JobDeferred`: a refusal is no `UsherPortError`, so neither `fail` nor the crash path sees it. A refusal also sets `usher.sync.refused` on its `sync.reconcile` span, beside `usher.sync.truncated`: Usher declined, and nothing upstream failed. The gap-closer passes `plan=False` (Task 16), so its item walk never claims and is never refused, which `api/lanes.py`'s comment there now says.
 
 **The watch lane gets the same heartbeat, and runs beside a live walk instead of over it.** `WatchStateSyncService.sync` sets `heartbeat_at`, the column Task 12 added, when it inserts or reclaims its run and with every batch it commits. The save that ends a run moves no heartbeat, as for a whole-library walk: only a `running` row is ever read as live. A `running` newest watch run whose heartbeat is under `STALE_AFTER` old is another process's walk, alive, and `sync` neither supersedes nor resumes it. It goes on as if no unfinished run existed, in a row of its own: a delta from the latest completed cursor, which Task 18 reads back to `since_at_most`, or a filtered first walk when there is no cursor. A `running` watch run with no heartbeat predates `m10g`, and is taken for dead as before. `watch_sync.py` imports `STALE_AFTER` from `reconcile.py`: the import contracts let one service import another, and nothing `reconcile.py` imports leads back to `watch_sync.py`.
 
@@ -9123,15 +9123,16 @@ Departures 2, 5, 6, 12 and 13 happen here. **2:** a resumed unit's first page ca
 - Modify: `src/usher/services/watch_sync.py` (`_now`, `__init__`, `sync`, `_flush`)
 - Modify: `src/usher/ports/repository/sync.py` (two docstrings)
 - Modify: `src/usher/services/handlers.py` (`sync_handler`), `src/usher/cli.py` (`_sync`, `_sync_failed`)
-- Modify: `tests/fakes/source_adapter.py` (`unit_starts`)
-- Modify: `docs/prd/02-data-model.md`, `docs/prd/03-sources-and-sync.md`, `CHANGELOG.md`, `docs/guide/command-line.md`, `.claude/rules/emby-push-and-ingest.md`
-- Test: `tests/unit/test_services_reconcile.py`, `tests/unit/test_services_watch_sync.py`, `tests/unit/test_services_handlers.py`, `tests/unit/test_cli.py`, `tests/integration/test_services_reconcile.py`, `tests/integration/test_cli_pipeline.py`
+- Modify: `src/usher/ports/jobs.py` (`JobQueue.defer`), `src/usher/db/repositories/jobs.py` (`_DEFER`, `PostgresJobQueue.defer`), `src/usher/services/jobs.py` (`JobDeferred`, `JobWorker._run`, `_defer`), `src/usher/api/lanes.py` (a comment in `LaneSupervisor._close_gap`)
+- Modify: `tests/fakes/source_adapter.py` (`unit_starts`), `tests/fakes/job_queue.py` (`FakeJobQueue.defer`)
+- Modify: `docs/prd/02-data-model.md`, `docs/prd/03-sources-and-sync.md`, `docs/prd/08-operations.md`, `docs/prd/10-telemetry-and-dashboards.md`, `CHANGELOG.md`, `docs/guide/command-line.md`, `.claude/rules/emby-push-and-ingest.md`, `.claude/rules/tmdb-and-enrichment.md`, `dashboards/alerts/usher.yml`
+- Test: `tests/unit/test_services_reconcile.py`, `tests/unit/test_services_watch_sync.py`, `tests/unit/test_services_handlers.py`, `tests/unit/test_services_jobs.py`, `tests/contract/job_queue_contract.py`, `tests/unit/test_cli.py`, `tests/integration/test_services_reconcile.py`, `tests/integration/test_cli_pipeline.py`, `tests/integration/test_services_enrich.py`, `tests/unit/test_cli_derive.py`
 
 **Interfaces:**
 - Consumes: Task 16's `reconcile(…, plan=…)`, `_walk_plan`, `_walk_stage`, `_beat`, the `clock`; `_failed` and `RETRACTION_ERROR_CODE`; Task 12's `units_for`, `save` (it keeps the greater `position` and never rewrites a `completed` row) and `save_unit`; Task 11's `pages_of`, which reaches a unit's `start_index` by reading past the items before it; Task 16's test helpers `_Ticks`, `_Fixture`, `_shelve`; Task 12's `SyncRun.heartbeat_at`; `WatchStateSyncService.sync`'s resume and Task 7's supersede in it.
 - Produces (tests): `FakeSourceAdapter.unit_starts: list[tuple[str, int]]`, every `(key, start_index)` `list_unit` was asked for. The journal cannot say where a unit resumed: `pages_of` reads past the items before `start_index`, and `_walk_library` journals each one it yields.
-- Produces: `usher.services.reconcile.STALE_AFTER = timedelta(minutes=10)`, `WALK_SUPERSEDED_ERROR = "superseded: a whole-library walk restarts"` (not `SUPERSEDED_ERROR`, which `watch_sync` already names), `class WalkRefused(Exception)`; `_claim(source, kind) -> SyncRun | None`; `_walk_plan(…, *, resumed: bool)`; `WatchStateSyncService(…, clock: Callable[[], datetime] = _now)`. Task 18 adds `after_seed` beside `resumed`.
-- Produces (tests): in `tests/unit/test_services_reconcile.py`, `_Fixture(…, clock=None)`, `NOW`, `_Clock(now)` with a settable `.now`, and `_given_walk(fixture, *, heartbeat_at, status=RUNNING, kind=FULL, units=(), error=None)`. Task 19 reuses `_Clock` and `NOW`. In `tests/unit/test_services_watch_sync.py`, its own `NOW` and `_Clock(now, *, step=timedelta(0))`, `_Fixture(…, clock=None)`, and `_given_watch_run(fixture, *, heartbeat_at, status=RUNNING, delta=True)`.
+- Produces: `usher.services.reconcile.STALE_AFTER = timedelta(minutes=10)`, `WALK_SUPERSEDED_ERROR = "superseded: a whole-library walk restarts"` (not `SUPERSEDED_ERROR`, which `watch_sync` already names), `class WalkRefused(Exception)`; `_claim(source, kind) -> SyncRun | None`; `_walk_plan(…, *, resumed: bool)`; `WatchStateSyncService(…, clock: Callable[[], datetime] = _now)`; `JobQueue.defer(job_id, *, reason: str, run_after_seconds: float) -> Job | None`, `None` unless the job is still `running`; `usher.services.jobs.JobDeferred(message, *, retry_after: float)`, which `JobWorker` defers rather than fails; the span attributes `usher.sync.refused` (`sync.reconcile`) and `usher.job.deferred` (`job.<kind>`). Task 18 adds `after_seed` beside `resumed`.
+- Produces (tests): in `tests/unit/test_services_reconcile.py`, `_Fixture(…, clock=None)`, `NOW`, `_Clock(now)` with a settable `.now`, and `_given_walk(fixture, *, heartbeat_at, status=RUNNING, kind=FULL, units=(), error=None, finished_at=None)`. Task 19 reuses `_Clock` and `NOW`. In `tests/unit/test_services_watch_sync.py`, its own `NOW` and `_Clock(now, *, step=timedelta(0))`, `_Fixture(…, clock=None)`, and `_given_watch_run(fixture, *, heartbeat_at, status=RUNNING, delta=True)`.
 
 - [ ] **Step 1: Write the failing service tests**
 
@@ -9150,7 +9151,7 @@ and `list_unit`'s body begins:
         self.unit_starts.append((key, start_index))
 ```
 
-`tests/unit/test_services_reconcile.py` — imports: `Callable, Sequence` beside `AsyncGenerator, Iterator`; `SyncRun, SyncRunUnit` beside `SyncRunKind, SyncRunStatus`; `WalkRefused` beside `ReconcileService`. `_Fixture.__init__` takes `clock: Callable[[], datetime] | None = None` after `heartbeat_seconds`, and passes `clock=clock if clock is not None else _Ticks()` where it passed `clock=_Ticks()`.
+`tests/unit/test_services_reconcile.py` — imports: `Callable, Sequence` beside `AsyncGenerator, Iterator`; `SyncRun, SyncRunUnit` beside `SyncRunKind, SyncRunStatus`; `STALE_AFTER` and `WalkRefused` beside `ReconcileService`. `_Fixture.__init__` takes `clock: Callable[[], datetime] | None = None` after `heartbeat_seconds`, and passes `clock=clock if clock is not None else _Ticks()` where it passed `clock=_Ticks()`.
 
 Append to the file:
 
@@ -9178,6 +9179,7 @@ async def _given_walk(
     kind: SyncRunKind = SyncRunKind.FULL,
     units: Sequence[tuple[str, SyncRunUnitStatus, int]] = (),
     error: str | None = None,
+    finished_at: datetime | None = None,
 ) -> SyncRun:
     """An unfinished whole-library walk, as a killed or a failed attempt left it.
 
@@ -9190,6 +9192,7 @@ async def _given_walk(
         error=error,
         heartbeat_at=heartbeat_at,
         started_at=T0,
+        finished_at=finished_at,
     )
     await fixture.runs.add(run)
     if units:
@@ -9271,6 +9274,27 @@ async def test_a_running_walk_is_refused_until_its_heartbeat_is_ten_minutes_old(
     assert fixture.adapter.unit_starts == [("library:Films", 2)]
 
 
+async def test_a_refused_walk_is_marked_on_its_span(spans: InMemorySpanExporter) -> None:
+    """Beside `usher.sync.truncated`: Usher declined, and nothing upstream failed.
+
+    The walk resumed once the live one has gone stale carries no such mark.
+    """
+    clock = _Clock(NOW)
+    fixture = _Fixture(clock=clock)
+    _shelve(fixture, "Films", range(3))
+    await _given_walk(fixture, heartbeat_at=NOW, units=[("Films", SyncRunUnitStatus.RUNNING, 2)])
+    with pytest.raises(WalkRefused):
+        await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    clock.now = NOW + STALE_AFTER
+    run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    assert run.status is SyncRunStatus.COMPLETED
+    pipeline = [span for span in spans.get_finished_spans() if span.name == "sync.reconcile"]
+    assert [(span.attributes or {}).get("usher.sync.refused") for span in pipeline] == [
+        True,
+        None,
+    ]
+
+
 async def test_a_failed_walk_resumes_however_fresh_its_heartbeat() -> None:
     """A `failed` row recorded its own end, so its heartbeat says nothing about a live walk."""
     fixture = _Fixture(clock=_Clock(NOW))
@@ -9284,6 +9308,52 @@ async def test_a_failed_walk_resumes_however_fresh_its_heartbeat() -> None:
     )
     run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
     assert (run.id, run.status, run.error) == (failed.id, SyncRunStatus.COMPLETED, None)
+
+
+async def test_a_resumed_walk_reads_running_again_so_a_second_walk_is_refused() -> None:
+    """The claim's commit stores the resumed row `running`, with no end, as a live walk's.
+
+    Left `failed`, the row would read to a second walk as one to resume, and the two
+    would walk it together; left with its last attempt's end, it would say it had
+    finished while it walks.
+    """
+    fixture = _Fixture(clock=_Clock(NOW))
+    _shelve(fixture, "Films", range(3))
+    failed = await _given_walk(
+        fixture,
+        heartbeat_at=NOW - timedelta(hours=1),
+        status=SyncRunStatus.FAILED,
+        error="GET /Users/{user_id}/Items returned HTTP 502",
+        finished_at=NOW - timedelta(hours=1),
+        units=[("Films", SyncRunUnitStatus.FAILED, 1)],
+    )
+    release = fixture.adapter.hold("Films")
+    first = asyncio.create_task(
+        fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    )
+    second: asyncio.Task[SyncRun] | None = None
+    try:
+        async with asyncio.timeout(5):
+            while fixture.commits < 1:
+                await asyncio.sleep(0.01)
+        claimed = await fixture.runs.get(failed.id)
+        assert claimed is not None
+        assert claimed.status is SyncRunStatus.RUNNING, "the claim left the resumed row failed"
+        assert claimed.finished_at is None, "the claim kept the failed attempt's end"
+        second = asyncio.create_task(
+            fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+        )
+        done, _ = await asyncio.wait({second}, timeout=1)
+        assert second in done, "a second walk was not refused while a failed walk resumed"
+        assert isinstance(second.exception(), WalkRefused)
+    finally:
+        release.set()
+        if second is not None and not second.done():
+            second.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await second
+        run = await first
+    assert (run.id, run.status) == (failed.id, SyncRunStatus.COMPLETED)
 
 
 async def test_a_walk_killed_while_planning_is_superseded_once_its_heartbeat_is_stale() -> None:
@@ -9312,6 +9382,27 @@ async def test_a_walk_killed_while_planning_is_superseded_once_its_heartbeat_is_
         SyncRunStatus.FAILED,
         "superseded: a whole-library walk restarts",
     )
+
+
+async def test_a_cursorless_delta_killed_while_planning_is_superseded() -> None:
+    """A delta with no cursor walks the plan, and its row carries a heartbeat from its insert.
+
+    Killed before its plan was stored, the row has no units, so only that heartbeat
+    tells it from a single walk's row, which is left alone.
+    """
+    fixture = _Fixture(clock=_Clock(NOW))
+    _shelve(fixture, "Films", range(2))
+    planning = await _given_walk(
+        fixture, heartbeat_at=NOW - timedelta(minutes=10), kind=SyncRunKind.DELTA
+    )
+    run = await fixture.service.reconcile(fixture.source, SyncRunKind.DELTA, fixture.adapter)
+    assert run.id != planning.id
+    closed = await fixture.runs.get(planning.id)
+    assert closed is not None
+    assert (closed.status, closed.error) == (
+        SyncRunStatus.FAILED,
+        "superseded: a whole-library walk restarts",
+    ), "a cursorless delta killed while planning was left running"
 
 
 async def test_a_full_walk_left_running_from_before_units_is_superseded() -> None:
@@ -9611,7 +9702,7 @@ async def test_every_batch_of_a_watch_walk_moves_its_heartbeat() -> None:
 - [ ] **Step 2: Run them to see them fail**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_services_reconcile.py`, then `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_services_watch_sync.py`, then `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/integration/test_services_reconcile.py::test_a_failed_whole_library_walk_resumes_in_place_against_real_sql`
-Expected: FAIL. The first command stops at collection, `ImportError: cannot import name 'WalkRefused'`, and runs nothing, which is why the two unit modules run apart. The second errors in every case that builds a `_Fixture`, all but three, with `TypeError: WatchStateSyncService.__init__() got an unexpected keyword argument 'clock'`. The third fails on `assert second.id == first.id`, the second walk having started a run of its own.
+Expected: FAIL. The first command stops at collection, `ImportError: cannot import name 'STALE_AFTER'`, and runs nothing, which is why the two unit modules run apart. The second errors in every case that builds a `_Fixture`, all but three, with `TypeError: WatchStateSyncService.__init__() got an unexpected keyword argument 'clock'`. The third fails on `assert second.id == first.id`, the second walk having started a run of its own.
 
 - [ ] **Step 3: Claim, resume and supersede, and leave a live watch walk alone**
 
@@ -9640,7 +9731,12 @@ and the block Task 16 wrote from `planned = …` through `await self._commit()` 
 
 ```python
             planned = plan and not max_items and (kind is SyncRunKind.FULL or cursor is None)
-            claimed = await self._claim(source, kind) if planned else None
+            try:
+                claimed = await self._claim(source, kind) if planned else None
+            except WalkRefused:
+                # Beside `usher.sync.truncated`: Usher declined, and nothing upstream failed.
+                span.set_attribute("usher.sync.refused", True)
+                raise
             if claimed is None:
                 run = SyncRun(
                     source_id=source.id,
@@ -9825,15 +9921,16 @@ Expected: PASS, including every Task 16 case — each of those starts from an em
 
 - [ ] **Step 5: Write the failing caller tests**
 
-`tests/unit/test_services_handlers.py` — `from usher.services.reconcile import ReconcileService, WalkRefused`. After `test_the_sync_handler_closes_the_adapter_even_when_reconcile_raises`:
+`tests/unit/test_services_handlers.py` — `from usher.services.jobs import JobDeferred`; `from usher.services.reconcile import STALE_AFTER, ReconcileService, WalkRefused`. After `test_the_sync_handler_closes_the_adapter_even_when_reconcile_raises`:
 
 ```python
-async def test_a_refused_walk_fails_the_job_so_the_queue_retries_it(
+async def test_a_refused_walk_defers_the_job_so_the_queue_tries_it_again(
     source: Source, adapter: FakeSourceAdapter
 ) -> None:
-    """`PortUnavailable`, which `JobWorker` fails as retryable rather than logging as a crash.
+    """`JobDeferred`, on which `JobWorker` defers the job, spending no attempt.
 
-    A walk whose process died is then resumed once its heartbeat is stale.
+    Its `retry_after` holds the next try back for `STALE_AFTER`, by when a walk whose
+    process died has gone stale and the next try resumes it.
     """
     sources = FakeSourceRepository()
     await sources.add(source)
@@ -9842,15 +9939,197 @@ async def test_a_refused_walk_fails_the_job_so_the_queue_retries_it(
     reconcile = _RecordingReconcile(events, raises=refusal)
     watch = _RecordingWatch(events)
 
-    with pytest.raises(PortUnavailable, match="is already running") as caught:
+    with pytest.raises(JobDeferred, match="is already running") as caught:
         await sync_handler(sources, reconcile, watch, _Opener(adapter), user_id=_USER)(
             Job(kind=JobKind.SYNC, key=f"{source.id}:full")
         )
 
     assert caught.value.__cause__ is refusal
+    assert caught.value.retry_after == STALE_AFTER.total_seconds()
     assert events == ["reconcile"], "the watch lane ran after the walk was refused"
     with pytest.raises(PortUnavailable):
         await adapter.get_item("anything")
+```
+
+`tests/unit/test_services_jobs.py` — `JobDeferred` joins the `usher.services.jobs` import. `_RecordingQueue` records a deferral as it records a failure:
+
+```python
+    async def defer(
+        self, job_id: uuid.UUID, *, reason: str, run_after_seconds: float
+    ) -> Job | None:
+        self._log.append("defer")
+        return await super().defer(job_id, reason=reason, run_after_seconds=run_after_seconds)
+```
+
+`_Fixture.__init__` stores `self.max_attempts = max_attempts` before it builds the queue. After `test_a_429_carrying_a_retry_after_backs_off_no_sooner_than_the_upstream_asked`:
+
+```python
+async def test_a_deferred_job_waits_out_its_retry_after_without_spending_an_attempt(
+    fixture: _Fixture, spans: InMemorySpanExporter
+) -> None:
+    """`JobDeferred` is not a failure: the job waits at the same count, and nothing crashed.
+
+    Deferred, then committed, then logged at `INFO` naming the job, the wait and the
+    reason -- not a warning, since nothing failed.
+    """
+    reason = "a whole-library walk is already running"
+    fixture.register(JobKind.ENRICH, fixture.raising(JobDeferred(reason, retry_after=600.0)))
+    await fixture.given("t1")
+    records: list[tuple[str, str]] = []
+    handle = logger.add(
+        lambda message: records.append((message.record["level"].name, message.record["message"])),
+        level="DEBUG",
+        filter="usher",
+    )
+    before = datetime.now(UTC)
+    try:
+        assert await fixture.worker.run_once() == 1
+    finally:
+        logger.remove(handle)
+    outcome = fixture.queue.jobs_of(JobKind.ENRICH)[0]
+    assert (outcome.status, outcome.attempts) == (JobStatus.PENDING, 0)
+    assert outcome.last_error == reason
+    assert outcome.run_after is not None
+    assert outcome.run_after - before >= timedelta(seconds=600), (
+        f"deferred only {outcome.run_after - before} against a 600 s retry_after"
+    )
+    assert fixture.log[fixture.log.index("handle:t1") :] == ["handle:t1", "defer", "commit"]
+    [span] = [span for span in spans.get_finished_spans() if span.name == "job.enrich"]
+    assert span.attributes is not None
+    assert span.attributes.get("usher.job.deferred") is True
+    assert "usher.job.crashed" not in span.attributes
+    [(level, line)] = [(level, line) for level, line in records if "t1" in line]
+    assert level == "INFO", f"a deferral logged at {level}"
+    assert ("enrich" in line, "600" in line, reason in line) == (True, True, True), line
+
+
+async def test_a_deferral_never_parks_a_job_one_failure_short_of_the_ceiling(
+    fixture: _Fixture,
+) -> None:
+    """However often a job is deferred, only its failures count toward parking it."""
+    fixture.register(JobKind.ENRICH, fixture.raising(PortUnavailable("upstream is down")))
+    await fixture.given("t1")
+    for _ in range(fixture.max_attempts - 1):
+        assert await fixture.worker.run_once() == 1
+        await fixture.queue.clear_backoff()
+    [waiting] = fixture.queue.jobs_of(JobKind.ENRICH)
+    assert waiting.attempts == fixture.max_attempts - 1, "the premise: one failure short"
+    fixture.register(JobKind.ENRICH, fixture.raising(JobDeferred("not yet", retry_after=600.0)))
+    assert await fixture.worker.run_once() == 1
+    [outcome] = fixture.queue.jobs_of(JobKind.ENRICH)
+    assert (outcome.status, outcome.attempts) == (JobStatus.PENDING, fixture.max_attempts - 1)
+    assert await fixture.queue.parked() == []
+
+
+async def test_a_deferral_after_the_job_was_parked_out_from_under_the_worker_moves_nothing(
+    fixture: _Fixture,
+) -> None:
+    """`defer` answers `None` for a job no longer running, and the log says so.
+
+    The claim lapsed and another worker parked the job: un-parking it would retry
+    poison, and an `INFO` line saying it was deferred would misreport the row.
+    """
+
+    async def _park_then_defer(job: Job) -> None:
+        await fixture.queue.fail(job.id, error="TMDb returned a list", retryable=False)
+        raise JobDeferred("not yet", retry_after=600.0)
+
+    fixture.register(JobKind.ENRICH, _park_then_defer)
+    await fixture.given("t1")
+    records: list[tuple[str, str]] = []
+    handle = logger.add(
+        lambda message: records.append((message.record["level"].name, message.record["message"])),
+        level="DEBUG",
+        filter="usher",
+    )
+    try:
+        assert await fixture.worker.run_once() == 1
+    finally:
+        logger.remove(handle)
+    [outcome] = fixture.queue.jobs_of(JobKind.ENRICH)
+    assert (outcome.status, outcome.last_error) == (JobStatus.PARKED, "TMDb returned a list")
+    [(level, line)] = [(level, line) for level, line in records if "t1" in line]
+    assert level == "WARNING", f"a deferral that moved nothing logged at {level}: {line}"
+    assert "not deferred" in line, line
+```
+
+`tests/contract/job_queue_contract.py` — in `JobQueueContract`, before `test_a_parked_job_is_not_claimed`, five cases both arms run:
+
+```python
+    async def test_a_deferred_job_waits_without_spending_an_attempt(
+        self, queue: JobQueue, clear_backoff: ClearBackoff
+    ) -> None:
+        """Work that could not start yet, though nothing failed.
+
+        Back to `pending` at the same count with its reason recorded, and held back for
+        the whole wait. Claimable again once the wait is cleared, which is what stops a
+        job no claim could ever take from passing the first half.
+        """
+        await queue.enqueue([JobRequest(kind=JobKind.ENRICH, key="t1", priority=JobPriority.NEW)])
+        claimed = await queue.claim([JobKind.ENRICH])
+        before = datetime.now(UTC)
+        job = await queue.defer(
+            claimed[0].id, reason="a walk is already running", run_after_seconds=600.0
+        )
+        assert job is not None
+        assert job.status is JobStatus.PENDING
+        assert job.attempts == 0, "a deferral spent an attempt"
+        assert job.last_error == "a walk is already running"
+        assert job.run_after is not None
+        assert job.run_after >= before + timedelta(seconds=600), (
+            f"deferred only {job.run_after - before} against a 600 s wait"
+        )
+        assert await queue.claim([JobKind.ENRICH]) == []
+        await clear_backoff()
+        assert [job.key for job in await queue.claim([JobKind.ENRICH])] == ["t1"]
+
+    async def test_a_deferral_never_parks_a_job_one_attempt_short_of_the_ceiling(
+        self, queue: JobQueue, clear_backoff: ClearBackoff
+    ) -> None:
+        """One more failure would park this job, and a deferral is not a failure.
+
+        However often it is deferred -- a long walk refusing every try -- only its
+        failures count toward parking it.
+        """
+        await queue.enqueue([JobRequest(kind=JobKind.ENRICH, key="t1", priority=JobPriority.NEW)])
+        for _ in range(self.max_attempts - 1):
+            claimed = await queue.claim([JobKind.ENRICH])
+            await queue.fail(claimed[0].id, error="upstream said no", retryable=True)
+            await clear_backoff()
+        claimed = await queue.claim([JobKind.ENRICH])
+        assert claimed[0].attempts == self.max_attempts - 1, "the premise: one failure short"
+        job = await queue.defer(claimed[0].id, reason="not yet", run_after_seconds=600.0)
+        assert job is not None
+        assert (job.status, job.attempts) == (JobStatus.PENDING, self.max_attempts - 1)
+        assert await queue.parked() == []
+
+    async def test_deferring_an_unknown_job_returns_none(self, queue: JobQueue) -> None:
+        """A worker whose claim a restart requeued out from under it: `None`, not a raise."""
+        assert await queue.defer(uuid.uuid4(), reason="gone", run_after_seconds=600.0) is None
+
+    async def test_deferring_a_parked_job_leaves_it_parked(self, queue: JobQueue) -> None:
+        """A deferral that arrives after another worker parked the job moves nothing.
+
+        `None`, as for an unknown id, and still parked with its own error: un-parking
+        poison is the failure parking exists to end.
+        """
+        await queue.enqueue([JobRequest(kind=JobKind.ENRICH, key="t1", priority=JobPriority.NEW)])
+        claimed = await queue.claim([JobKind.ENRICH])
+        await queue.fail(claimed[0].id, error="TMDb returned a list", retryable=False)
+        assert await queue.defer(claimed[0].id, reason="not yet", run_after_seconds=600.0) is None
+        assert [(job.key, job.last_error) for job in await queue.parked()] == [
+            ("t1", "TMDb returned a list")
+        ]
+
+    async def test_a_negative_wait_never_dates_a_deferral_before_now(self, queue: JobQueue) -> None:
+        """Clamped at zero, as `fail` clamps its own hint."""
+        await queue.enqueue([JobRequest(kind=JobKind.ENRICH, key="t1", priority=JobPriority.NEW)])
+        claimed = await queue.claim([JobKind.ENRICH])
+        before = datetime.now(UTC)
+        job = await queue.defer(claimed[0].id, reason="not yet", run_after_seconds=-999.0)
+        assert job is not None
+        assert job.run_after is not None
+        assert job.run_after >= before, f"a -999 s wait dated it {before - job.run_after} early"
 ```
 
 `tests/unit/test_cli.py` — `_sync_failed` joins the `usher.cli` import. Append:
@@ -9918,15 +10197,15 @@ async def test_usher_sync_exits_non_zero_when_a_live_walk_refuses_it(
 
 - [ ] **Step 6: Run them to see them fail**
 
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_services_handlers.py tests/unit/test_cli.py tests/integration/test_cli_pipeline.py -k "refused or refuses"`
-Expected: FAIL — the handler case with `WalkRefused` raised where `PortUnavailable` was expected; the exit-line case with `TypeError: _sync_failed() takes 1 positional argument but 2 were given`; the CLI case with `WalkRefused` propagating out of `_sync`. The other cases the filter selects are older refusals, and pass.
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_services_handlers.py tests/unit/test_services_jobs.py`, then `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_job_queue_contract.py tests/unit/test_cli.py tests/integration/test_cli_pipeline.py -k "refused or refuses or defer"`
+Expected: FAIL. The first command stops at collection in both modules, `ImportError: cannot import name 'JobDeferred' from 'usher.services.jobs'`, and runs nothing, which is why it runs apart. The second fails the five contract cases with `AttributeError: 'FakeJobQueue' object has no attribute 'defer'`, the exit-line case with `TypeError: _sync_failed() takes 1 positional argument but 2 were given`, and the CLI case with `WalkRefused` propagating out of `_sync`. The other cases the filter selects are older refusals, and pass.
 
 - [ ] **Step 7: Handle the refusal at both callers**
 
-`src/usher/services/handlers.py` — `from usher.ports.errors import PortDataMalformed, PortUnavailable`; `from usher.services.reconcile import ReconcileService, WalkRefused`. `sync_handler`'s docstring gains, after its first paragraph:
+`src/usher/services/handlers.py` — `from usher.services.jobs import Handler, JobDeferred`; `from usher.services.reconcile import STALE_AFTER, ReconcileService, WalkRefused`. `sync_handler`'s docstring gains, after its first paragraph:
 
 ```python
-    A walk refused because another is alive fails the job, and the queue retries it.
+    A walk refused because another is alive defers the job, and the queue tries it again.
 ```
 
 and the walk becomes:
@@ -9935,9 +10214,10 @@ and the walk becomes:
         try:
             await reconcile.reconcile(source, lane, adapter)
         except WalkRefused as exc:
-            # A port failure, so `JobWorker` fails the job for a retry instead of logging
-            # a crash: a walk whose process died is resumed once its heartbeat is stale.
-            raise PortUnavailable(str(exc)) from exc
+            # Not a failure: `JobWorker` defers the job without spending an attempt, so a
+            # long walk never parks it, and tries it again no sooner than `STALE_AFTER`, by
+            # when a walk whose process died has gone stale and the retry resumes it.
+            raise JobDeferred(str(exc), retry_after=STALE_AFTER.total_seconds()) from exc
         else:
             await watch.sync(source, adapter, user_id=user_id)
         finally:
@@ -9945,6 +10225,161 @@ and the walk becomes:
 ```
 
 The watch lane moves to the `else:` arm, where it still runs only after a walk that raised nothing: the `except` is the item walk's alone, since `watch.sync` never refuses.
+
+`src/usher/services/jobs.py` — after `_propagator`:
+
+```python
+class JobDeferred(Exception):
+    """A handler raises it when its work cannot start yet, though nothing failed.
+
+    `JobWorker` defers the job by `retry_after` seconds and spends no attempt.
+    """
+
+    def __init__(self, message: str, *, retry_after: float) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+```
+
+`JobWorker._run` gains, ahead of `except PortDataMalformed`:
+
+```python
+                except JobDeferred as exc:
+                    span.set_attribute("usher.job.deferred", True)
+                    await self._defer(job, exc, scope)
+```
+
+whose `finally` comment stops counting "the two `except` arms":
+
+```python
+                # The clear at the end of this job, and it is here rather than on the
+                # `except` arms that settle the job because a bug propagates past them by
+                # design.
+```
+
+and `JobWorker` gains, after `_fail`:
+
+```python
+    async def _defer(self, job: Job, exc: JobDeferred, scope: JobScope) -> None:
+        # `str(exc)` for `_fail`'s reason, since the column and these lines are read alike.
+        deferred = await scope.queue.defer(
+            job.id, reason=str(exc), run_after_seconds=exc.retry_after
+        )
+        await scope.commit()
+        if deferred is None:
+            # `_fail`'s `unknown`: the claim lapsed and the job was recovered or parked, so
+            # nothing moved, and saying it was deferred would misreport the row.
+            logger.warning(
+                "{kind} job {key} not deferred, since it is no longer running: {reason}",
+                kind=job.kind.value,
+                key=job.key,
+                reason=str(exc),
+            )
+            return
+        # `INFO`, not `_fail`'s warning, since nothing failed.
+        logger.info(
+            "{kind} job {key} deferred for {seconds:g} s: {reason}",
+            kind=job.kind.value,
+            key=job.key,
+            seconds=exc.retry_after,
+            reason=str(exc),
+        )
+```
+
+`src/usher/ports/jobs.py` — after `fail`:
+
+```python
+    @abstractmethod
+    async def defer(
+        self, job_id: uuid.UUID, *, reason: str, run_after_seconds: float
+    ) -> Job | None:
+        """The work could not start yet, and nothing failed.
+
+        Back to `pending`, claimable no sooner than `run_after_seconds` from now,
+        with `reason` as its `last_error`. Spends no attempt, so a deferral never
+        parks a job however often it repeats. Moves only a `running` job, as
+        `touch` does, so `None` for any other and for an id it does not find.
+        """
+```
+
+`src/usher/db/repositories/jobs.py` — after `_FAIL`:
+
+```python
+# A deferral is not a failure: no attempt is spent, so it never parks however often it
+# repeats. The wait is clamped at zero as `_FAIL` clamps its hint, and not jittered: a
+# key has one row, so there is no herd to spread. `status = 'running'` as in `_TOUCH`: a
+# deferral arriving after the job was recovered or parked must move nothing.
+_DEFER = """
+UPDATE jobs SET
+    status = 'pending',
+    last_error = :reason,
+    run_after = clock_timestamp() + make_interval(secs => GREATEST(:run_after_seconds, 0)),
+    updated_at = clock_timestamp()
+WHERE id = :id AND status = 'running'
+RETURNING *
+"""
+```
+
+and `PostgresJobQueue` gains, after `fail`:
+
+```python
+    async def defer(
+        self, job_id: uuid.UUID, *, reason: str, run_after_seconds: float
+    ) -> Job | None:
+        with self._session.no_autoflush:
+            row = (
+                (
+                    await self._session.execute(
+                        text(_DEFER),
+                        {"id": job_id, "reason": reason, "run_after_seconds": run_after_seconds},
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+        return None if row is None else Job.model_validate(dict(row))
+```
+
+`tests/fakes/job_queue.py` — `FakeJobQueue` gains, after `fail`:
+
+```python
+    async def defer(
+        self, job_id: uuid.UUID, *, reason: str, run_after_seconds: float
+    ) -> Job | None:
+        found = self._find(job_id)
+        # Only a running row moves, as in `_DEFER`: a deferral arriving after the job was
+        # recovered or parked must not un-park it.
+        if found is None or self._jobs[found].status is not JobStatus.RUNNING:
+            return None
+        # No attempt spent, so a deferral never parks; clamped at zero and unjittered,
+        # as `_DEFER` is.
+        updated = self._jobs[found].evolve(
+            status=JobStatus.PENDING,
+            last_error=reason,
+            run_after=_now() + timedelta(seconds=max(run_after_seconds, 0.0)),
+            updated_at=_now(),
+        )
+        self._jobs[found] = updated
+        return updated
+```
+
+`tests/integration/test_services_enrich.py` — `_ReadsOnItsOwnConnection` subclasses the ABC directly, so it gains, after `fail`:
+
+```python
+    async def defer(
+        self, job_id: uuid.UUID, *, reason: str, run_after_seconds: float
+    ) -> Job | None:
+        raise NotImplementedError
+```
+
+`src/usher/api/lanes.py` — in `LaneSupervisor._close_gap`, the comment after the item walk says why nothing refuses it there:
+
+```python
+            # Unconditionally, after a bounded item walk as much as a whole one.
+            # `reconcile` never raises here: with `plan=False` it claims no run, so
+            # nothing refuses it. A truncated walk arrives as a returned `FAILED` run
+            # rather than as control flow, and the watch lane must still run -- a
+            # different lane with a different cursor.
+```
 
 `src/usher/cli.py` — `from usher.services.reconcile import RETRACTION_ERROR_CODE, WalkRefused`. In `_sync`, `failed: list[SyncRun] = []` gains `refused: list[str] = []` below it; the `try:` around the two lanes gains, before its `finally:`:
 
@@ -9969,14 +10404,15 @@ def _sync_failed(runs: Sequence[SyncRun], refused: Sequence[str] = ()) -> str:
     """The exit line for a sync in which a run recorded `FAILED` or a walk was refused.
 
     The per-run detail is already on stdout above -- including each `error`,
-    which for a refusal is the two numbers and the ceiling. This says *which*
-    lanes failed and stops the command claiming success, rather than repeating
-    what was printed a line earlier. A refused walk is another process's, still alive.
+    which for a sweep refusal is the two numbers and the ceiling. This says
+    *which* lanes failed and stops the command claiming success, rather than
+    repeating what was printed a line earlier. A walk is refused when another
+    process's walk of that source and kind is still alive.
 
-    **`--allow-full-retraction` is named only when a refusal is among them**,
-    and that is the whole reason `RETRACTION_ERROR_CODE` exists. It is the one
-    failure here an operator has a command for; a read timeout is not, and an
-    escape hatch offered for every failure is one people learn to paste
+    **`--allow-full-retraction` is named only when a sweep refusal is among
+    them**, and that is the whole reason `RETRACTION_ERROR_CODE` exists. It is
+    the one failure here an operator has a command for; a read timeout is not,
+    and an escape hatch offered for every failure is one people learn to paste
     without reading. `error_code` is what is matched rather than the refusal's
     English, because that sentence is built from three numbers in
     `ports/ingest.py` and is a standing candidate for rewording.
@@ -10009,13 +10445,17 @@ Run the Step 6 command. Expected: PASS.
 **An unfinished whole-library walk is resumed in place.** The next
 whole-library walk of the same kind continues the same `sync_runs` row, with
 the same `started_at`: completed units are skipped, and every other unit
-continues from the position it committed. A run still `running` whose
-heartbeat is under 10 minutes old is a live walk, and a second is refused —
-`usher sync` exits non-zero, and a worker job fails and is retried. A run whose
-sweep was refused is not resumed, and neither is one that stopped before its
-units were stored or a full run from before units existed: a fresh walk
-starts, and such a run left `running` is closed `failed` with `superseded: a
-whole-library walk restarts`.
+continues from the position it committed. Completed units are not read again
+however long ago they ran, so an item removed from one of their libraries since
+then stays available until the next full walk, which starts afresh. A run still
+`running` whose heartbeat is under 10 minutes old is a live walk, and a second
+is refused — `usher sync` exits non-zero, and a worker job is deferred: it
+spends none of its attempts, so it never parks, and tries again no sooner than
+10 minutes later, when a walk whose process died has gone stale and is resumed.
+A run whose sweep was refused is not resumed, and neither is one that stopped
+before its units were stored or a full run from before units existed: a fresh
+walk starts, and such a run left `running` is closed `failed` with `superseded:
+a whole-library walk restarts`.
 ```
 
 In "Walking the library", the bullet beginning `**Items are walked in ascending creation order**` says how far a resume reaches back. Its last two lines, `` reconcile covers what it missed. Duplicates are permitted; silent truncation `` and `` is not. ``, become:
@@ -10043,7 +10483,20 @@ A watch run moves its heartbeat when it starts and with every batch it
 commits. One still `running` whose heartbeat is under 10 minutes old is alive,
 and a second watch run neither closes nor resumes it: it walks beside it in a
 run of its own, a delta from the cursor or, with no cursor yet, a first walk.
+Nothing moves a watch run's heartbeat while a page rides out its retries, which
+can take longer than 10 minutes, so a run can be taken for dead then, and a
+second run may resume or close it while it is still walking.
 ```
+
+`docs/prd/08-operations.md`, "Job reliability", after the **Poison threshold** bullet:
+
+```markdown
+- **A deferred job spends no attempt and never parks.** A sync refused because
+  another walk of its source is still alive is tried again 10 minutes later,
+  however many times that takes.
+```
+
+`docs/prd/10-telemetry-and-dashboards.md`, the span tree: `` sync.reconcile                    ← one per SyncRun `` becomes `` sync.reconcile                    ← one per walk attempt, a refused one included ``.
 
 `docs/prd/02-data-model.md`, "Supporting tables", the `sync_runs` row: Task 16's `` `heartbeat_at`, which a whole-library walk's writer moves on every commit ([03](03-sources-and-sync.md)) `` becomes `` `heartbeat_at`, which a whole-library walk's writer moves on every commit and the watch lane when it starts a run and with every batch ([03](03-sources-and-sync.md)) ``.
 
@@ -10083,13 +10536,33 @@ In "Gap-closing walks are unasked-for work", the paragraph's last sentence, from
 ```markdown
 An unfinished first walk is superseded, never resumed
 (`watch_sync.SUPERSEDED_ERROR`): `save` only raises `position`, so its row
-cannot be reset. A watch run whose heartbeat is under `STALE_AFTER` old is
-alive, first walk or delta, and is left alone: the next run walks beside it.
+cannot be reset. A `running` watch run whose heartbeat is under `STALE_AFTER`
+old is alive, first walk or delta, and is left alone: the next run walks beside
+it.
 ```
+
+`JobWorker` now settles a `JobDeferred` as well as a `UsherPortError`, so the texts that say it settles only the second change. In `dashboards/alerts/usher.yml`, the last lines of "Ingest stalled"'s description:
+
+```yaml
+            point after the span block, so a completed job, a retryable failure,
+            a park and a deferral all count, and a handler that raises something
+            which is neither a UsherPortError nor a JobDeferred counts as none of
+            them -- which is what makes this rule fire on a crash loop.
+```
+
+In `.claude/rules/tmdb-and-enrichment.md`, the job-key bullet:
+
+```markdown
+- **A job key that does not parse must become a `UsherPortError` in the handler**,
+  which is why `services/handlers.py` converts every key: `JobWorker` settles only
+  that and a `JobDeferred`, so one corrupted key would take the worker down.
+```
+
+The test docstrings that make the same claim say "anything but a `UsherPortError` or a `JobDeferred`": three in `tests/unit/test_services_handlers.py` and one in `tests/unit/test_cli_derive.py`. In `tests/unit/test_services_jobs.py`, `test_a_crashing_handlers_event_is_not_offered_on_the_next_jobs_commit`'s "neither `except` arm runs" becomes "no `except` arm that settles the job runs".
 
 - [ ] **Step 9: Run everything this task touched**
 
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit tests/contract tests/integration/test_services_reconcile.py tests/integration/test_services_watch_sync.py tests/integration/test_ingest_end_to_end.py tests/integration/test_push_lane_end_to_end.py tests/integration/test_cli_pipeline.py`
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit tests/contract tests/integration/test_services_reconcile.py tests/integration/test_services_watch_sync.py tests/integration/test_ingest_end_to_end.py tests/integration/test_push_lane_end_to_end.py tests/integration/test_cli_pipeline.py tests/integration/test_job_queue.py tests/integration/test_services_enrich.py`
 Expected: PASS.
 
 - [ ] **Step 10: Plant and verify**
@@ -10104,11 +10577,11 @@ Expected: PASS.
 8. `_claim` without `and newest.error_code != RETRACTION_ERROR_CODE`. Expect `test_a_walk_whose_sweep_was_refused_walks_again_rather_than_resuming` to fail on `run.id != refused.id`.
 9. `_claim`'s resume condition widened to `(has_units or newest.heartbeat_at is not None) and newest.error_code != RETRACTION_ERROR_CODE`. Expect `test_a_walk_killed_while_planning_is_superseded_once_its_heartbeat_is_stale` to fail on `run.id != planning.id`.
 10. The supersede condition without `or kind is SyncRunKind.FULL`. Expect the legacy-full case to fail, its row still `running`.
-11. The supersede condition with `or True` for `or kind is SyncRunKind.FULL`. Expect `test_an_unfinished_delta_with_no_plan_is_left_alone` to fail.
+11. The supersede condition with `or kind in _ITEM_LANES` for `or kind is SyncRunKind.FULL`, true for every claim, which runs for item lanes only (`or True` dies on ruff's SIM222). Expect `test_an_unfinished_delta_with_no_plan_is_left_alone` to fail.
 12. `_supersede` without its `RUNNING` condition. Expect `test_a_superseded_walk_that_had_already_failed_keeps_its_own_error` to fail.
 13. `claimed = await self._claim(source, kind)` for every walk, dropping `if planned else None`. Expect `test_a_cursored_delta_walks_beside_a_live_whole_library_walk` to fail with `WalkRefused`.
-14. `sync_handler` without its `except WalkRefused`. Expect the handler case to fail with `WalkRefused` where `PortUnavailable` was expected.
-15. `_sync` without its `except WalkRefused`. Expect the CLI case to fail with `WalkRefused` out of `_sync`.
+14. `sync_handler` without its `except WalkRefused`, and without the imports only it used, or ruff's F401 kills the plant. Expect the handler case to fail with `WalkRefused` where `JobDeferred` was expected.
+15. `_sync` without its `except WalkRefused`, and without the import only it used. Expect the CLI case to fail with `WalkRefused` out of `_sync`.
 16. `_sync_failed` without the refused line. Expect the exit-line case to fail.
 17. The watch lane's live check with `<=` for `<`. Expect both `ten-minutes-old` parametrisations of `test_a_dead_watch_walk_is_superseded_or_resumed_as_before` to fail: the first walk's row is still `running`, and the delta is not resumed.
 18. The live check without `incomplete.status is SyncRunStatus.RUNNING`. Expect `test_a_failed_watch_walk_resumes_however_fresh_its_heartbeat` to fail on `run.id`, a fresh run having started beside the failed one.
@@ -10118,12 +10591,35 @@ Expected: PASS.
 22. The watch lane's insert without `heartbeat_at=…`. Expect `test_a_watch_walk_that_fails_before_its_first_batch_still_leaves_its_heartbeat` to fail on `None == NOW`, and `test_every_batch_of_a_watch_walk_moves_its_heartbeat` on its beats, each a second early.
 23. The watch lane's `_flush` without `heartbeat_at=…`. Expect `test_every_batch_of_a_watch_walk_moves_its_heartbeat` to fail, every beat reading `NOW`.
 24. The watch lane's reclaim without `heartbeat_at=…`. Expect both `delta` parametrisations of `test_a_dead_watch_walk_is_superseded_or_resumed_as_before` to fail on `fixture.saved[0].heartbeat_at == NOW`.
+25. The claim's `except WalkRefused` re-raising without setting `usher.sync.refused`. Expect `test_a_refused_walk_is_marked_on_its_span` to fail on `[None, None] == [True, None]`.
+26. `usher.sync.refused` set to `True` before the claim, so on every span. Expect the same case to fail on `[True, True] == [True, None]`.
+27. `_DEFER` with `attempts = attempts + 1`. Expect the Postgres arm (`tests/integration/test_job_queue.py`) to fail `test_a_deferred_job_waits_without_spending_an_attempt` on `a deferral spent an attempt` and the one-short case on `5 != 4`.
+28. The fake's `defer` parking at `attempts + 1 >= max_attempts`. Expect the fake arm's one-short contract case and `test_a_deferral_never_parks_a_job_one_failure_short_of_the_ceiling` to fail on `PARKED != PENDING`.
+29. `_run` without its `except JobDeferred`. Expect both worker deferral cases to fail, `JobDeferred` escaping `run_once`.
+30. `_defer` passing `run_after_seconds=0`. Expect `test_a_deferred_job_waits_out_its_retry_after_without_spending_an_attempt` to fail on `deferred only … against a 600 s retry_after`.
+31. `sync_handler` raising `PortUnavailable(str(exc)) from exc` for `JobDeferred`, its imports lint-clean. Expect the handler case to fail, `PortUnavailable` raised where `JobDeferred` was expected.
+32. The reclaim without `status=SyncRunStatus.RUNNING`, then without `finished_at=None`. Expect `test_a_resumed_walk_reads_running_again_so_a_second_walk_is_refused` to fail on `the claim left the resumed row failed`, then on `the claim kept the failed attempt's end`.
+33. The supersede without `newest.heartbeat_at is not None`. Expect `test_a_cursorless_delta_killed_while_planning_is_superseded` to fail on `a cursorless delta killed while planning was left running`.
+34. `_DEFER` without `GREATEST`, then the fake without `max(…, 0.0)`. Expect `test_a_negative_wait_never_dates_a_deferral_before_now` to fail on that arm, `a -999 s wait dated it … early`.
+35. `_defer` logging with `logger.warning`. Expect the worker deferral case to fail on `a deferral logged at WARNING`.
+36. `_defer` without its `scope.commit()`. Expect the worker deferral case to fail on `['handle:t1', 'defer'] == ['handle:t1', 'defer', 'commit']`.
+37. A control that must survive: `except JobDeferred` moved below `except UsherPortError`, still above `except Exception`, since a `JobDeferred` is neither a `PortDataMalformed` nor a `UsherPortError`.
+38. `_DEFER` without `AND status = 'running'`. Expect the Postgres arm's `test_deferring_a_parked_job_leaves_it_parked` to fail, a `Job` returned where `None` was expected.
+39. The fake's `defer` without `or self._jobs[found].status is not JobStatus.RUNNING`. Expect the fake arm's same case to fail the same way, and `test_a_deferral_after_the_job_was_parked_out_from_under_the_worker_moves_nothing` on `(PENDING, 'not yet') == (PARKED, 'TMDb returned a list')`.
+40. `_defer`'s `None` branch never taken, `if deferred is None and not exc.retry_after:`. Expect that worker case to fail on `a deferral that moved nothing logged at INFO`.
+41. A control that must survive: the fake's guard spelled `status not in (JobStatus.RUNNING,)`.
 
 - [ ] **Step 11: Commit**
 
 ```bash
 git add src/usher/services/reconcile.py src/usher/services/watch_sync.py \
   src/usher/ports/repository/sync.py src/usher/services/handlers.py src/usher/cli.py \
+  src/usher/ports/jobs.py src/usher/db/repositories/jobs.py src/usher/services/jobs.py \
+  src/usher/api/lanes.py tests/fakes/job_queue.py tests/contract/job_queue_contract.py \
+  tests/unit/test_services_jobs.py tests/integration/test_services_enrich.py \
+  docs/prd/08-operations.md docs/prd/10-telemetry-and-dashboards.md \
+  dashboards/alerts/usher.yml .claude/rules/tmdb-and-enrichment.md \
+  tests/unit/test_cli_derive.py \
   tests/fakes/source_adapter.py docs/prd/02-data-model.md docs/prd/03-sources-and-sync.md \
   CHANGELOG.md docs/guide/command-line.md .claude/rules/emby-push-and-ingest.md \
   tests/unit/test_services_reconcile.py tests/unit/test_services_watch_sync.py \
@@ -10383,7 +10879,7 @@ Expected: PASS.
         return run
 ```
 
-`_RecordingWatch.__init__` stores `self.since_at_most: list[datetime | None] = []`; its `sync` takes `since_at_most: datetime | None = None` after `user_id` and first appends it to `self.since_at_most`. After Task 17's `test_a_refused_walk_fails_the_job_so_the_queue_retries_it`:
+`_RecordingWatch.__init__` stores `self.since_at_most: list[datetime | None] = []`; its `sync` takes `since_at_most: datetime | None = None` after `user_id` and first appends it to `self.since_at_most`. After Task 17's `test_a_refused_walk_defers_the_job_so_the_queue_tries_it_again`:
 
 ```python
 async def test_the_sync_handler_runs_the_watch_lane_after_the_seed_and_again_after_the_walk(
@@ -10534,9 +11030,10 @@ Expected: FAIL — the seeded handler case on `events == ["reconcile", "watch", 
                 after_seed=lambda: watch.sync(source, adapter, user_id=user_id),
             )
         except WalkRefused as exc:
-            # A port failure, so `JobWorker` fails the job for a retry instead of logging
-            # a crash: a walk whose process died is resumed once its heartbeat is stale.
-            raise PortUnavailable(str(exc)) from exc
+            # Not a failure: `JobWorker` defers the job without spending an attempt, so a
+            # long walk never parks it, and tries it again no sooner than `STALE_AFTER`, by
+            # when a walk whose process died has gone stale and the retry resumes it.
+            raise JobDeferred(str(exc), retry_after=STALE_AFTER.total_seconds()) from exc
         else:
             await watch.sync(source, adapter, user_id=user_id, since_at_most=run.started_at)
         finally:
