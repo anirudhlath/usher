@@ -23,7 +23,8 @@ Versioning is `0.x` while the wire contract may still move —
 - A whole-library walk that fails or is killed resumes where it stopped: the
   same run, each unit from the position it committed. While one is alive — its
   heartbeat under 10 minutes old — a second is refused, saying how long until
-  one whose process stopped can be resumed, and `usher sync` exits non-zero. A
+  one whose process stopped can be resumed: `usher sync` exits non-zero, and a
+  worker job is deferred 10 minutes, spending none of its attempts. A
   watch-state walk started while another is alive runs beside it instead of
   closing or resuming the other's run.
 - The watch lane runs as soon as a whole-library walk has stored what the
