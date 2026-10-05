@@ -31,7 +31,7 @@ Auto-instrumentation for FastAPI, SQLAlchemy and httpx, plus explicit spans on
 the pipeline:
 
 ```
-sync.reconcile                    ← one per SyncRun
+sync.reconcile                    ← one per walk attempt, a refused one included
 └── ingest.item                   ← one per batch
     └── match.title               ← the five-tier ladder, batched
 
