@@ -165,8 +165,9 @@ class WatchStateSyncService:
         cursor, so a caller can cover what its item walk stored after this lane's
         last run began. `beat` is awaited after every batch this walk commits, so a
         caller whose own run waits on this walk can keep that run's heartbeat moving.
-        A run another process is still walking is left to it, and this walk runs
-        beside it in a row of its own. Never raises a `UsherPortError`.
+        `beat` must not raise a `UsherPortError`, which would be recorded as this
+        walk's failure. A run another process is still walking is left to it, and
+        this walk runs beside it in a row of its own. Never raises a `UsherPortError`.
         """
         started = time.perf_counter()
         with _tracer.start_as_current_span("sync.watch_state") as span:
