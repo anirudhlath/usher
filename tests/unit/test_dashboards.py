@@ -819,6 +819,15 @@ def _sql(panel: dict[str, Any]) -> str:
     return "\n".join(_target_sql(target) for target in panel.get("targets") or [])
 
 
+def _assert_dashboard_3_has_eleven_panels(panels: list[dict[str, Any]]) -> None:
+    """Dashboard 3's panel count: PRD 10's ten items, with queue depth drawn twice."""
+    titles = [str(panel["title"]) for panel in panels]
+    assert len(panels) == 11, (
+        "dashboard 3 is eleven panels -- PRD 10's ten items, with queue depth drawn twice -- "
+        f"not {len(panels)}: {titles}"
+    )
+
+
 def test_the_queue_depth_panels_are_two_panels_over_two_datasources() -> None:
     """The failure this closes renders perfectly and answers a different question.
 
@@ -840,10 +849,7 @@ def test_the_queue_depth_panels_are_two_panels_over_two_datasources() -> None:
     assert "Parked jobs by kind" in titles, (
         f"the known-title anchor is gone, so this scan is reading something else: {titles}"
     )
-    assert len(panels) == 11, (
-        "dashboard 3 is eleven panels -- PRD 10's ten items, with queue depth drawn twice -- "
-        f"not {len(panels)}: {titles}"
-    )
+    _assert_dashboard_3_has_eleven_panels(panels)
 
     depth = [panel for panel in panels if "queue depth" in str(panel["title"]).lower()]
     assert len(depth) == 2, (
@@ -929,6 +935,16 @@ def test_the_prometheus_normaliser_strips_the_exporters_unit_suffix() -> None:
     )
 
 
+def _assert_says_the_source_label_is_operator_typed(panel: dict[str, Any]) -> None:
+    """A push panel's description says what its `source` label holds."""
+    description = str(panel.get("description", ""))
+    where = f"{panel['title']!r}"
+    assert "operator-typed" in description, (
+        f"{where} does not say the `source` label is the operator-typed source name, "
+        "so a panel author reads it as a UUID"
+    )
+
+
 def test_the_push_panels_say_what_their_source_label_is_and_when_there_is_no_series() -> None:
     """The sentence the *"Push down"* alert is written against, pinned on the panel.
 
@@ -952,10 +968,7 @@ def test_the_push_panels_say_what_their_source_label_is_and_when_there_is_no_ser
     for panel in push:
         description = str(panel.get("description", ""))
         where = f"{panel['title']!r}"
-        assert "operator-typed" in description, (
-            f"{where} does not say the `source` label is the operator-typed source name, "
-            "so a panel author reads it as a UUID"
-        )
+        _assert_says_the_source_label_is_operator_typed(panel)
         assert "no series" in description, (
             f"{where} does not say a source with no lane produces no series, which is the "
             "sentence D11's alert condition is written against"
@@ -964,6 +977,14 @@ def test_the_push_panels_say_what_their_source_label_is_and_when_there_is_no_ser
             f"{where} does not spell out which alert condition follows — `== 0` rather "
             f"than `absent()`: {description!r}"
         )
+
+
+def _assert_every_target_splits_on_outcome(panel: dict[str, Any]) -> None:
+    """The enrichment panel's legends, every one of which splits on `outcome`."""
+    labels = {str(target.get("legendFormat", "")) for target in panel.get("targets") or []}
+    assert all("{{outcome}}" in label for label in labels), (
+        f"a target on the enrichment panel does not split on `outcome`: {sorted(labels)}"
+    )
 
 
 def test_the_enrichment_panel_splits_on_outcome_and_says_where_the_trigger_split_is() -> None:
@@ -993,9 +1014,15 @@ def test_the_enrichment_panel_splits_on_outcome_and_says_where_the_trigger_split
             f"the thing a reader of the title assumes: {description!r}"
         )
 
-    labels = {str(target.get("legendFormat", "")) for target in panel.get("targets") or []}
-    assert all("{{outcome}}" in label for label in labels), (
-        f"a target on the enrichment panel does not split on `outcome`: {sorted(labels)}"
+    _assert_every_target_splits_on_outcome(panel)
+
+
+def _assert_names_the_transport_failures(panel: dict[str, Any]) -> None:
+    """The TMDb panel's description says its denominator holds `status="error"` too."""
+    description = str(panel.get("description", ""))
+    assert 'status="error"' in description, (
+        "the TMDb panel does not state that its denominator includes the transport "
+        f"failures that never reached a status line: {description!r}"
     )
 
 
@@ -1027,11 +1054,7 @@ def test_the_tmdb_panel_counts_429s_and_denominates_on_every_status_including_er
             f'`status="error"` transport failures and reads low during an outage: {expr}'
         )
 
-    description = str(tmdb[0].get("description", ""))
-    assert 'status="error"' in description, (
-        "the TMDb panel does not state that its denominator includes the transport "
-        f"failures that never reached a status line: {description!r}"
-    )
+    _assert_names_the_transport_failures(tmdb[0])
 
 
 def test_the_walk_panel_draws_the_listing_limit_and_a_mean_unit_duration_by_stage() -> None:
@@ -1069,24 +1092,27 @@ def test_the_walk_panel_draws_the_listing_limit_and_a_mean_unit_duration_by_stag
 
 
 def test_the_dashboard_3_prose_claims_are_falsifiable() -> None:
-    """The four description checks above are substring scans.
+    """Each of the four checks above, handed an input it has to refuse.
 
-    A substring scan over prose nobody can make fail is decoration, so each is
-    exercised here against a description with the sentence removed -- the only place
-    they can be shown red.
+    Three are substring scans and one is a count, and a check nothing can make fail is
+    decoration. The tests above call each helper on the committed dashboard; this calls
+    the same helper on a panel without the sentence, a legend split on the wrong label,
+    and a dashboard one panel short -- the only place they can be shown red.
     """
-    panel = {"title": "Push connection uptime", "description": "a socket, probably"}
-    assert "operator-typed" not in str(panel["description"])
-
-    assert 'status="error"' not in "429s over the total"
-    assert "{{outcome}}" not in "{{trigger}}"
-
-    with pytest.raises(AssertionError, match="eleven panels"):
-        titles = ["only", "ten", "of", "them", "here", "and", "no", "more", "at", "all"]
-        assert len(titles) == 11, (
-            "dashboard 3 is eleven panels -- PRD 10's ten items, with queue depth drawn "
-            f"twice -- not {len(titles)}"
+    with pytest.raises(AssertionError, match="the operator-typed source name"):
+        _assert_says_the_source_label_is_operator_typed(
+            {"title": "Push connection uptime", "description": "a socket, probably"}
         )
+    with pytest.raises(AssertionError, match="does not split on `outcome`"):
+        _assert_every_target_splits_on_outcome(
+            {"title": "Enrichment", "targets": [{"legendFormat": "{{trigger}}"}]}
+        )
+    with pytest.raises(AssertionError, match="never reached a status line"):
+        _assert_names_the_transport_failures(
+            {"title": "TMDb requests", "description": "429s over the total"}
+        )
+    with pytest.raises(AssertionError, match=r"eleven panels .* not 10:"):
+        _assert_dashboard_3_has_eleven_panels([{"title": f"panel {n}"} for n in range(10)])
 
 
 # --------------------------------------------------------------------------------
