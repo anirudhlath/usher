@@ -11538,14 +11538,14 @@ Panel 11 ships as unbacked: nothing has walked a real source since it existed. T
 **Files:**
 - Modify: `src/usher/domain/sync.py` (`WalkProgress`, `walk_progress`)
 - Modify: `src/usher/ports/repository/sync.py` (`latest_run`; `latest_incomplete_run` built on it), `src/usher/db/repositories/sync.py`, `tests/fakes/sync_run_repository.py`
-- Modify: `src/usher/services/reconcile.py` (`_unit_duration`, `_Progress.units`, `_walk_plan`, `_walk_stage`, `_fetch`, `_write`, `_commit_unit`, `_flush`, `_publish_progress`)
+- Modify: `src/usher/services/reconcile.py` (`ReconcileService`'s `timer`, `_unit_duration`, `_Progress.units`, `_walk_plan`, `_walk_stage`, `_fetch`, `_write`, `_commit_unit`, `_flush`, `_publish_progress`)
 - Modify: `src/usher/api/dto/source.py` (`SyncRunResponse`, `SourceStatusResponse.last_sync`), `src/usher/api/routers/sources.py` (`source_status`, `_last_sync`)
 - Modify: `src/usher/cli.py` (`_sync_status`, `_plan_line`)
 - Modify: `tests/fakes/source_adapter.py` (`uncounted`)
 - Regenerate: `web/src/api/schema.d.ts`. Modify: `web/src/test/fixtures/admin.ts`
 - Modify: `dashboards/03-pipeline.json` (panel 11, the description), `dashboards/README.md`
 - Modify: `docs/prd/03-sources-and-sync.md`, `docs/prd/07-client-api.md`, `docs/prd/10-telemetry-and-dashboards.md`, `CHANGELOG.md`, `docs/guide/command-line.md`
-- Test: `tests/unit/test_domain_sync.py`, `tests/contract/sync_run_repository_contract.py`, `tests/unit/test_services_reconcile.py`, `tests/unit/test_cli.py`, `tests/unit/test_telemetry_metric_names.py`, `tests/unit/test_dashboards.py`, `tests/unit/test_alerts.py`, `tests/integration/test_admin_sources.py`, `tests/integration/test_cli_pipeline.py`
+- Test: `tests/unit/test_domain_sync.py`, `tests/contract/sync_run_repository_contract.py`, `tests/integration/test_sync_run_repository.py` (`_NEWEST`), `tests/unit/test_services_reconcile.py`, `tests/unit/test_cli.py`, `tests/unit/test_telemetry_metric_names.py`, `tests/unit/test_dashboards.py`, `tests/unit/test_alerts.py`, `tests/integration/test_admin_sources.py`, `tests/integration/test_cli_pipeline.py`
 
 **Interfaces:**
 - Consumes:
@@ -11561,6 +11561,7 @@ Panel 11 ships as unbacked: nothing has walked a real source since it existed. T
   - The `sync.progress` keys `stage`, `units_done`, `units_total`, `items_expected`.
   - `SyncRunResponse`, and `SourceStatusResponse.last_sync: SyncRunResponse | None`.
   - The histogram `usher.sync.unit.duration` (`unit="s"`, labels `source` and `stage`).
+  - `ReconcileService(…, timer: Callable[[], float] = time.perf_counter)`, the monotonic source a unit's duration is read from, and the test double `_Timer`.
   - `usher.cli._plan_line(walk: WalkProgress) -> str`.
   - `FakeSourceAdapter.uncounted(library)`.
   - Dashboard 3's panel 11, titled `Whole-library walks — listing limit and mean unit duration`. Task 21 records its observation and flips PRD 10's backing statement for it.
@@ -11756,6 +11757,8 @@ def walk_progress(units: Iterable[SyncRunUnit]) -> WalkProgress | None:
 # the one row this returns; see the port for why it never filters on it.
 ```
 
+`tests/integration/test_sync_run_repository.py` imports the statement to `EXPLAIN` it, so its import and its two other mentions of `_INCOMPLETE` become `_NEWEST`.
+
 `PostgresSyncRunRepository.latest_incomplete_run` is replaced by:
 
 ```python
@@ -11811,7 +11814,23 @@ after `hold`:
 
 and in `plan_walk`, the unit's `len(placed)` becomes `None if name in self._uncounted else len(placed)`.
 
-`tests/unit/test_services_reconcile.py` — imports: `metrics` joins the existing `from opentelemetry import trace`, which becomes `from opentelemetry import metrics, trace`; `from opentelemetry.sdk.metrics import MeterProvider` and `from opentelemetry.sdk.metrics.export import HistogramDataPoint, InMemoryMetricReader` join the `opentelemetry.sdk` imports below it. Append:
+`tests/unit/test_services_reconcile.py` — imports: `metrics` joins the existing `from opentelemetry import trace`, which becomes `from opentelemetry import metrics, trace`; `from opentelemetry.sdk.metrics import MeterProvider` and `from opentelemetry.sdk.metrics.export import HistogramDataPoint, InMemoryMetricReader` join the `opentelemetry.sdk` imports below it. After `_Ticks`, add:
+
+```python
+class _Timer:
+    """A monotonic reading that moves only when the case moves it.
+
+    It starts far from zero, so a reading recorded as it stands is never a duration.
+    """
+
+    def __init__(self) -> None:
+        self.now = 1_000.0
+
+    def __call__(self) -> float:
+        return self.now
+```
+
+Append:
 
 ```python
 # -- where a planned walk stands: its frames, and each unit's duration -------
@@ -11879,9 +11898,7 @@ async def test_a_single_walks_frames_carry_no_plan() -> None:
     for index in range(3):
         fixture.adapter.seed(_item(f"m{index}"), T0)
 
-    await fixture.service.reconcile(
-        fixture.source, SyncRunKind.FULL, fixture.adapter, plan=False
-    )
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter, plan=False)
 
     frames = [
         event.data
@@ -11900,11 +11917,13 @@ async def test_a_unit_is_timed_from_its_walkers_claim_to_its_last_commit(
 ) -> None:
     """Once per completed unit, under its stage, from the claim rather than the stage's start.
 
-    One walker, so Shorts is claimed only once Films has completed: the 90 s that pass
-    while Films is held are Films' alone, and Shorts records none of them.
+    One walker, so Shorts is not claimed until Films' last page has been fetched, after
+    the hold: the 90 s that pass while Films is held are Films' alone, and Shorts records
+    none of them. They pass on the timer while the wall clock stands still, so a duration
+    read off the clock is 0.
     """
-    clock = _Clock(NOW)
-    fixture = _Fixture(batch_size=1, walkers=1, clock=clock)
+    timer = _Timer()
+    fixture = _Fixture(batch_size=1, walkers=1, clock=_Clock(NOW), timer=timer)
     _shelve(fixture, "Watched", range(1), stage=WalkStage.SEED)
     _shelve(fixture, "Films", range(10, 12))
     _shelve(fixture, "Shorts", range(20, 21))
@@ -11916,7 +11935,7 @@ async def test_a_unit_is_timed_from_its_walkers_claim_to_its_last_commit(
     async with asyncio.timeout(5):
         while ("library:Films", 0) not in fixture.adapter.unit_starts:
             await asyncio.sleep(0)
-    clock.now = NOW + timedelta(seconds=90)
+    timer.now += 90
     release.set()
     run = await asyncio.wait_for(walk, 5)
 
@@ -11930,6 +11949,37 @@ async def test_a_unit_is_timed_from_its_walkers_claim_to_its_last_commit(
         (fixture.source.name, "seed"): (1, 0.0),
         (fixture.source.name, "titles"): (2, 90.0),
     }
+
+
+async def test_a_unit_that_fails_records_no_duration(meter_reader: InMemoryMetricReader) -> None:
+    """Films completes and is timed; Shorts, claimed after it, fails and records nothing.
+
+    One walker, so Shorts is not claimed until Films' last page has been fetched, after
+    the hold. Films is held for 90 s on the timer, so its point cannot pass for one Shorts
+    recorded at no cost.
+    """
+    timer = _Timer()
+    fixture = _Fixture(batch_size=1, walkers=1, clock=_Clock(NOW), timer=timer)
+    _shelve(fixture, "Films", range(10, 12))
+    _shelve(fixture, "Shorts", range(20, 21))
+    fixture.adapter.fail_unit_after("Shorts", 0)
+    release = fixture.adapter.hold("Films")
+
+    walk = asyncio.create_task(
+        fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    )
+    async with asyncio.timeout(5):
+        while ("library:Films", 0) not in fixture.adapter.unit_starts:
+            await asyncio.sleep(0)
+    timer.now += 90
+    release.set()
+    run = await asyncio.wait_for(walk, 5)
+
+    assert run.status is SyncRunStatus.FAILED, "the premise: Shorts failed the walk"
+    assert fixture.adapter.unit_starts == [("library:Films", 0), ("library:Shorts", 0)], (
+        "the premise: Shorts was claimed, after Films"
+    )
+    assert _unit_durations(meter_reader) == {(fixture.source.name, "titles"): (1, 90.0)}
 ```
 
 Task 16's `test_a_unit_that_ends_on_a_batch_boundary_publishes_no_second_frame` is replaced by the case below. A frame now counts units, so the empty batch a unit's end commits moves something a reader sees:
@@ -11960,10 +12010,10 @@ async def test_a_unit_that_ends_on_a_batch_boundary_still_says_where_its_plan_st
 
 - [ ] **Step 6: Run them to see them fail**
 
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_services_reconcile.py tests/unit/test_telemetry_metric_names.py tests/unit/test_dashboards.py -k "plan_stands or carry_no_plan or timed_from or catalogue"`
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_services_reconcile.py tests/unit/test_telemetry_metric_names.py tests/unit/test_dashboards.py -k "plan_stands or carry_no_plan or timed_from or records_no_duration or catalogue"`
 Expected: FAIL:
 - the two frame cases above with `KeyError: 'stage'`, and the boundary case with `KeyError: 'units_done'`;
-- the duration case on `{} == {…}`;
+- the two duration cases with `TypeError: _Fixture.__init__() got an unexpected keyword argument 'timer'`: Step 7 gives the fixture its timer;
 - both catalogue counts on 43 rows: `the catalogue table parse found 43 rows`, and the dashboards reader's `PRD 10's metric table parsed to 43 rows`. The filter's four other `catalogue` cases in `test_dashboards.py` pass.
 
 - [ ] **Step 7: The walk says where it stands, and times each unit**
@@ -11977,6 +12027,15 @@ _unit_duration = _meter.create_histogram(
     unit="s",
     description="Wall time per unit of a whole-library walk, from claim to last commit",
 )
+```
+
+`ReconcileService.__init__` takes `timer: Callable[[], float] = time.perf_counter` after `clock`, and after `self._clock = clock`:
+
+```python
+        # A unit's duration is two readings of this, never of `clock`: a wall clock
+        # stepped back mid-unit loses the point, which the histogram drops as negative,
+        # and one stepped forward inflates it.
+        self._timer = timer
 ```
 
 `_Progress.__slots__` becomes `("run", "units")`, and `__init__` gains:
@@ -11996,14 +12055,14 @@ In `_walk_stage`, the `claimable = …` line through the `walkers = [...]` list 
 
 ```python
         claimable = deque(sorted(units, key=lambda unit: unit.expected_items or 0, reverse=True))
-        claimed: dict[str, datetime] = {}
+        claimed: dict[str, float] = {}
 
         def claim() -> SyncRunUnit | None:
             # A unit's duration runs from here, the moment a walker takes it.
             if not claimable:
                 return None
             unit = claimable.popleft()
-            claimed[unit.unit_key] = self._clock()
+            claimed[unit.unit_key] = self._timer()
             return unit
 
         queue: asyncio.Queue[_Fetched] = asyncio.Queue(maxsize=self._walkers)
@@ -12023,13 +12082,13 @@ and its `await self._write(source, progress, units, queue)` becomes `await self.
 
 (the `unit = claimable.popleft()` line goes, and the rest of the body is unchanged).
 
-`_write` takes `claimed: Mapping[str, datetime]` after `queue`. Its docstring gains the sentence `Each unit that completes records the seconds since a walker claimed it.` before `Returns once every unit has committed complete.`, and its `if done:` block becomes:
+`_write` takes `claimed: Mapping[str, float]` after `queue`. Its docstring gains the sentence `Each unit that completes records the seconds since a walker claimed it.` before `Returns once every unit has committed complete.`, and its `if done:` block becomes:
 
 ```python
             if done:
                 open_units -= 1
                 _unit_duration.record(
-                    (self._clock() - claimed[unit.unit_key]).total_seconds(),
+                    self._timer() - claimed[unit.unit_key],
                     {"source": source.name, "stage": unit.stage.value},
                 )
 ```
@@ -12071,10 +12130,13 @@ and the call becomes:
                     "items_expected": walk.items_expected if walk is not None else None,
 ```
 
+`tests/unit/test_services_reconcile.py` — `_Fixture` takes `timer: Callable[[], float] | None = None` after `clock`, and hands the service `timer=timer if timer is not None else _Timer()` after its `clock=`.
+
 `docs/prd/10-telemetry-and-dashboards.md`, "Metrics". The lead-in becomes:
 
 ```markdown
-**Every row is emitted today. 44 rows: 43 instruments Usher declares, plus one `FastAPIInstrumentor` supplies.**
+**Every row is emitted today. 44 rows: 43 instruments Usher declares, plus one
+`FastAPIInstrumentor` supplies.**
 ```
 
 Add a row after `usher.sync.retraction.fraction`:
@@ -12339,7 +12401,8 @@ class SyncRunResponse(BaseModel):
     whole-library walk's plan stands -- `walk_progress` -- and are `null` for a walk
     without one. `heartbeat_at` tells a live `running` walk from a dead one: a
     whole-library walk's writer moves it at least once a minute. `error` is the
-    run's own sentence, built like `detail` below from translated port errors.
+    run's own sentence, built like `SourceStatusResponse.detail` from translated
+    port errors.
     """
 
     kind: SyncRunKind
@@ -12421,9 +12484,7 @@ async def source_status(
 async def _last_sync(runs: SyncRunRepository, source_id: uuid.UUID) -> SyncRunResponse | None:
     """The source's newest item walk, with where its plan stands; `None` before the first."""
     found = [
-        run
-        for kind in _ITEM_WALKS
-        if (run := await runs.latest_run(source_id, kind)) is not None
+        run for kind in _ITEM_WALKS if (run := await runs.latest_run(source_id, kind)) is not None
     ]
     if not found:
         return None
@@ -12481,7 +12542,7 @@ EOF
 git diff --stat web/src/api/schema.d.ts
 ```
 
-Expected: `git diff web/src/api/schema.d.ts` adds the `SyncRunResponse` schema; the `SyncRunKind`, `SyncRunStatus` and `WalkStage` schemas it names, each a `StrEnum` and so a component of its own, as `SourceKind` is; and `last_sync` on `SourceStatusResponse`, whose `@description` gains the docstring's new `last_sync` paragraph. It changes nothing else. A diff that touches anything beyond those means the committed file was already stale against `main`. In that case stop and report it; don't commit someone else's drift under this task.
+Expected: `git diff web/src/api/schema.d.ts` adds the `SyncRunResponse` schema; the `SyncRunKind`, `SyncRunStatus` and `WalkStage` schemas it names, each a `StrEnum` and so a component of its own, as `SourceKind` is; and `last_sync` on `SourceStatusResponse`, whose `@description` gains the docstring's new `last_sync` paragraph. It changes nothing else. A diff that touches anything beyond those means the committed file was already stale against `main`. In that case stop and report it; don't commit someone else's drift under this task. On this branch it was: `SeasonsResponse`'s description had been reworded on `main` without regenerating, so that one hunk went in a regeneration-only commit ahead of this task's.
 
 `web/src/test/fixtures/admin.ts`:
 - `sourceStatusHealthy`'s comment gains the sentence `` `last_sync` is a whole-library walk part-way through its episodes. ``, and the object gains, after `detail: null,`:
@@ -12512,24 +12573,89 @@ Expected: PASS, with no screenshot moved: no screen renders `last_sync`, so a mo
 
 - [ ] **Step 14: Write the failing panel tests**
 
-`tests/unit/test_dashboards.py`. In `test_the_queue_depth_panels_are_two_panels_over_two_datasources`, the count assertion becomes:
+`tests/unit/test_dashboards.py`. `test_the_dashboard_3_prose_claims_are_falsifiable` exists to show four checks red, and it restates each against a literal, so none of them can fail. Each check moves into a helper that its own test calls, and that case calls the same helper on an input it has to refuse.
+
+Before `test_the_queue_depth_panels_are_two_panels_over_two_datasources`:
 
 ```python
+def _assert_dashboard_3_has_eleven_panels(panels: list[dict[str, Any]]) -> None:
+    """Dashboard 3's panel count: PRD 10's ten items, with queue depth drawn twice."""
+    titles = [str(panel["title"]) for panel in panels]
     assert len(panels) == 11, (
         "dashboard 3 is eleven panels -- PRD 10's ten items, with queue depth drawn twice -- "
         f"not {len(panels)}: {titles}"
     )
 ```
 
-In `test_the_dashboard_3_prose_claims_are_falsifiable`, the last block becomes:
+and in that test, the count assertion becomes `_assert_dashboard_3_has_eleven_panels(panels)`.
+
+Before `test_the_push_panels_say_what_their_source_label_is_and_when_there_is_no_series`:
 
 ```python
-    with pytest.raises(AssertionError, match="eleven panels"):
-        titles = ["only", "ten", "of", "them", "here", "and", "no", "more", "at", "all"]
-        assert len(titles) == 11, (
-            "dashboard 3 is eleven panels -- PRD 10's ten items, with queue depth drawn "
-            f"twice -- not {len(titles)}"
+def _assert_says_the_source_label_is_operator_typed(panel: dict[str, Any]) -> None:
+    """A push panel's description says what its `source` label holds."""
+    description = str(panel.get("description", ""))
+    where = f"{panel['title']!r}"
+    assert "operator-typed" in description, (
+        f"{where} does not say the `source` label is the operator-typed source name, "
+        "so a panel author reads it as a UUID"
+    )
+```
+
+and in its loop, the `operator-typed` assertion becomes `_assert_says_the_source_label_is_operator_typed(panel)`.
+
+Before `test_the_enrichment_panel_splits_on_outcome_and_says_where_the_trigger_split_is`:
+
+```python
+def _assert_every_target_splits_on_outcome(panel: dict[str, Any]) -> None:
+    """The enrichment panel's legends, every one of which splits on `outcome`."""
+    labels = {str(target.get("legendFormat", "")) for target in panel.get("targets") or []}
+    assert all("{{outcome}}" in label for label in labels), (
+        f"a target on the enrichment panel does not split on `outcome`: {sorted(labels)}"
+    )
+```
+
+and its last assertion, with the `labels` line above it, becomes `_assert_every_target_splits_on_outcome(panel)`.
+
+Before `test_the_tmdb_panel_counts_429s_and_denominates_on_every_status_including_error`:
+
+```python
+def _assert_names_the_transport_failures(panel: dict[str, Any]) -> None:
+    """The TMDb panel's description says its denominator holds `status="error"` too."""
+    description = str(panel.get("description", ""))
+    assert 'status="error"' in description, (
+        "the TMDb panel does not state that its denominator includes the transport "
+        f"failures that never reached a status line: {description!r}"
+    )
+```
+
+and its last assertion, with the `description` line above it, becomes `_assert_names_the_transport_failures(tmdb[0])`.
+
+`test_the_dashboard_3_prose_claims_are_falsifiable` becomes:
+
+```python
+def test_the_dashboard_3_prose_claims_are_falsifiable() -> None:
+    """Each of the four checks above, handed an input it has to refuse.
+
+    Three are substring scans and one is a count, and a check nothing can make fail is
+    decoration. The tests above call each helper on the committed dashboard; this calls
+    the same helper on a panel without the sentence, a legend split on the wrong label,
+    and a dashboard one panel short -- the only place they can be shown red.
+    """
+    with pytest.raises(AssertionError, match="the operator-typed source name"):
+        _assert_says_the_source_label_is_operator_typed(
+            {"title": "Push connection uptime", "description": "a socket, probably"}
         )
+    with pytest.raises(AssertionError, match="does not split on `outcome`"):
+        _assert_every_target_splits_on_outcome(
+            {"title": "Enrichment", "targets": [{"legendFormat": "{{trigger}}"}]}
+        )
+    with pytest.raises(AssertionError, match="never reached a status line"):
+        _assert_names_the_transport_failures(
+            {"title": "TMDb requests", "description": "429s over the total"}
+        )
+    with pytest.raises(AssertionError, match=r"eleven panels .* not 10:"):
+        _assert_dashboard_3_has_eleven_panels([{"title": f"panel {n}"} for n in range(10)])
 ```
 
 After `test_the_tmdb_panel_counts_429s_and_denominates_on_every_status_including_error`:
@@ -12689,14 +12815,18 @@ sync-status` prints the same under each of a source's recent runs, and every
 ```
 
 `docs/prd/07-client-api.md`:
-- "Admin": the paragraph beginning `**`GET /admin/sources/{id}/status`** renders a `SourceStatus`` gains, after `([03](03-sources-and-sync.md)).`:
+- "Admin": the paragraph beginning `**`GET /admin/sources/{id}/status`** renders a `SourceStatus`` gains a sentence after `([03](03-sources-and-sync.md)).`, so that it reads:
 
 ```markdown
-Its `last_sync` is the source's newest full or delta walk — never the watch
-lane's — or `null` before the first: `kind`, `status`, `started_at`,
-`finished_at`, `heartbeat_at`, the four item counts and `error`, then `stage`,
-`units_done`, `units_total` and `items_expected`, which say where a
-whole-library walk's plan stands and are `null` for a walk without one.
+**`GET /admin/sources/{id}/status`** renders a `SourceStatus`, not a bool:
+reachable, authenticated, `push_available` and `is_administrator` are each
+three-valued where `null` means the check did not run
+([03](03-sources-and-sync.md)). Its `last_sync` is the source's newest full or
+delta walk — never the watch lane's — or `null` before the first: `kind`,
+`status`, `started_at`, `finished_at`, `heartbeat_at`, the four item counts and
+`error`, then `stage`, `units_done`, `units_total` and `items_expected`, which
+say where a whole-library walk's plan stands and are `null` for a walk without
+one.
 ```
 
 - "Streaming updates (SSE)": the `sync.progress` row becomes:
@@ -12770,7 +12900,7 @@ Expected: PASS.
 10. `_walk_plan` without `progress.units = {…}`. Expect the frames case to fail on `units_total`.
 11. `_flush` calling `self._publish_progress(source, run)`, dropping `walk`. Expect the frames case to fail, every planned field `None`.
 12. The duration recorded at every commit, outside `if done:`. Expect the duration case to fail on the counts `(2, …)` and `(4, …)`.
-13. The claim instant taken for every unit when the stage starts: `claimed = {unit.unit_key: self._clock() for unit in units}`, with `claim()` no longer writing it. Expect the duration case to fail on `(2, 180.0)`.
+13. The claim instant taken for every unit when the stage starts: `claimed = {unit.unit_key: self._timer() for unit in units}`, with `claim()` no longer writing it. Expect the duration case to fail on `(2, 180.0)`.
 14. `_last_sync` reading only `SyncRunKind.FULL`. Expect `test_status_of_a_single_walk_carries_no_plan` to fail on `('full', …)`.
 15. `_last_sync`'s comprehension spelled `found = await runs.list_for_source(source_id, limit=1)`, the newest run of any kind, so a source with no runs still gets `None`. Expect the plan case to fail on `kind`, the watch run reported.
 16. `_sync_status` without the plan line. Expect the CLI case to fail on its first assertion.
@@ -12778,6 +12908,16 @@ Expected: PASS.
 18. Panel 11's target B grouped `by (source)`. Expect the walk-panel case to fail on its aggregations.
 19. `sourceStatusHealthy` without `last_sync`. Expect `npm run verify` to fail in typecheck naming `last_sync`.
 20. `_flush`'s publish put back under Task 16's `if batch:`. Expect `test_a_unit_that_ends_on_a_batch_boundary_still_says_where_its_plan_stands` to fail on `[(2, 0), (4, 0)] == [(2, 0), (4, 0), (4, 1)]`.
+21. `_assert_dashboard_3_has_eleven_panels` asking `>= 10`. Expect the falsifiability case to fail with `DID NOT RAISE` at its count block, and every other case to pass.
+22. `_assert_says_the_source_label_is_operator_typed` scanning for `""`. Expect the same, at its operator-typed block.
+23. `_assert_every_target_splits_on_outcome` scanning for `""`. Expect the same, at its outcome block.
+24. `_assert_names_the_transport_failures` scanning for `""`. Expect the same, at its status block.
+25. Panel 11 dropped from `dashboards/03-pipeline.json`. Expect the queue-depth case to fail on `dashboard 3 is eleven panels … not 10`, with the walk-panel case and `test_alerts`' count; the falsifiability case passes.
+26. `operator-typed ` removed from both push descriptions. Expect the push case to fail on `'Push connection uptime' does not say`; the falsifiability case passes.
+27. One enrichment legend's `{{outcome}}` changed to `{{trigger}}`. Expect the enrichment case to fail on `` does not split on `outcome` ``, with the legend-label guard; the falsifiability case passes.
+28. `status="error"` removed from the TMDb panel's description. Expect the TMDb case to fail on `does not state that its denominator includes the transport failures`; the falsifiability case passes.
+29. Both duration readings taken from `self._clock()` again, `claimed` holding datetimes. Expect the duration case to fail on `(2, 0.0) != (2, 90.0)` and the failed-unit case on `(1, 0.0) != (1, 90.0)`: the timer moved and the clock did not.
+30. `_write`'s error branch recording the failed unit's duration too. Expect `test_a_unit_that_fails_records_no_duration` to fail on `(2, 90.0) != (1, 90.0)`; the duration case passes.
 
 - [ ] **Step 19: Commit**
 
@@ -12789,6 +12929,7 @@ git add src/usher/domain/sync.py src/usher/ports/repository/sync.py \
   tests/unit/test_domain_sync.py tests/unit/test_services_reconcile.py tests/unit/test_cli.py \
   tests/unit/test_telemetry_metric_names.py tests/unit/test_dashboards.py tests/unit/test_alerts.py \
   tests/integration/test_admin_sources.py tests/integration/test_cli_pipeline.py \
+  tests/integration/test_sync_run_repository.py \
   web/src/api/schema.d.ts web/src/test/fixtures/admin.ts dashboards/03-pipeline.json \
   dashboards/README.md docs/prd/03-sources-and-sync.md docs/prd/07-client-api.md \
   docs/prd/10-telemetry-and-dashboards.md CHANGELOG.md docs/guide/command-line.md
