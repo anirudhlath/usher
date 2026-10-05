@@ -455,8 +455,8 @@ class EmbyAdapter(SourceAdapter):
         one; a success counts towards raising it.
 
         Giving up raises `PortUnavailable` naming the attempts, whatever the last
-        failure was. `op` labels the request's span and duration, so a count or a views
-        read is not timed as a listing page.
+        failure was. `op` labels the request's span and duration, so a count, a views
+        read or a read of series by `Ids` is not timed as a listing page.
         """
         attempts = len(PAGE_RETRY_WAITS) + 1
         first_failure: float | None = None
@@ -654,7 +654,7 @@ class EmbyAdapter(SourceAdapter):
             # `Limit` is the chunk's length, so a server that ignores `Ids` sends no
             # more items than were asked for.
             params = {"Ids": ",".join(chunk), "Fields": ITEM_FIELDS, "Limit": str(len(chunk))}
-            body = await self._page(await self._items_path(), params, 0)
+            body = await self._page(await self._items_path(), params, 0, op="series")
             entries = body.get("Items")
             if not isinstance(entries, list):
                 raise PortDataMalformed("Emby's series listing carried no Items array")

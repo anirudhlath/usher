@@ -3546,6 +3546,36 @@ async def test_a_plan_s_views_read_and_counts_carry_their_own_operation_labels()
     assert set(listing) == {"list"}
 
 
+async def test_a_seed_s_read_by_ids_carries_its_own_operation_label() -> None:
+    """A read by `Ids` asks for at most a hundred series, so it is not timed as a page.
+
+    Timed as `list`, it would sit in the same bucket as pages of a thousand items. The
+    seed's listings keep `list`, NextUp among them.
+    """
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    trace.set_tracer_provider(provider)
+    server = FakeEmbyServer()
+    _watching(server)
+    adapter, seen = _recorded(server, page_size=100)
+    try:
+        _ = [page async for page in adapter.list_unit(SEED_KEY)]
+    finally:
+        await adapter.aclose()
+    reads = [request for request in seen if request.url.path != "/Users/AuthenticateByName"]
+    assert any("Ids" in request.url.params for request in reads), "the premise: a read by Ids"
+    assert any(request.url.path == "/Shows/NextUp" for request in reads), (
+        "the premise: a NextUp read"
+    )
+    labels = [
+        span.attributes["usher.op"]
+        for span in exporter.get_finished_spans()
+        if span.name == "source.request" and span.attributes is not None
+    ]
+    assert labels == ["series" if "Ids" in request.url.params else "list" for request in reads]
+
+
 # --- the seed -----------------------------------------------------------
 
 
@@ -3814,32 +3844,6 @@ async def test_a_resumed_seed_starts_again() -> None:
     assert [[item.external_id for item in page.items] for page in resumed] == [
         [item.external_id for item in page.items] for page in first
     ]
-
-
-async def test_a_seed_s_reads_by_ids_and_next_up_keep_the_list_label() -> None:
-    """Both are listing pages, so the request metric times them with the other pages."""
-    exporter = InMemorySpanExporter()
-    provider = TracerProvider()
-    provider.add_span_processor(SimpleSpanProcessor(exporter))
-    trace.set_tracer_provider(provider)
-    server = FakeEmbyServer()
-    _watching(server)
-    adapter, seen = _recorded(server, page_size=100)
-    try:
-        _ = [page async for page in adapter.list_unit(SEED_KEY)]
-    finally:
-        await adapter.aclose()
-    reads = [request for request in seen if request.url.path != "/Users/AuthenticateByName"]
-    assert any("Ids" in request.url.params for request in reads), "the premise: a read by Ids"
-    assert any(request.url.path == "/Shows/NextUp" for request in reads), (
-        "the premise: a NextUp read"
-    )
-    labels = [
-        span.attributes["usher.op"]
-        for span in exporter.get_finished_spans()
-        if span.name == "source.request" and span.attributes is not None
-    ]
-    assert labels == ["list"] * len(reads)
 
 
 # --- the listing limit -----------------------------------------------
