@@ -395,7 +395,7 @@ class FakeSourceAdapter(SourceAdapter):
 
     def watch_state(
         self, since: AwareDatetime | None = None, *, start_index: int = 0
-    ) -> AsyncIterator[SourceWatchState]:
+    ) -> AsyncGenerator[SourceWatchState]:
         # Recorded here rather than in `_walk_states`, so that it is what the **port**
         # was asked for.
         self.resumed_from.append(start_index)
@@ -403,7 +403,7 @@ class FakeSourceAdapter(SourceAdapter):
 
     async def _walk_states(
         self, since: AwareDatetime | None, start_index: int
-    ) -> AsyncIterator[SourceWatchState]:
+    ) -> AsyncGenerator[SourceWatchState]:
         await self._ready()
         yielded = 0
         skipped = 0

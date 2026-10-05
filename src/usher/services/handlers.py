@@ -230,8 +230,8 @@ def sync_handler(
     synchronous walk.
 
     The watch lane also runs as soon as a whole-library walk's seed has committed,
-    handed the walk's beat, which it awaits with each batch it commits so the walk
-    is not taken for dead while it waits on the watch lane.
+    handed the walk's beat, which it awaits with each commit and beat of its own so
+    the walk is not taken for dead while it waits on the watch lane.
 
     A walk refused because another is alive defers the job, and the queue tries it again.
     """

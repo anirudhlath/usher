@@ -195,11 +195,11 @@ add up to `USHER_SYNC_BATCH_SIZE` items, and when the unit ends. No unit of a
 stage is fetched until every unit of the stages before it has committed, so an
 episode always finds its series. A walk's units are kept in `sync_run_units`
 with the position each has committed to, and the run's `heartbeat_at` moves on
-every commit and at least once a minute between commits, except while the watch
-lane runs after the seed, when it moves with each batch that lane commits. A
-unit that fails stops the walk: it is marked `failed` at its committed position,
-and pages fetched but not yet committed are dropped. A delta with a cursor, a
-bounded walk and the gap-closer keep the single walk.
+every commit and at least once a minute between commits, also while the watch
+lane runs after the seed. A unit that fails stops the walk: it is marked
+`failed` at its committed position, and pages fetched but not yet committed are
+dropped. A delta with a cursor, a bounded walk and the gap-closer keep the
+single walk.
 
 **An unfinished whole-library walk is resumed in place.** The next
 whole-library walk of the same kind continues the same `sync_runs` row, with
@@ -266,13 +266,11 @@ listings, a few requests on most libraries — and merges nothing else. That
 first walk is never resumed: an unfinished one still `running` and not alive
 (below) is closed `failed` with `superseded: a first watch walk restarts`, and
 the next run starts again. Nothing schedules it.
-A watch run moves its heartbeat when it starts and with every batch it
-commits. One still `running` whose heartbeat is under 10 minutes old is alive,
-and a second watch run neither closes nor resumes it: it walks beside it in a
-run of its own, a delta from the cursor or, with no cursor yet, a first walk.
-Nothing moves a watch run's heartbeat while a page rides out its retries, which
-can take longer than 10 minutes, so a run can be taken for dead then, and a
-second run may resume or close it while it is still walking.
+A watch run moves its heartbeat when it starts, with every batch it commits,
+and at least once a minute between commits, also while it waits on a page. One
+still `running` whose heartbeat is under 10 minutes old is alive, and a second
+watch run neither closes nor resumes it: it walks beside it in a run of its
+own, a delta from the cursor or, with no cursor yet, a first walk.
 
 **Each batch is committed with the run's counters**, and a `sync_runs` row an
 operator can watch exists before the walk starts rather than after it finishes.

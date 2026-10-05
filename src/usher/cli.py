@@ -402,8 +402,8 @@ def _watch_lane(
 ) -> AfterSeed:
     """The watch lane as a walk's `after_seed`, printed and kept like the run after the walk.
 
-    The walk's beat goes on to `watch.sync`, which awaits it with each batch it commits,
-    so the walk's heartbeat keeps moving while the watch lane runs.
+    The walk's beat goes on to `watch.sync`, which awaits it with each commit and beat of
+    its own, so the walk's heartbeat keeps moving while the watch lane runs.
     """
 
     async def run(beat: Callable[[], Awaitable[None]]) -> None:

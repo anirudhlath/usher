@@ -388,7 +388,7 @@ class SourceAdapter(ABC):
     @abstractmethod
     def watch_state(
         self, since: AwareDatetime | None = None, *, start_index: int = 0
-    ) -> AsyncIterator[SourceWatchState]:
+    ) -> AsyncGenerator[SourceWatchState]:
         """Watch state: a delta since `since`, or with none the account's watched items.
 
         With `since`, every item whose watch state changed since then, an all-zero

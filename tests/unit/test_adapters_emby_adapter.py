@@ -1190,7 +1190,7 @@ async def test_stopping_a_first_walk_in_its_second_listing_cancels_that_listings
     loop.set_exception_handler(_recording(lost))
     adapter = _on(handle, page_size=2)
     try:
-        states = cast(AsyncGenerator[SourceWatchState], adapter.watch_state())
+        states = adapter.watch_state()
         played = await asyncio.wait_for(anext(states), timeout=2.0)
         resuming = await asyncio.wait_for(anext(states), timeout=2.0)
         await asyncio.wait_for(parked.wait(), timeout=2.0)

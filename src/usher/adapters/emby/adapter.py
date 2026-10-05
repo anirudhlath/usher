@@ -771,13 +771,13 @@ class EmbyAdapter(SourceAdapter):
 
     def watch_state(
         self, since: AwareDatetime | None = None, *, start_index: int = 0
-    ) -> AsyncIterator[SourceWatchState]:
+    ) -> AsyncGenerator[SourceWatchState]:
         """A delta since `since`; with none, the account's played and in-progress items."""
         return self._watch_state(since, start_index)
 
     async def _watch_state(
         self, since: AwareDatetime | None, start_index: int
-    ) -> AsyncIterator[SourceWatchState]:
+    ) -> AsyncGenerator[SourceWatchState]:
         user_id = await self._session.user_id()
         if since is not None:
             query = _listing_query(USER_DATA_SINCE_PARAM, since)

@@ -496,9 +496,9 @@ class ReconcileService:
                 and any(unit.stage is WalkStage.SEED for unit in units)
             ):
                 # A first watch walk can outlast `STALE_AFTER`, so the hook is handed the
-                # beat, which the watch lane awaits with each batch it commits. This walk's
-                # heartbeat then moves as the watch run's own does, standing still only
-                # while a page rides out its retries.
+                # beat, which the watch lane awaits with each commit and beat of its own,
+                # a page under retry included. This walk's heartbeat then moves as the
+                # watch run's own does.
                 await after_seed(lambda: self._beat(progress))
 
     async def _walk_stage(

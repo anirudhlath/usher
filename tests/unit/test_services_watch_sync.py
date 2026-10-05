@@ -1,9 +1,11 @@
 """Inbound watch state, against port fakes and a source adapter that lies like Emby's."""
 
+import asyncio
+import contextlib
 import dataclasses
 import inspect
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncGenerator, Iterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -85,14 +87,19 @@ class _LossySourceAdapter(FakeSourceAdapter):
 
     async def _walk_states(
         self, since: AwareDatetime | None, start_index: int
-    ) -> AsyncIterator[SourceWatchState]:
+    ) -> AsyncGenerator[SourceWatchState]:
         async for state in super()._walk_states(since, start_index):
             yield dataclasses.replace(state, play_count=None, last_played_at=None)
 
 
 class _Fixture:
     def __init__(
-        self, *, batch_size: int = 1_000, lossy: bool = True, clock: _Clock | None = None
+        self,
+        *,
+        batch_size: int = 1_000,
+        lossy: bool = True,
+        clock: _Clock | None = None,
+        heartbeat_seconds: float = 60.0,
     ) -> None:
         self.source = Source(
             kind=SourceKind.EMBY,
@@ -134,6 +141,7 @@ class _Fixture:
             queue=self.queue,
             commit=self._commit,
             batch_size=batch_size,
+            heartbeat_seconds=heartbeat_seconds,
             clock=self.clock,
         )
         self.titles: dict[str, uuid.UUID] = {}
@@ -1327,7 +1335,7 @@ class _DuplicatingSourceAdapter(_LossySourceAdapter):
 
     async def _walk_states(
         self, since: AwareDatetime | None, start_index: int
-    ) -> AsyncIterator[SourceWatchState]:
+    ) -> AsyncGenerator[SourceWatchState]:
         yielded = 0
         async for state in super()._walk_states(since, 0):
             for _ in range(2):
@@ -1811,3 +1819,175 @@ async def test_beat_is_awaited_once_after_each_batch_the_walk_commits() -> None:
     assert fixture.positions == [2, 4, 5], "the premise: three batches committed"
     assert fixture.commits == 5, "the premise: one commit to start, one per batch, one to end"
     assert beats == [2, 3, 4]
+
+
+@pytest.mark.parametrize("heartbeat_seconds", [0, -0.5, float("nan")])
+def test_a_service_whose_heartbeat_is_not_positive_is_refused(heartbeat_seconds: float) -> None:
+    """Its beat would always be due, so the walk would beat and never take a state."""
+    with pytest.raises(ValueError, match=f"a positive period, not {heartbeat_seconds} seconds"):
+        _Fixture(heartbeat_seconds=heartbeat_seconds)
+
+
+class _StallingSourceAdapter(_LossySourceAdapter):
+    """A source whose walk stalls before its state at `stall_after`, as a page under retry does.
+
+    `stalled` is set as the stall begins. `release` ends it, raising `error` if one was
+    set; `cancelled` is set if the walk is cancelled while it stalls. `closed` is set
+    once the walk is closed, however it ends.
+    """
+
+    def __init__(self, source: Source, *, stall_after: int) -> None:
+        super().__init__(source)
+        self.stall_after = stall_after
+        self.stalled = asyncio.Event()
+        self.release = asyncio.Event()
+        self.cancelled = asyncio.Event()
+        self.closed = asyncio.Event()
+        self.error: Exception | None = None
+
+    async def _walk_states(
+        self, since: AwareDatetime | None, start_index: int
+    ) -> AsyncGenerator[SourceWatchState]:
+        try:
+            yielded = 0
+            async for state in super()._walk_states(since, start_index):
+                if yielded == self.stall_after:
+                    await self._stall()
+                yield state
+                yielded += 1
+        finally:
+            self.closed.set()
+
+    async def _stall(self) -> None:
+        self.stalled.set()
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+        if self.error is not None:
+            raise self.error
+
+
+async def test_a_stalled_page_moves_the_heartbeat_and_awaits_the_beat_before_it_arrives() -> None:
+    """A page riding out its retries can outlast `STALE_AFTER`, so the walk beats on a deadline.
+
+    Each beat carries the committed position, never the state held for the next batch.
+    Every beat sees one more commit and a later heartbeat than the beat before it, the
+    batch's own beat included, which puts each beat after its own save and commit.
+    """
+    fixture = _Fixture(
+        batch_size=2, heartbeat_seconds=0.01, clock=_Clock(NOW, step=timedelta(seconds=1))
+    )
+    adapter = fixture.adapter = _StallingSourceAdapter(fixture.source, stall_after=3)
+    await fixture.given_completed_walk()
+    for index in range(5):
+        await fixture.given_matched(f"movie-{index}")
+    beats: list[tuple[int, SyncRun]] = []
+
+    async def beat() -> None:
+        beats.append((fixture.commits, fixture.saved[-1]))
+
+    walk = asyncio.create_task(
+        fixture.service.sync(fixture.source, adapter, user_id=fixture.user_id, beat=beat)
+    )
+    try:
+        with contextlib.suppress(TimeoutError):
+            async with asyncio.timeout(5):
+                while len(beats) < 4:
+                    await asyncio.sleep(0.01)
+        assert adapter.stalled.is_set(), "the premise: the page stalled"
+        assert fixture.positions == [2], "the premise: one batch committed, the third state held"
+        assert len(beats) >= 4, "fewer than three beats while the page stalled"
+        commits = [count for count, _ in beats]
+        heartbeats = [saved.heartbeat_at for _, saved in beats if saved.heartbeat_at is not None]
+        assert commits == sorted(set(commits)), "a beat with no commit of its own before it"
+        assert len(heartbeats) == len(beats)
+        assert heartbeats == sorted(set(heartbeats)), "a beat with no save of its own before it"
+        assert {(saved.items_seen, saved.position) for _, saved in beats} == {(2, 2)}
+    finally:
+        adapter.release.set()
+        run = await walk
+    assert (run.status, run.items_seen, run.items_matched) == (SyncRunStatus.COMPLETED, 5, 5)
+    assert fixture.positions == [2, 4, 5]
+
+
+async def test_a_page_that_fails_after_a_stall_fails_the_run_at_its_committed_position() -> None:
+    """The beats during the stall committed nothing of the state held for the next batch."""
+    fixture = _Fixture(batch_size=2, heartbeat_seconds=0.01)
+    adapter = fixture.adapter = _StallingSourceAdapter(fixture.source, stall_after=3)
+    await fixture.given_completed_walk()
+    for index in range(5):
+        await fixture.given_matched(f"movie-{index}")
+    beats: list[int] = []
+
+    async def beat() -> None:
+        beats.append(fixture.commits)
+
+    walk = asyncio.create_task(
+        fixture.service.sync(fixture.source, adapter, user_id=fixture.user_id, beat=beat)
+    )
+    try:
+        with contextlib.suppress(TimeoutError):
+            async with asyncio.timeout(5):
+                while len(beats) < 2:
+                    await asyncio.sleep(0.01)
+        assert len(beats) >= 2, "the premise: a beat while the page stalled"
+    finally:
+        adapter.error = PortUnavailable("the page's retries ran out")
+        adapter.release.set()
+        run = await walk
+    assert (run.status, run.error) == (SyncRunStatus.FAILED, "the page's retries ran out")
+    assert (run.position, run.items_seen) == (2, 2)
+    assert fixture.positions == [2]
+    stored = await fixture.runs.get(run.id)
+    assert stored is not None and (stored.position, stored.items_seen) == (2, 2)
+
+
+async def test_a_walk_that_fails_on_its_own_side_cancels_a_stalled_reader() -> None:
+    """However the walk ends, its reader is cancelled and awaited: here a beat's commit raised."""
+    fixture = _Fixture(heartbeat_seconds=0.01)
+    adapter = fixture.adapter = _StallingSourceAdapter(fixture.source, stall_after=0)
+    await fixture.given_completed_walk()
+    await fixture.given_matched("movie-0")
+    commit = fixture.service._commit
+
+    async def _commit_until_the_stall() -> None:
+        if adapter.stalled.is_set():
+            raise ConnectionError("the database went away")
+        await commit()
+
+    fixture.service._commit = _commit_until_the_stall
+    with pytest.raises(ConnectionError, match="the database went away"):
+        async with asyncio.timeout(5):
+            await fixture.service.sync(fixture.source, adapter, user_id=fixture.user_id)
+    assert fixture.commits == 1, "the premise: the run's start committed, and the beat did not"
+    assert adapter.cancelled.is_set(), "the walk ended with its reader still stalled"
+    assert asyncio.all_tasks() - {asyncio.current_task()} == set(), "a task outlived the walk"
+
+
+async def test_a_walk_that_fails_on_its_own_side_closes_the_listing_its_reader_holds() -> None:
+    """The reader waits on a full queue, its listing parked at a state, and is closed too.
+
+    Closed before the walk's error reaches the caller, not once the listing is collected.
+    """
+    fixture = _Fixture(batch_size=2)
+    adapter = fixture.adapter = _StallingSourceAdapter(fixture.source, stall_after=5)
+    await fixture.given_completed_walk()
+    for index in range(5):
+        await fixture.given_matched(f"movie-{index}")
+    commit = fixture.service._commit
+
+    async def _commit_only_the_start() -> None:
+        if fixture.commits:
+            raise ConnectionError("the database went away")
+        await commit()
+
+    fixture.service._commit = _commit_only_the_start
+    with pytest.raises(ConnectionError, match="the database went away"):
+        async with asyncio.timeout(5):
+            await fixture.service.sync(fixture.source, adapter, user_id=fixture.user_id)
+    assert fixture.commits == 1, "the premise: the run's start committed, and its batch did not"
+    assert not adapter.stalled.is_set(), "the premise: the listing never stalled"
+    assert adapter.closed.is_set(), "the walk ended with its listing still open"
+    assert asyncio.all_tasks() - {asyncio.current_task()} == set(), "a task outlived the walk"
