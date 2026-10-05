@@ -80,6 +80,17 @@ class JobQueue(ABC):
         """
 
     @abstractmethod
+    async def defer(
+        self, job_id: uuid.UUID, *, reason: str, run_after_seconds: float
+    ) -> Job | None:
+        """The work could not start yet, and nothing failed.
+
+        Back to `pending`, claimable no sooner than `run_after_seconds` from now,
+        with `reason` as its `last_error`. Spends no attempt, so a deferral never
+        parks a job however often it repeats. `None` for an id it does not find.
+        """
+
+    @abstractmethod
     async def touch(self, job_ids: Sequence[uuid.UUID]) -> int:
         """Say these claims are still being worked on.
 

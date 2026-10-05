@@ -195,15 +195,17 @@ bounded walk and the gap-closer keep the single walk.
 **An unfinished whole-library walk is resumed in place.** The next
 whole-library walk of the same kind continues the same `sync_runs` row, with
 the same `started_at`: completed units are skipped, and every other unit
-continues from the position it committed. A run still `running` whose
-heartbeat is under 10 minutes old is a live walk, and a second is refused —
-`usher sync` exits non-zero, and a worker job fails and is retried no sooner
-than 10 minutes later, when a walk whose process died has gone stale and is
-resumed. Five refusals park the job, as five failures of any kind do. A run
-whose sweep was refused is not resumed, and neither is one that stopped before
-its units were stored or a full run from before units existed: a fresh walk
-starts, and such a run left `running` is closed `failed` with `superseded: a
-whole-library walk restarts`.
+continues from the position it committed. Completed units are not read again
+however long ago they ran, so an item removed from one of their libraries since
+then stays available until the next full walk, which starts afresh. A run still
+`running` whose heartbeat is under 10 minutes old is a live walk, and a second
+is refused — `usher sync` exits non-zero, and a worker job is deferred: it
+spends none of its attempts, so it never parks, and tries again no sooner than
+10 minutes later, when a walk whose process died has gone stale and is resumed.
+A run whose sweep was refused is not resumed, and neither is one that stopped
+before its units were stored or a full run from before units existed: a fresh
+walk starts, and such a run left `running` is closed `failed` with `superseded:
+a whole-library walk restarts`.
 
 **A bounded walk records `FAILED`, never `COMPLETED`.**
 `USHER_PUSH_GAP_MAX_ITEMS` (default **20,000**; 0 is unlimited) stops a
@@ -251,6 +253,9 @@ A watch run moves its heartbeat when it starts and with every batch it
 commits. One still `running` whose heartbeat is under 10 minutes old is alive,
 and a second watch run neither closes nor resumes it: it walks beside it in a
 run of its own, a delta from the cursor or, with no cursor yet, a first walk.
+Nothing moves a watch run's heartbeat while a page rides out its retries, which
+can take longer than 10 minutes, so a run can be taken for dead then, and a
+second run may resume or close it while it is still walking.
 
 **Each batch is committed with the run's counters**, and a `sync_runs` row an
 operator can watch exists before the walk starts rather than after it finishes.

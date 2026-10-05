@@ -47,6 +47,7 @@ from usher.services.handlers import (
     watch_history_handler,
     watch_writeback_handler,
 )
+from usher.services.jobs import JobDeferred
 from usher.services.matching import MatchService
 from usher.services.reconcile import STALE_AFTER, ReconcileService, WalkRefused
 from usher.services.watch_sync import WatchStateSyncService
@@ -697,13 +698,13 @@ async def test_the_sync_handler_closes_the_adapter_even_when_reconcile_raises(
         await adapter.get_item("anything")
 
 
-async def test_a_refused_walk_fails_the_job_so_the_queue_retries_it(
+async def test_a_refused_walk_defers_the_job_so_the_queue_tries_it_again(
     source: Source, adapter: FakeSourceAdapter
 ) -> None:
-    """`PortUnavailable`, which `JobWorker` fails as retryable rather than logging as a crash.
+    """`JobDeferred`, on which `JobWorker` defers the job, spending no attempt.
 
-    Its hint holds the retry back for `STALE_AFTER`, by when a walk whose process died
-    has gone stale and the retry resumes it.
+    Its `retry_after` holds the next try back for `STALE_AFTER`, by when a walk whose
+    process died has gone stale and the next try resumes it.
     """
     sources = FakeSourceRepository()
     await sources.add(source)
@@ -712,7 +713,7 @@ async def test_a_refused_walk_fails_the_job_so_the_queue_retries_it(
     reconcile = _RecordingReconcile(events, raises=refusal)
     watch = _RecordingWatch(events)
 
-    with pytest.raises(PortUnavailable, match="is already running") as caught:
+    with pytest.raises(JobDeferred, match="is already running") as caught:
         await sync_handler(sources, reconcile, watch, _Opener(adapter), user_id=_USER)(
             Job(kind=JobKind.SYNC, key=f"{source.id}:full")
         )

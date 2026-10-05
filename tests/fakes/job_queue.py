@@ -119,6 +119,23 @@ class FakeJobQueue(JobQueue):
         self._jobs[found] = updated
         return updated
 
+    async def defer(
+        self, job_id: uuid.UUID, *, reason: str, run_after_seconds: float
+    ) -> Job | None:
+        found = self._find(job_id)
+        if found is None:
+            return None
+        # No attempt spent, so a deferral never parks; clamped at zero and unjittered,
+        # as `_DEFER` is.
+        updated = self._jobs[found].evolve(
+            status=JobStatus.PENDING,
+            last_error=reason,
+            run_after=_now() + timedelta(seconds=max(run_after_seconds, 0.0)),
+            updated_at=_now(),
+        )
+        self._jobs[found] = updated
+        return updated
+
     async def touch(self, job_ids: Sequence[uuid.UUID]) -> int:
         """`updated_at` forward, for running rows only.
 

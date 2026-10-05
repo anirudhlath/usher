@@ -11,14 +11,14 @@ from usher.domain.jobs import Job
 from usher.domain.source import MediaItem, Source
 from usher.domain.sync import SyncRunKind
 from usher.domain.watch import WatchState
-from usher.ports.errors import PortDataMalformed, PortUnavailable
+from usher.ports.errors import PortDataMalformed
 from usher.ports.repository import MediaItemRepository, SourceRepository, WatchStateRepository
 from usher.ports.source import SourceAdapter, WatchStateUpdate
 from usher.services.curation import CurationService
 from usher.services.derive import DeriveService
 from usher.services.enrich import EnrichService
 from usher.services.index import IndexService
-from usher.services.jobs import Handler
+from usher.services.jobs import Handler, JobDeferred
 from usher.services.matching import MatchService
 from usher.services.reconcile import STALE_AFTER, ReconcileService, WalkRefused
 from usher.services.watch_sync import WatchStateSyncService
@@ -229,7 +229,7 @@ def sync_handler(
     `POST /admin/sources/{id}/sync` lands here as an enqueue rather than as a
     synchronous walk.
 
-    A walk refused because another is alive fails the job, and the queue retries it.
+    A walk refused because another is alive defers the job, and the queue tries it again.
     """
 
     async def handle(job: Job) -> None:
@@ -258,10 +258,10 @@ def sync_handler(
         try:
             await reconcile.reconcile(source, lane, adapter)
         except WalkRefused as exc:
-            # A port failure, so `JobWorker` fails the job for a retry instead of logging
-            # a crash, and retries it no sooner than `STALE_AFTER`: by then a walk whose
-            # process died has gone stale, and the retry resumes it.
-            raise PortUnavailable(str(exc), retry_after=STALE_AFTER.total_seconds()) from exc
+            # Not a failure: `JobWorker` defers the job without spending an attempt, so a
+            # long walk never parks it, and tries it again no sooner than `STALE_AFTER`, by
+            # when a walk whose process died has gone stale and the retry resumes it.
+            raise JobDeferred(str(exc), retry_after=STALE_AFTER.total_seconds()) from exc
         else:
             await watch.sync(source, adapter, user_id=user_id)
         finally:

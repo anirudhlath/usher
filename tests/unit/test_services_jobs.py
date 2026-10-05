@@ -32,6 +32,7 @@ from usher.ports.jobs import JobRequest
 from usher.services.events import DeferredEventPublisher
 from usher.services.jobs import (
     DEFAULT_LEASE_SECONDS,
+    JobDeferred,
     JobScope,
     JobWorker,
     _links_for,
@@ -89,6 +90,12 @@ class _RecordingQueue(FakeJobQueue):
             job_id, error=error, retryable=retryable, retry_after_seconds=retry_after_seconds
         )
 
+    async def defer(
+        self, job_id: uuid.UUID, *, reason: str, run_after_seconds: float
+    ) -> Job | None:
+        self._log.append("defer")
+        return await super().defer(job_id, reason=reason, run_after_seconds=run_after_seconds)
+
 
 class _Fixture:
     """Worker, queue, and one event log recording what happened in order.
@@ -109,6 +116,7 @@ class _Fixture:
         lease_seconds: float = DEFAULT_LEASE_SECONDS,
     ) -> None:
         self.log: list[str] = []
+        self.max_attempts = max_attempts
         self.queue = _RecordingQueue(self.log, max_attempts=max_attempts, backoff_seconds=1.0)
         self.handled: list[Job] = []
         self.bus = _RecordingPublisher(self.log)
@@ -527,26 +535,61 @@ async def test_a_429_carrying_a_retry_after_backs_off_no_sooner_than_the_upstrea
     )
 
 
-async def test_an_unavailable_upstream_carrying_a_retry_after_backs_off_no_sooner_than_that(
-    fixture: _Fixture,
+async def test_a_deferred_job_waits_out_its_retry_after_without_spending_an_attempt(
+    fixture: _Fixture, spans: InMemorySpanExporter
 ) -> None:
-    """`PortUnavailable` carries the same hint as a 429, honoured the same way.
+    """`JobDeferred` is not a failure: the job waits at the same count, and nothing crashed.
 
-    A refused walk raises one, holding its retry back until the walk it was refused
-    by has had time to go stale.
+    Deferred, then committed, then logged at `INFO` naming the job, the wait and the
+    reason -- not a warning, since nothing failed.
     """
-    refusal = PortUnavailable("a whole-library walk is already running", retry_after=600.0)
-    fixture.register(JobKind.ENRICH, fixture.raising(refusal))
+    reason = "a whole-library walk is already running"
+    fixture.register(JobKind.ENRICH, fixture.raising(JobDeferred(reason, retry_after=600.0)))
     await fixture.given("t1")
+    records: list[tuple[str, str]] = []
+    handle = logger.add(
+        lambda message: records.append((message.record["level"].name, message.record["message"])),
+        level="DEBUG",
+        filter="usher",
+    )
     before = datetime.now(UTC)
-    await fixture.worker.run_once()
+    try:
+        assert await fixture.worker.run_once() == 1
+    finally:
+        logger.remove(handle)
     outcome = fixture.queue.jobs_of(JobKind.ENRICH)[0]
-    assert outcome.attempts == 1
-    assert outcome.last_error == "a whole-library walk is already running"
+    assert (outcome.status, outcome.attempts) == (JobStatus.PENDING, 0)
+    assert outcome.last_error == reason
     assert outcome.run_after is not None
     assert outcome.run_after - before >= timedelta(seconds=600), (
-        f"backed off only {outcome.run_after - before} against a 600 s hint"
+        f"deferred only {outcome.run_after - before} against a 600 s retry_after"
     )
+    assert fixture.log[fixture.log.index("handle:t1") :] == ["handle:t1", "defer", "commit"]
+    [span] = [span for span in spans.get_finished_spans() if span.name == "job.enrich"]
+    assert span.attributes is not None
+    assert span.attributes.get("usher.job.deferred") is True
+    assert "usher.job.crashed" not in span.attributes
+    [(level, line)] = [(level, line) for level, line in records if "t1" in line]
+    assert level == "INFO", f"a deferral logged at {level}"
+    assert ("enrich" in line, "600" in line, reason in line) == (True, True, True), line
+
+
+async def test_a_deferral_never_parks_a_job_one_failure_short_of_the_ceiling(
+    fixture: _Fixture,
+) -> None:
+    """However often a job is deferred, only its failures count toward parking it."""
+    fixture.register(JobKind.ENRICH, fixture.raising(PortUnavailable("upstream is down")))
+    await fixture.given("t1")
+    for _ in range(fixture.max_attempts - 1):
+        assert await fixture.worker.run_once() == 1
+        await fixture.queue.clear_backoff()
+    [waiting] = fixture.queue.jobs_of(JobKind.ENRICH)
+    assert waiting.attempts == fixture.max_attempts - 1, "the premise: one failure short"
+    fixture.register(JobKind.ENRICH, fixture.raising(JobDeferred("not yet", retry_after=600.0)))
+    assert await fixture.worker.run_once() == 1
+    [outcome] = fixture.queue.jobs_of(JobKind.ENRICH)
+    assert (outcome.status, outcome.attempts) == (JobStatus.PENDING, fixture.max_attempts - 1)
+    assert await fixture.queue.parked() == []
 
 
 async def test_a_claim_requeued_out_from_under_the_worker_does_not_crash(

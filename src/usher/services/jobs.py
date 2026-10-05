@@ -15,12 +15,7 @@ from opentelemetry.trace import Link
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 from usher.domain.jobs import BOOTSTRAP_CONCURRENCY, Job, JobKind
-from usher.ports.errors import (
-    PortDataMalformed,
-    PortRateLimited,
-    PortUnavailable,
-    UsherPortError,
-)
+from usher.ports.errors import PortDataMalformed, PortRateLimited, UsherPortError
 from usher.ports.jobs import JobQueue
 from usher.services.events import DeferredEventPublisher
 
@@ -57,6 +52,17 @@ _job_duration = _meter.create_histogram(
     "usher.jobs.duration", unit="s", description="Wall time per job"
 )
 _propagator = TraceContextTextMapPropagator()
+
+
+class JobDeferred(Exception):
+    """A handler raises it when its work cannot start yet, though nothing failed.
+
+    `JobWorker` defers the job by `retry_after` seconds and spends no attempt.
+    """
+
+    def __init__(self, message: str, *, retry_after: float) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,6 +311,9 @@ class JobWorker:
             try:
                 try:
                     await scope.handlers[job.kind](job)
+                except JobDeferred as exc:
+                    span.set_attribute("usher.job.deferred", True)
+                    await self._defer(job, exc, scope)
                 except PortDataMalformed as exc:
                     span.set_attribute("usher.job.parked", True)
                     await self._fail(job, exc, scope, retryable=False)
@@ -346,9 +355,7 @@ class JobWorker:
         # `str(exc)`, never the exception object and never a payload: PRD 08's
         # credentials-are-never-logged rule applies to a column an operator reads and to
         # this log line alike.
-        retry_after_seconds = (
-            exc.retry_after if isinstance(exc, PortRateLimited | PortUnavailable) else None
-        )
+        retry_after_seconds = exc.retry_after if isinstance(exc, PortRateLimited) else None
         outcome = await scope.queue.fail(
             job.id, error=str(exc), retryable=retryable, retry_after_seconds=retry_after_seconds
         )
@@ -363,6 +370,19 @@ class JobWorker:
             attempts=None if outcome is None else outcome.attempts,
             disposition="unknown" if outcome is None else outcome.status.value,
             error=str(exc),
+        )
+
+    async def _defer(self, job: Job, exc: JobDeferred, scope: JobScope) -> None:
+        # `INFO`, not `_fail`'s warning, since nothing failed; `str(exc)` for `_fail`'s
+        # reason, since the column and this line are read alike.
+        await scope.queue.defer(job.id, reason=str(exc), run_after_seconds=exc.retry_after)
+        await scope.commit()
+        logger.info(
+            "{kind} job {key} deferred for {seconds:g} s: {reason}",
+            kind=job.kind.value,
+            key=job.key,
+            seconds=exc.retry_after,
+            reason=str(exc),
         )
 
 

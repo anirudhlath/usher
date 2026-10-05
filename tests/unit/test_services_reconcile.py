@@ -1466,6 +1466,7 @@ async def _given_walk(
     kind: SyncRunKind = SyncRunKind.FULL,
     units: Sequence[tuple[str, SyncRunUnitStatus, int]] = (),
     error: str | None = None,
+    finished_at: datetime | None = None,
 ) -> SyncRun:
     """An unfinished whole-library walk, as a killed or a failed attempt left it.
 
@@ -1478,6 +1479,7 @@ async def _given_walk(
         error=error,
         heartbeat_at=heartbeat_at,
         started_at=T0,
+        finished_at=finished_at,
     )
     await fixture.runs.add(run)
     if units:
@@ -1595,6 +1597,52 @@ async def test_a_failed_walk_resumes_however_fresh_its_heartbeat() -> None:
     assert (run.id, run.status, run.error) == (failed.id, SyncRunStatus.COMPLETED, None)
 
 
+async def test_a_resumed_walk_reads_running_again_so_a_second_walk_is_refused() -> None:
+    """The claim's commit stores the resumed row `running`, with no end, as a live walk's.
+
+    Left `failed`, the row would read to a second walk as one to resume, and the two
+    would walk it together; left with its last attempt's end, it would say it had
+    finished while it walks.
+    """
+    fixture = _Fixture(clock=_Clock(NOW))
+    _shelve(fixture, "Films", range(3))
+    failed = await _given_walk(
+        fixture,
+        heartbeat_at=NOW - timedelta(hours=1),
+        status=SyncRunStatus.FAILED,
+        error="GET /Users/{user_id}/Items returned HTTP 502",
+        finished_at=NOW - timedelta(hours=1),
+        units=[("Films", SyncRunUnitStatus.FAILED, 1)],
+    )
+    release = fixture.adapter.hold("Films")
+    first = asyncio.create_task(
+        fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    )
+    second: asyncio.Task[SyncRun] | None = None
+    try:
+        async with asyncio.timeout(5):
+            while fixture.commits < 1:
+                await asyncio.sleep(0.01)
+        claimed = await fixture.runs.get(failed.id)
+        assert claimed is not None
+        assert claimed.status is SyncRunStatus.RUNNING, "the claim left the resumed row failed"
+        assert claimed.finished_at is None, "the claim kept the failed attempt's end"
+        second = asyncio.create_task(
+            fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+        )
+        done, _ = await asyncio.wait({second}, timeout=1)
+        assert second in done, "a second walk was not refused while a failed walk resumed"
+        assert isinstance(second.exception(), WalkRefused)
+    finally:
+        release.set()
+        if second is not None and not second.done():
+            second.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await second
+        run = await first
+    assert (run.id, run.status) == (failed.id, SyncRunStatus.COMPLETED)
+
+
 async def test_a_walk_killed_while_planning_is_superseded_once_its_heartbeat_is_stale() -> None:
     """Its run and heartbeat were committed and its units never were.
 
@@ -1621,6 +1669,27 @@ async def test_a_walk_killed_while_planning_is_superseded_once_its_heartbeat_is_
         SyncRunStatus.FAILED,
         "superseded: a whole-library walk restarts",
     )
+
+
+async def test_a_cursorless_delta_killed_while_planning_is_superseded() -> None:
+    """A delta with no cursor walks the plan, and its row carries a heartbeat from its insert.
+
+    Killed before its plan was stored, the row has no units, so only that heartbeat
+    tells it from a single walk's row, which is left alone.
+    """
+    fixture = _Fixture(clock=_Clock(NOW))
+    _shelve(fixture, "Films", range(2))
+    planning = await _given_walk(
+        fixture, heartbeat_at=NOW - timedelta(minutes=10), kind=SyncRunKind.DELTA
+    )
+    run = await fixture.service.reconcile(fixture.source, SyncRunKind.DELTA, fixture.adapter)
+    assert run.id != planning.id
+    closed = await fixture.runs.get(planning.id)
+    assert closed is not None
+    assert (closed.status, closed.error) == (
+        SyncRunStatus.FAILED,
+        "superseded: a whole-library walk restarts",
+    ), "a cursorless delta killed while planning was left running"
 
 
 async def test_a_full_walk_left_running_from_before_units_is_superseded() -> None:

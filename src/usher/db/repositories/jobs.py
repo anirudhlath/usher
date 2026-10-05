@@ -139,6 +139,19 @@ WHERE id = :id
 RETURNING *
 """
 
+# A deferral is not a failure: no attempt is spent, so it never parks however often it
+# repeats. The wait is clamped at zero as `_FAIL` clamps its hint, and not jittered: a
+# key has one row, so there is no herd to spread.
+_DEFER = """
+UPDATE jobs SET
+    status = 'pending',
+    last_error = :reason,
+    run_after = clock_timestamp() + make_interval(secs => GREATEST(:run_after_seconds, 0)),
+    updated_at = clock_timestamp()
+WHERE id = :id
+RETURNING *
+"""
+
 # The heartbeat, and `status = 'running'` is doing the same work here as in `_REQUEUE`
 # below: a beat that arrives after another worker already recovered, completed or parked
 # the job must move nothing.
@@ -279,6 +292,22 @@ class PostgresJobQueue(JobQueue):
                                 0.0 if retry_after_seconds is None else retry_after_seconds
                             ),
                         },
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+        return None if row is None else Job.model_validate(dict(row))
+
+    async def defer(
+        self, job_id: uuid.UUID, *, reason: str, run_after_seconds: float
+    ) -> Job | None:
+        with self._session.no_autoflush:
+            row = (
+                (
+                    await self._session.execute(
+                        text(_DEFER),
+                        {"id": job_id, "reason": reason, "run_after_seconds": run_after_seconds},
                     )
                 )
                 .mappings()

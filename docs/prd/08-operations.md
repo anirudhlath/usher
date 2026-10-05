@@ -199,15 +199,18 @@ A Postgres-backed queue.
 - **Exponential backoff with equal jitter**: a uniform draw from
   `[base/2, base) × 2^attempts`, so a failed job is never instantly
   re-claimable. `job_backoff_seconds` is the base.
-- **A server-supplied `Retry-After`, or a refused walk's 10 minutes, is a floor
-  added to that jittered delay, never a replacement for it**; one already in
-  the past counts as zero. **No ceiling is imposed on the hint** — a hostile
-  upstream can ask for an arbitrarily long wait, bounded only by the attempt
-  ceiling and visible as `usher.jobs.queued` failing to drain.
+- **A server-supplied `Retry-After` is a floor added to that jittered delay,
+  never a replacement for it**; one already in the past counts as zero. **No
+  ceiling is imposed on the hint** — a hostile upstream can ask for an
+  arbitrarily long wait, bounded only by the attempt ceiling and visible as
+  `usher.jobs.queued` failing to drain.
 - **Malformed data does not back off at all — it parks on the first attempt.**
   `PortDataMalformed` means the upstream answered and the answer was wrong.
 - **Poison threshold** — after `job_max_attempts` attempts a job is *parked*
   with its error, not retried forever and not silently dropped.
+- **A deferred job spends no attempt and never parks.** A sync refused because
+  another walk of its source is still alive is tried again 10 minutes later,
+  however many times that takes.
 - **Work that has become impossible *completes*, and does not park.** A job
   naming an item its source has since deleted, or one no configured source
   addresses, completes. A job whose *key* is unparseable parks.

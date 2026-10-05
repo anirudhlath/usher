@@ -349,14 +349,15 @@ def _sync_failed(runs: Sequence[SyncRun], refused: Sequence[str] = ()) -> str:
     """The exit line for a sync in which a run recorded `FAILED` or a walk was refused.
 
     The per-run detail is already on stdout above -- including each `error`,
-    which for a refusal is the two numbers and the ceiling. This says *which*
-    lanes failed and stops the command claiming success, rather than repeating
-    what was printed a line earlier. A refused walk is another process's, still alive.
+    which for a sweep refusal is the two numbers and the ceiling. This says
+    *which* lanes failed and stops the command claiming success, rather than
+    repeating what was printed a line earlier. A walk is refused when another
+    process's walk of that source is still alive.
 
-    **`--allow-full-retraction` is named only when a refusal is among them**,
-    and that is the whole reason `RETRACTION_ERROR_CODE` exists. It is the one
-    failure here an operator has a command for; a read timeout is not, and an
-    escape hatch offered for every failure is one people learn to paste
+    **`--allow-full-retraction` is named only when a sweep refusal is among
+    them**, and that is the whole reason `RETRACTION_ERROR_CODE` exists. It is
+    the one failure here an operator has a command for; a read timeout is not,
+    and an escape hatch offered for every failure is one people learn to paste
     without reading. `error_code` is what is matched rather than the refusal's
     English, because that sentence is built from three numbers in
     `ports/ingest.py` and is a standing candidate for rewording.

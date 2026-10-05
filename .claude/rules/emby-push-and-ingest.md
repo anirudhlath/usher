@@ -127,8 +127,9 @@ completed `watch_state` run passes it and runs the watch lane's first walk, two
 filtered listings (`FIRST_WALK_FILTERS`), and **neither log line names it**.
 An unfinished first walk is superseded, never resumed
 (`watch_sync.SUPERSEDED_ERROR`): `save` only raises `position`, so its row
-cannot be reset. A watch run whose heartbeat is under `STALE_AFTER` old is
-alive, first walk or delta, and is left alone: the next run walks beside it.
+cannot be reset. A `running` watch run whose heartbeat is under `STALE_AFTER`
+old is alive, first walk or delta, and is left alone: the next run walks beside
+it.
 
 ## The match ladder
 
