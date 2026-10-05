@@ -2008,7 +2008,8 @@ export interface components {
          *     whole-library walk's plan stands -- `walk_progress` -- and are `null` for a walk
          *     without one. `heartbeat_at` tells a live `running` walk from a dead one: a
          *     whole-library walk's writer moves it at least once a minute. `error` is the
-         *     run's own sentence, built like `detail` below from translated port errors.
+         *     run's own sentence, built like `SourceStatusResponse.detail` from translated
+         *     port errors.
          */
         SyncRunResponse: {
             kind: components["schemas"]["SyncRunKind"];

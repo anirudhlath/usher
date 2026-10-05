@@ -157,6 +157,7 @@ class ReconcileService:
         walkers: int = 4,
         heartbeat_seconds: float = 60.0,
         clock: Callable[[], datetime] = _now,
+        timer: Callable[[], float] = time.perf_counter,
     ) -> None:
         if walkers < 1:
             raise ValueError(f"a whole-library walk needs at least one walker, not {walkers}")
@@ -179,6 +180,9 @@ class ReconcileService:
         self._walkers = walkers
         self._heartbeat_seconds = heartbeat_seconds
         self._clock = clock
+        # A unit's duration is two readings of this, never of `clock`: a wall clock
+        # stepped mid-unit would record a negative duration, or an inflated one.
+        self._timer = timer
 
     async def reconcile(
         self,
@@ -510,14 +514,14 @@ class ReconcileService:
         walkers still fetching are cancelled and awaited first.
         """
         claimable = deque(sorted(units, key=lambda unit: unit.expected_items or 0, reverse=True))
-        claimed: dict[str, datetime] = {}
+        claimed: dict[str, float] = {}
 
         def claim() -> SyncRunUnit | None:
             # A unit's duration runs from here, the moment a walker takes it.
             if not claimable:
                 return None
             unit = claimable.popleft()
-            claimed[unit.unit_key] = self._clock()
+            claimed[unit.unit_key] = self._timer()
             return unit
 
         queue: asyncio.Queue[_Fetched] = asyncio.Queue(maxsize=self._walkers)
@@ -560,7 +564,7 @@ class ReconcileService:
         progress: _Progress,
         units: Sequence[SyncRunUnit],
         queue: asyncio.Queue[_Fetched],
-        claimed: Mapping[str, datetime],
+        claimed: Mapping[str, float],
     ) -> None:
         """The one writer: each unit's pages, committed once they add up to a batch.
 
@@ -606,7 +610,7 @@ class ReconcileService:
             if done:
                 open_units -= 1
                 _unit_duration.record(
-                    (self._clock() - claimed[unit.unit_key]).total_seconds(),
+                    self._timer() - claimed[unit.unit_key],
                     {"source": source.name, "stage": unit.stage.value},
                 )
 

@@ -81,6 +81,19 @@ class _Ticks:
         return LATER + timedelta(seconds=self.reads)
 
 
+class _Timer:
+    """A monotonic reading that moves only when the case moves it.
+
+    It starts far from zero, so a reading recorded as it stands is never a duration.
+    """
+
+    def __init__(self) -> None:
+        self.now = 1_000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
 class _Fixture:
     def __init__(
         self,
@@ -90,6 +103,7 @@ class _Fixture:
         walkers: int = 4,
         heartbeat_seconds: float = 60.0,
         clock: Callable[[], datetime] | None = None,
+        timer: Callable[[], float] | None = None,
     ) -> None:
         self.source = Source(
             kind=SourceKind.EMBY,
@@ -132,6 +146,7 @@ class _Fixture:
             walkers=walkers,
             heartbeat_seconds=heartbeat_seconds,
             clock=clock if clock is not None else _Ticks(),
+            timer=timer if timer is not None else _Timer(),
         )
 
     async def _commit(self) -> None:
@@ -2045,10 +2060,11 @@ async def test_a_unit_is_timed_from_its_walkers_claim_to_its_last_commit(
     """Once per completed unit, under its stage, from the claim rather than the stage's start.
 
     One walker, so Shorts is claimed only once Films has completed: the 90 s that pass
-    while Films is held are Films' alone, and Shorts records none of them.
+    while Films is held are Films' alone, and Shorts records none of them. They pass on
+    the timer while the wall clock stands still, so a duration read off the clock is 0.
     """
-    clock = _Clock(NOW)
-    fixture = _Fixture(batch_size=1, walkers=1, clock=clock)
+    timer = _Timer()
+    fixture = _Fixture(batch_size=1, walkers=1, clock=_Clock(NOW), timer=timer)
     _shelve(fixture, "Watched", range(1), stage=WalkStage.SEED)
     _shelve(fixture, "Films", range(10, 12))
     _shelve(fixture, "Shorts", range(20, 21))
@@ -2060,7 +2076,7 @@ async def test_a_unit_is_timed_from_its_walkers_claim_to_its_last_commit(
     async with asyncio.timeout(5):
         while ("library:Films", 0) not in fixture.adapter.unit_starts:
             await asyncio.sleep(0)
-    clock.now = NOW + timedelta(seconds=90)
+    timer.now += 90
     release.set()
     run = await asyncio.wait_for(walk, 5)
 
@@ -2074,3 +2090,33 @@ async def test_a_unit_is_timed_from_its_walkers_claim_to_its_last_commit(
         (fixture.source.name, "seed"): (1, 0.0),
         (fixture.source.name, "titles"): (2, 90.0),
     }
+
+
+async def test_a_unit_that_fails_records_no_duration(meter_reader: InMemoryMetricReader) -> None:
+    """Films completes and is timed; Shorts, claimed after it, fails and records nothing.
+
+    One walker, so Shorts is claimed only once Films has completed. Films is held for
+    90 s on the timer, so its point cannot pass for one Shorts recorded at no cost.
+    """
+    timer = _Timer()
+    fixture = _Fixture(batch_size=1, walkers=1, clock=_Clock(NOW), timer=timer)
+    _shelve(fixture, "Films", range(10, 12))
+    _shelve(fixture, "Shorts", range(20, 21))
+    fixture.adapter.fail_unit_after("Shorts", 0)
+    release = fixture.adapter.hold("Films")
+
+    walk = asyncio.create_task(
+        fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    )
+    async with asyncio.timeout(5):
+        while ("library:Films", 0) not in fixture.adapter.unit_starts:
+            await asyncio.sleep(0)
+    timer.now += 90
+    release.set()
+    run = await asyncio.wait_for(walk, 5)
+
+    assert run.status is SyncRunStatus.FAILED, "the premise: Shorts failed the walk"
+    assert fixture.adapter.unit_starts == [("library:Films", 0), ("library:Shorts", 0)], (
+        "the premise: Shorts was claimed, after Films"
+    )
+    assert _unit_durations(meter_reader) == {(fixture.source.name, "titles"): (1, 90.0)}
