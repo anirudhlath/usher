@@ -1,10 +1,10 @@
 """The shared contract against real Postgres, plus what a dict cannot express.
 
-A foreign key, a CHECK constraint, and a poisoned session.
+A foreign key, a CHECK constraint, a collation, and a poisoned session.
 """
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -14,16 +14,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from tests.contract.sync_run_repository_contract import (
     EARLIER,
     LATER,
+    UNIT_KEYS_IN_BYTE_ORDER,
     SyncRunRepositoryContract,
     run,
+    unit,
 )
 from tests.integration.conftest import Analyze
 from usher.db.repositories.source import PostgresSourceRepository
-from usher.db.repositories.sync import _INCOMPLETE, PostgresSyncRunRepository
+from usher.db.repositories.sync import _NEWEST, PostgresSyncRunRepository
 from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
 from usher.domain.source import Source
-from usher.domain.sync import SyncRunKind, SyncRunStatus
+from usher.domain.sync import SyncRunKind, SyncRunStatus, SyncRunUnit
 from usher.ports.errors import RepositoryConflict
 
 
@@ -133,7 +135,7 @@ async def test_the_resume_query_uses_the_source_kind_index(
     Not `"Sort" not in plan`, which `Incremental Sort` contains: the two plans are a full
     sort over a source's whole history versus a sort of one tied group at the head of an
     index scan, so this names the node it wants plus the `Presorted Key` that says the
-    index really did supply the leading key. `_INCOMPLETE` is imported rather than
+    index really did supply the leading key. `_NEWEST` is imported rather than
     transcribed so the assertion cannot drift off the statement it describes.
     """
     for index in range(500):
@@ -148,7 +150,7 @@ async def test_the_resume_query_uses_the_source_kind_index(
     plan = "\n".join(
         (
             await session.execute(
-                text("EXPLAIN " + _INCOMPLETE),
+                text("EXPLAIN " + _NEWEST),
                 {"source_id": source_id, "kind": SyncRunKind.WATCH_STATE.value},
             )
         )
@@ -158,6 +160,47 @@ async def test_the_resume_query_uses_the_source_kind_index(
     assert "ix_sync_runs_source_kind_started" in plan, plan
     assert "Incremental Sort" in plan, plan
     assert "Presorted Key: started_at" in plan, plan
+
+
+async def test_the_latest_planned_run_passes_over_a_newer_run_without_a_heartbeat(
+    repository: PostgresSyncRunRepository, source_id: uuid.UUID
+) -> None:
+    """The newest run of a kind with a heartbeat, whatever its status, newest by `(started_at, id)`.
+
+    The gap-closer's single walk is the newest delta and carries none. Added newer planned
+    run first, so neither insertion order nor id order picks the answer. The planned read
+    then tests the status of the run it found, never "the newest that is not completed".
+    """
+    newer = run(
+        source_id,
+        kind=SyncRunKind.DELTA,
+        status=SyncRunStatus.COMPLETED,
+        started_at=EARLIER + timedelta(hours=1),
+        heartbeat_at=LATER,
+    )
+    older = run(
+        source_id,
+        kind=SyncRunKind.DELTA,
+        status=SyncRunStatus.FAILED,
+        started_at=EARLIER,
+        heartbeat_at=EARLIER,
+    )
+    single = run(source_id, kind=SyncRunKind.DELTA, status=SyncRunStatus.FAILED, started_at=LATER)
+    for one in (newer, older, single):
+        await repository.add(one)
+    assert older.started_at < newer.started_at < single.started_at, "the premise: the order"
+    assert newer.id < older.id, "the premise: the newer planned run holds the smaller id"
+    newest = await repository.latest_run(source_id, SyncRunKind.DELTA)
+    assert newest is not None and newest.id == single.id, "the premise: the single walk is newest"
+
+    found = await repository.latest_planned_run(source_id, SyncRunKind.DELTA)
+
+    assert found is not None
+    assert (found.id, found.status) == (newer.id, SyncRunStatus.COMPLETED)
+    planned = await repository.latest_incomplete_run(source_id, SyncRunKind.DELTA, planned=True)
+    assert planned is None, "the planned read handed back an older failure"
+    unplanned = await repository.latest_incomplete_run(source_id, SyncRunKind.DELTA)
+    assert unplanned is not None and unplanned.id == single.id
 
 
 async def test_a_negative_counter_is_a_port_error(
@@ -194,3 +237,64 @@ async def test_started_at_survives_a_save(
     ).scalar_one()
     assert stored == EARLIER
     assert datetime.now(UTC) > EARLIER, "the fixture instant is genuinely in the past"
+
+
+async def test_a_negative_unit_position_is_a_port_error(
+    repository: PostgresSyncRunRepository, source_id: uuid.UUID
+) -> None:
+    """The CHECK mirrors `SyncRunUnit.position`'s `ge=0` for a writer that skips the model."""
+    one = run(source_id)
+    await repository.add(one)
+    broken = SyncRunUnit.model_construct(**{**unit(one.id, "alpha").model_dump(), "position": -1})
+    with pytest.raises(RepositoryConflict) as caught:
+        await repository.add_units([broken])
+    assert caught.value.constraint == "ck_sync_run_units_position_non_negative"
+
+
+async def test_a_runs_units_go_with_it(
+    session: AsyncSession, repository: PostgresSyncRunRepository, source_id: uuid.UUID
+) -> None:
+    """`ON DELETE CASCADE`: a plan means nothing without its run."""
+    one = run(source_id)
+    await repository.add(one)
+    await repository.add_units([unit(one.id, "alpha"), unit(one.id, "bravo")])
+    count = text("SELECT count(*) FROM sync_run_units WHERE run_id = :id")
+    assert (await session.execute(count, {"id": one.id})).scalar_one() == 2, "the premise"
+
+    await session.execute(text("DELETE FROM sync_runs WHERE id = :id"), {"id": one.id})
+
+    assert (await session.execute(count, {"id": one.id})).scalar_one() == 0
+
+
+async def test_a_caught_unit_conflict_leaves_the_session_usable(
+    repository: PostgresSyncRunRepository, source_id: uuid.UUID
+) -> None:
+    """The writer commits a unit with the batch it describes, as it does a run."""
+    with pytest.raises(RepositoryConflict):
+        await repository.add_units([unit(new_id(), "alpha")])
+    one = run(source_id)
+    await repository.add(one)
+    await repository.add_units([unit(one.id, "alpha")])
+    assert [each.unit_key for each in await repository.units_for(one.id)] == ["alpha"]
+
+
+async def test_the_unit_key_column_alone_orders_its_keys_unlike_bytes(
+    session: AsyncSession, repository: PostgresSyncRunRepository, source_id: uuid.UUID
+) -> None:
+    """The premise of the contract's key-order case on this arm, asked of the database.
+
+    That case sees a dropped `COLLATE "C"` only while the column's own collation orders
+    its keys unlike bytes; a database created under the C locale would hide the plant.
+    """
+    one = run(source_id)
+    await repository.add(one)
+    await repository.add_units([unit(one.id, key) for key in UNIT_KEYS_IN_BYTE_ORDER])
+    in_column_order = (
+        await session.execute(
+            text("SELECT unit_key FROM sync_run_units WHERE run_id = :id ORDER BY unit_key"),
+            {"id": one.id},
+        )
+    ).scalars()
+    assert list(in_column_order) != list(UNIT_KEYS_IN_BYTE_ORDER), (
+        "the premise: the column's own collation orders these keys as bytes do"
+    )

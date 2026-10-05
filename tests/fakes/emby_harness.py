@@ -1,5 +1,7 @@
 """Binds a real `EmbyAdapter` to `FakeEmbyServer` for the contract suite."""
 
+from collections.abc import Sequence
+
 import httpx
 from pydantic import AwareDatetime, SecretStr
 
@@ -34,6 +36,8 @@ async def instant_sleep(seconds: float) -> None:
 class EmbyHarness(SourceHarness):
     def __init__(self) -> None:
         self._server = FakeEmbyServer(page_size=PAGE_SIZE)
+        # Library name -> the view id minted for it the first time it was named.
+        self._view_ids: dict[str, str] = {}
         self._source = Source(
             id=new_id(),
             kind=SourceKind.EMBY,
@@ -96,6 +100,16 @@ class EmbyHarness(SourceHarness):
           reasoning; nothing seeds such an item.
         """
         self._server.add_item(item, changed_at)
+
+    async def given_item_in_libraries(
+        self, item: SourceItem, libraries: Sequence[str], *, changed_at: AwareDatetime
+    ) -> None:
+        self._server.add_item(item, changed_at)
+        for name in libraries:
+            if name not in self._view_ids:
+                self._view_ids[name] = f"{0xD001 + len(self._view_ids):032x}"
+                self._server.add_view(self._view_ids[name], name)
+        self._server.place(item.external_id, *(self._view_ids[name] for name in libraries))
 
     async def given_watch_state(self, state: SourceWatchState) -> None:
         self._server.set_watch_state(state)

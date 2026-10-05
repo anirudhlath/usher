@@ -2,7 +2,7 @@
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from urllib.parse import quote
 
@@ -12,8 +12,11 @@ from tests.contract.source_harness import SourceHarness
 from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
 from usher.domain.source import Source
-from usher.ports.errors import PortAuthFailed, PortUnavailable
+from usher.domain.sync import WalkStage
+from usher.ports.errors import PortAuthFailed, PortDataMalformed, PortUnavailable
 from usher.ports.source import (
+    DEFAULT_UNIT_KEY,
+    WHOLE_LIBRARY,
     SourceAdapter,
     SourceEvent,
     SourceEventKind,
@@ -24,7 +27,11 @@ from usher.ports.source import (
     SourceWatchState,
     StreamTarget,
     StreamTargetKind,
+    UnitPage,
+    WalkPlan,
+    WalkUnit,
     WatchStateUpdate,
+    pages_of,
 )
 
 # Same layout table the Emby mapper uses. Duplicated rather than imported so
@@ -63,6 +70,23 @@ class FakeSourceAdapter(SourceAdapter):
         #: forever" is precisely the defect it would hide.
         self._closes = 0
         self._fail_after: int | None = None
+        # Library name -> the external ids placed in it, in placement order. Empty
+        # means the fake plans the port's default single unit.
+        self._libraries: dict[str, list[str]] = {}
+        #: Items per `list_unit` page: small, so a walk of a few items pages.
+        self.page_size = 2
+        # Library name -> the stage its unit is planned in; absent means TITLES.
+        self._stages: dict[str, WalkStage] = {}
+        # Library name -> how many items its unit yields before it raises.
+        self._unit_failures: dict[str, int] = {}
+        # Library name -> an event its unit waits on before its first item.
+        self._holds: dict[str, asyncio.Event] = {}
+        #: `("fetched", "library:<name>")` for every item a library's unit yields.
+        self.journal: list[tuple[str, str]] = []
+        #: `(key, start_index)` for every unit walk the port was asked for, in order.
+        self.unit_starts: list[tuple[str, int]] = []
+        # Libraries whose unit the fake plans with no expected count.
+        self._uncounted: set[str] = set()
         # The session model. `_server_token` is what the source currently
         # accepts; `_token` is what this adapter last obtained. Expiring a
         # session rotates the former, so the next call sees a mismatch and
@@ -97,9 +121,38 @@ class FakeSourceAdapter(SourceAdapter):
     def seed_state(self, state: SourceWatchState) -> None:
         self._states[state.external_id] = state
 
+    def place(self, external_id: str, *libraries: str) -> None:
+        """Put a seeded item in each named library, creating any not yet named."""
+        for library in libraries:
+            placed = self._libraries.setdefault(library, [])
+            if external_id not in placed:
+                placed.append(external_id)
+
+    def stage(self, library: str, stage: WalkStage) -> None:
+        """Plan `library`'s unit in `stage` instead of `TITLES`."""
+        self._stages[library] = stage
+
+    def fail_unit_after(self, library: str, count: int) -> None:
+        """Have `library`'s unit raise `PortUnavailable` after yielding `count` items."""
+        self._unit_failures[library] = count
+
+    def hold(self, library: str) -> asyncio.Event:
+        """Hold `library`'s unit before its first item until the event returned is set."""
+        event = asyncio.Event()
+        self._holds[library] = event
+        return event
+
+    def uncounted(self, library: str) -> None:
+        """Plan `library`'s unit with no expected count, as Emby plans its seed."""
+        self._uncounted.add(library)
+
     def forget(self, external_id: str) -> None:
         self._items.pop(external_id, None)
         self._changed_at.pop(external_id, None)
+        # Out of every library too, or seeding the id again would silently re-place it.
+        for placed in self._libraries.values():
+            if external_id in placed:
+                placed.remove(external_id)
 
     def recorded(self, external_id: str) -> tuple[int, bool] | None:
         state = self._states.get(external_id)
@@ -112,13 +165,14 @@ class FakeSourceAdapter(SourceAdapter):
         self._fail_after = count
 
     def clear_failure(self) -> None:
-        """Undo `fail_after`.
+        """Undo `fail_after` and `fail_unit_after`.
 
         `ReconcileService`'s cursor case needs a run that failed *followed by* one that
         succeeds, which is the only way to show that a delta walk resumes from the last
         run that completed rather than from the last run that happened.
         """
         self._fail_after = None
+        self._unit_failures.clear()
 
     def reject_credentials(self) -> None:
         self._credentials_valid = False
@@ -253,6 +307,54 @@ class FakeSourceAdapter(SourceAdapter):
             yield item
             yielded += 1
 
+    async def plan_walk(self) -> WalkPlan:
+        await self._ready()
+        if not self._libraries:
+            return WHOLE_LIBRARY
+        in_a_library = {one for placed in self._libraries.values() for one in placed}
+        if not in_a_library.issuperset(self._items):
+            # An item in no library would be in no unit, and a plan must cover every
+            # item, so a partly placed source walks as one unit.
+            return WalkPlan(WHOLE_LIBRARY.units, expected_total=len(self._items))
+        units = tuple(
+            WalkUnit(
+                f"library:{name}",
+                self._stages.get(name, WalkStage.TITLES),
+                f"library {name}",
+                None if name in self._uncounted else len(placed),
+            )
+            for name, placed in self._libraries.items()
+        )
+        return WalkPlan(units, expected_total=len(self._items))
+
+    def list_unit(self, key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage]:
+        # Recorded here rather than in `_walk_library`, so that it is what the port
+        # was asked for.
+        self.unit_starts.append((key, start_index))
+        if key == DEFAULT_UNIT_KEY:
+            return pages_of(self._walk_items(None), start_index=start_index, size=self.page_size)
+        name = key.removeprefix("library:")
+        if name == key or name not in self._libraries:
+            raise PortDataMalformed(f"no plan of this source's could name walk unit {key!r}")
+        return pages_of(self._walk_library(name), start_index=start_index, size=self.page_size)
+
+    async def _walk_library(self, name: str) -> AsyncIterator[SourceItem]:
+        await self._ready()
+        if name in self._holds:
+            await self._holds[name].wait()
+        yielded = 0
+        for external_id in list(self._libraries[name]):
+            item = self._items.get(external_id)
+            if item is None:
+                continue
+            if yielded == self._unit_failures.get(name):
+                raise PortUnavailable(f"library {name} went away mid-walk")
+            # A turn of the loop per item, as a request gives, so walkers interleave.
+            await asyncio.sleep(0)
+            self.journal.append(("fetched", f"library:{name}"))
+            yield item
+            yielded += 1
+
     async def get_item(self, external_id: str) -> SourceItem | None:
         await self._ready()
         return self._items.get(external_id)
@@ -293,7 +395,7 @@ class FakeSourceAdapter(SourceAdapter):
 
     def watch_state(
         self, since: AwareDatetime | None = None, *, start_index: int = 0
-    ) -> AsyncIterator[SourceWatchState]:
+    ) -> AsyncGenerator[SourceWatchState]:
         # Recorded here rather than in `_walk_states`, so that it is what the **port**
         # was asked for.
         self.resumed_from.append(start_index)
@@ -301,7 +403,7 @@ class FakeSourceAdapter(SourceAdapter):
 
     async def _walk_states(
         self, since: AwareDatetime | None, start_index: int
-    ) -> AsyncIterator[SourceWatchState]:
+    ) -> AsyncGenerator[SourceWatchState]:
         await self._ready()
         yielded = 0
         skipped = 0
@@ -467,6 +569,12 @@ class FakeSourceHarness(SourceHarness):
 
     async def given_item(self, item: SourceItem, *, changed_at: AwareDatetime) -> None:
         self._adapter.seed(item, changed_at)
+
+    async def given_item_in_libraries(
+        self, item: SourceItem, libraries: Sequence[str], *, changed_at: AwareDatetime
+    ) -> None:
+        self._adapter.seed(item, changed_at)
+        self._adapter.place(item.external_id, *libraries)
 
     async def given_watch_state(self, state: SourceWatchState) -> None:
         self._adapter.seed_state(state)

@@ -5,7 +5,7 @@ For the three things its port fakes structurally cannot express.
 
 import dataclasses
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncGenerator, Iterator
 from datetime import UTC, datetime
 
 import pytest
@@ -51,7 +51,7 @@ class _LossyAdapter(FakeSourceAdapter):
 
     async def _walk_states(
         self, since: AwareDatetime | None, start_index: int
-    ) -> AsyncIterator[SourceWatchState]:
+    ) -> AsyncGenerator[SourceWatchState]:
         async for state in super()._walk_states(since, start_index):
             if self._blind_to is None or state.external_id in self._blind_to:
                 yield dataclasses.replace(state, play_count=None, last_played_at=None)

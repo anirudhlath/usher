@@ -290,6 +290,9 @@ MANIFEST: Final[MappingProxyType[str, BackupEntry]] = MappingProxyType(
             "bootstrap",
         ),
         "sync_runs": _rebuildable("2 rows. An audit trail a new walk replaces", "sync"),
+        "sync_run_units": _rebuildable(
+            "A whole-library walk's plan; the next walk plans again", "sync"
+        ),
         # --- schema ---------------------------------------------------------
         ALEMBIC_VERSION_TABLE: _schema(
             "1 row. Read by backup as the artifact's stamp and compared by restore, "

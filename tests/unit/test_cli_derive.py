@@ -208,7 +208,7 @@ async def test_a_derive_job_key_that_is_not_a_uuid_parks_rather_than_killing_the
     """`_title_id`'s whole reason, now for a third kind.
 
     `uuid.UUID("not-a-uuid")` raises a `ValueError`, and `JobWorker`
-    deliberately lets anything that is not a `UsherPortError` propagate -- *a
+    deliberately lets anything but a `UsherPortError` or a `JobDeferred` propagate -- *a
     bug in a handler is not an upstream failure*. So an unparseable key would
     take the worker process down instead of parking one job, and every other
     job in the queue with it.

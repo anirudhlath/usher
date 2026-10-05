@@ -37,11 +37,14 @@ class OffsetWindow:
     back for an id, yet which holds none of the previous page's, has shifted by
     at least the reach-back. The previous page's last id alone would not say so:
     that item may have left.
+
+    A bounded window never asks past `stop`, and reaching it ends the walk.
     """
 
-    def __init__(self, *, limit: int, start: int) -> None:
+    def __init__(self, *, limit: int, start: int, stop: int | None = None) -> None:
         self.limit = limit
         self.start = start
+        self.stop = stop
         self.overlap = 0
         self.total: int | None = None
         self._cursor = start
@@ -50,6 +53,18 @@ class OffsetWindow:
         self._previous: frozenset[str] = frozenset()
         self._served_ids: list[str | None] = []
         self._first = True
+
+    @property
+    def cursor(self) -> int:
+        """Where the page just served ends."""
+        return self._cursor
+
+    @property
+    def request_limit(self) -> int:
+        """The `Limit` for the request at `start`: `limit`, cut short at `stop`."""
+        if self.stop is None:
+            return self.limit
+        return max(0, min(self.limit, self.stop - self.start))
 
     def receive(self, entries: list[Any], total: object) -> Page:
         """Account for the page requested at `start`."""
@@ -84,7 +99,8 @@ class OffsetWindow:
         self._previous = frozenset(named)
         self._served_ids = ids
         self._first = False
-        ended = not entries or (short and reached) or drained
+        stopped = self.stop is not None and self._cursor >= self.stop
+        ended = not entries or (short and reached) or drained or stopped
         return Page(fresh=fresh, ended=ended, shifted=shifted)
 
     def advance(self) -> int:

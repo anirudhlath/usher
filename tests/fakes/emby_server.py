@@ -28,6 +28,12 @@ _TEMPLATES = {
 # `test_provider_ids_use_canonical_lowercase_keys` only means something if
 # the server actually speaks the casing the adapter has to normalise away.
 _EMBY_PROVIDER_KEYS = {"tmdb": "Tmdb", "imdb": "Imdb", "tvdb": "Tvdb"}
+# What `IncludeItemTypes` calls each kind.
+_TYPE_NAMES = {
+    SourceItemKind.MOVIE: "Movie",
+    SourceItemKind.SERIES: "Series",
+    SourceItemKind.EPISODE: "Episode",
+}
 # The vocabulary Emby 4.9.5.0 emits: `VideoRange` plus `ExtendedVideoType` and
 # `ExtendedVideoSubType`, and no `VideoRangeType` and no `DvProfile` -- neither
 # appears, Dolby Vision files included.
@@ -61,6 +67,7 @@ _VERSION = re.compile(r'Version="([^"]*)"')
 # `/Users/AuthenticateByName`, which `handle` answers before the token gate.
 _USER = re.compile(r"^/Users/(?P<user>[^/]+)$")
 _ITEMS = re.compile(r"^/Users/(?P<user>[^/]+)/Items$")
+_VIEWS = re.compile(r"^/Users/(?P<user>[^/]+)/Views$")
 _ITEM = re.compile(r"^/Users/(?P<user>[^/]+)/Items/(?P<item>[^/]+)$")
 _USER_DATA = re.compile(r"^/Users/(?P<user>[^/]+)/Items/(?P<item>[^/]+)/UserData$")
 _PROGRESS = re.compile(r"^/Users/(?P<user>[^/]+)/PlayingItems/(?P<item>[^/]+)/Progress$")
@@ -183,6 +190,12 @@ class FakeEmbyServer:
         self._items: dict[str, tuple[SourceItem, AwareDatetime]] = {}
         self._alternates: dict[str, list[dict[str, Any]]] = {}
         self._states: dict[str, SourceWatchState] = {}
+        # View id -> (name, `CollectionType` or `None`), and view id -> the external
+        # ids placed in it, in placement order.
+        self._views: dict[str, tuple[str, str | None]] = {}
+        self._placed: dict[str, list[str]] = {}
+        # The episodes `/Shows/NextUp` answers, in the order it answers them.
+        self._next_up: list[str] = []
         self._unplayed_episodes: dict[str, int] = {}
         self._sessions = 0
         self._session_token: str | None = None
@@ -231,6 +244,26 @@ class FakeEmbyServer:
         self._states.pop(external_id, None)
         self._alternates.pop(external_id, None)
         self._unplayed_episodes.pop(external_id, None)
+
+    def add_view(self, view_id: str, name: str, *, collection_type: str | None = "movies") -> None:
+        """A view the account sees. `None` is a library of mixed content, which has no type."""
+        self._views[view_id] = (name, collection_type)
+        self._placed.setdefault(view_id, [])
+
+    def remove_view(self, view_id: str) -> None:
+        self._views.pop(view_id, None)
+        self._placed.pop(view_id, None)
+
+    def place(self, external_id: str, *view_ids: str) -> None:
+        """Put a seeded item in each named view."""
+        for view_id in view_ids:
+            placed = self._placed[view_id]
+            if external_id not in placed:
+                placed.append(external_id)
+
+    def set_next_up(self, *external_ids: str) -> None:
+        """What `/Shows/NextUp` answers: seeded episodes, in this order."""
+        self._next_up = list(external_ids)
 
     def set_watch_state(self, state: SourceWatchState) -> None:
         self._states[state.external_id] = state
@@ -331,6 +364,10 @@ class FakeEmbyServer:
         user_match = _USER.match(path)
         if request.method == "GET" and user_match:
             return self._user(user_match.group("user"))
+        if request.method == "GET" and path == "/Shows/NextUp":
+            return self._list_next_up(request)
+        if request.method == "GET" and _VIEWS.match(path):
+            return self._list_views()
         if request.method == "GET" and _ITEMS.match(path):
             return self._list(request)
         item_match = _ITEM.match(path)
@@ -403,6 +440,12 @@ class FakeEmbyServer:
         """
         since = params.get("MinDateLastSaved") or params.get("MinDateLastSavedForUser")
         wanted = {name for name in (params.get("Filters") or "").split(",") if name}
+        parent = params.get("ParentId")
+        ids = {external_id for external_id in (params.get("Ids") or "").split(",") if external_id}
+        # A `ParentId` no view carries filters nothing: the worst answer a server can
+        # give, and the one the adapter must never provoke.
+        placed = set(self._placed[parent]) if parent in self._placed else None
+        types = {name for name in (params.get("IncludeItemTypes") or "").split(",") if name}
         fields = [field for field in (params.get("SortBy") or "").split(",") if field]
         descending = (params.get("SortOrder") or "Ascending").lower().startswith("desc")
         tied: dict[tuple[str, ...], list[str]] = {}
@@ -410,6 +453,12 @@ class FakeEmbyServer:
             if since is not None and _stamp(changed_at) < since:
                 continue
             if not self._passes(external_id, wanted):
+                continue
+            if placed is not None and external_id not in placed:
+                continue
+            if types and _TYPE_NAMES.get(item.kind) not in types:
+                continue
+            if ids and external_id not in ids:
                 continue
             key = tuple(_sort_value(item, field) for field in fields)
             tied.setdefault(key, []).append(external_id)
@@ -438,6 +487,41 @@ class FakeEmbyServer:
                 "Items": [self._payload(external_id, for_listing=True) for external_id in page],
                 # Present and 0 when uncounted, as the live server sends it.
                 "TotalRecordCount": len(ordered) if counted else 0,
+            },
+        )
+
+    def _list_views(self) -> httpx.Response:
+        """`GET /Users/{userId}/Views`, each view rendered from `view_item.json`."""
+        entries: list[dict[str, Any]] = []
+        for view_id, (name, collection_type) in self._views.items():
+            entry = load_emby_fixture("view_item")
+            entry.update(Id=view_id, Name=name)
+            if collection_type is None:
+                entry.pop("CollectionType", None)
+            else:
+                entry["CollectionType"] = collection_type
+            entries.append(entry)
+        return httpx.Response(200, json={"Items": entries, "TotalRecordCount": len(entries)})
+
+    def _list_next_up(self, request: httpx.Request) -> httpx.Response:
+        """`GET /Shows/NextUp`, cut and counted the way `_list` is.
+
+        Stricter than the real server may be, deliberately: a request naming no
+        user is refused, because the adapter must say whose next-up it means.
+        """
+        params = request.url.params
+        if params.get("UserId") != USER_ID:
+            return httpx.Response(400, json={"Error": "UserId is required"})
+        listed = [external_id for external_id in self._next_up if external_id in self._items]
+        start = int(params.get("StartIndex", "0"))
+        limit = int(params.get("Limit", str(self.page_size)))
+        counted = (params.get("EnableTotalRecordCount") or "true").lower() != "false"
+        page = listed[start : start + limit]
+        return httpx.Response(
+            200,
+            json={
+                "Items": [self._payload(external_id, for_listing=True) for external_id in page],
+                "TotalRecordCount": len(listed) if counted else 0,
             },
         )
 

@@ -87,7 +87,7 @@ from usher.services.home import SCREEN_STALE_GRACE, HomeService
 from usher.services.ingest import IngestService
 from usher.services.jobs import DEFAULT_LEASE_SECONDS
 from usher.services.matching import MatchService
-from usher.services.reconcile import ReconcileService
+from usher.services.reconcile import AfterSeed, ReconcileService
 from usher.services.rows import ROW_PROVIDERS
 from usher.services.rows.cache import Freshness, RefreshQueue, RowCache
 from usher.services.search import SearchService
@@ -267,6 +267,8 @@ class _RecordingReconcile(ReconcileService):
         adapter: SourceAdapter,
         *,
         max_items: int = 0,
+        plan: bool = True,
+        after_seed: AfterSeed | None = None,
     ) -> SyncRun:
         self._walks.append((source.name, kind))
         # Recorded as well as counted, for the reason `_CountingQueue`
@@ -274,7 +276,9 @@ class _RecordingReconcile(ReconcileService):
         # *what the lane passed*, and "the gap closed" is what a lane
         # passing nothing produces too.
         self._ceilings.append(max_items)
-        return await super().reconcile(source, kind, adapter, max_items=max_items)
+        return await super().reconcile(
+            source, kind, adapter, max_items=max_items, plan=plan, after_seed=after_seed
+        )
 
 
 class _RecordingWatchSync(WatchStateSyncService):
@@ -304,9 +308,19 @@ class _RecordingWatchSync(WatchStateSyncService):
         )
         self._walks = walks
 
-    async def sync(self, source: Source, adapter: SourceAdapter, *, user_id: uuid.UUID) -> SyncRun:
+    async def sync(
+        self,
+        source: Source,
+        adapter: SourceAdapter,
+        *,
+        user_id: uuid.UUID,
+        since_at_most: datetime | None = None,
+        beat: Callable[[], Awaitable[object]] | None = None,
+    ) -> SyncRun:
         self._walks.append(source.name)
-        return await super().sync(source, adapter, user_id=user_id)
+        return await super().sync(
+            source, adapter, user_id=user_id, since_at_most=since_at_most, beat=beat
+        )
 
 
 @dataclass(slots=True)
@@ -1260,6 +1274,33 @@ async def test_push_gap_close_always_walks_uncursored_and_says_so_first(fakes: _
     assert _GAP_MARKER in logged, logged
     assert "A" in logged, "the warning does not name the source it is about to walk"
     assert "entire library" in logged, "the warning does not say how big the walk is"
+
+
+async def test_the_gap_closer_walks_one_stream_even_unbounded_and_uncursored(
+    fakes: _Fakes,
+) -> None:
+    """The gap-closer never walks a plan, whatever it is configured to do.
+
+    A planned walk stores its units and a heartbeat before it reads a page, so the
+    gap-closer's delta having neither is the whole claim.
+    """
+    source = _source("A")
+    await _seed(fakes, source)
+    fakes.adapters.stock(_item("emby-1"), _CHANGED_AT)
+    supervisor = _supervisor(
+        fakes, worker_enabled=False, push_gap_close="always", push_gap_max_items=0
+    )
+    await supervisor.start()
+    try:
+        await _drain(lambda: _stored(fakes.media_items) == ["emby-1"])
+    finally:
+        await supervisor.stop()
+    assert fakes.gap_ceilings == [0], "the premise: the lane walked with no ceiling"
+    [delta] = [
+        run for run in await fakes.runs.list_for_source(source.id) if run.kind is SyncRunKind.DELTA
+    ]
+    assert delta.heartbeat_at is None
+    assert await fakes.runs.units_for(delta.id) == []
 
 
 async def test_push_gap_close_never_closes_no_gap_at_all(fakes: _Fakes) -> None:

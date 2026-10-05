@@ -9,11 +9,18 @@ from sqlalchemy import inspect as sa_inspect
 from usher.db.models.episode import EpisodeRow, SeasonRow
 from usher.db.models.jobs import JobRow
 from usher.db.models.source import MediaItemRow
-from usher.db.models.sync import RawPayloadRow, SyncRunRow
+from usher.db.models.sync import RawPayloadRow, SyncRunRow, SyncRunUnitRow
 from usher.db.models.watch import WatchStateRow
 from usher.domain.episode import Episode, Season
 from usher.domain.jobs import Job, JobKind, JobStatus
-from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus
+from usher.domain.sync import (
+    SyncRun,
+    SyncRunKind,
+    SyncRunStatus,
+    SyncRunUnit,
+    SyncRunUnitStatus,
+    WalkStage,
+)
 
 
 def _table(row_type: type) -> Table:
@@ -39,7 +46,14 @@ def _constraint_names(row_type: type, kind: str) -> set[str]:
 def test_all_ingest_tables_registered() -> None:
     from usher.db.base import Base
 
-    assert {"seasons", "episodes", "jobs", "sync_runs", "raw_payloads"} <= set(Base.metadata.tables)
+    assert {
+        "seasons",
+        "episodes",
+        "jobs",
+        "sync_runs",
+        "sync_run_units",
+        "raw_payloads",
+    } <= set(Base.metadata.tables)
 
 
 def test_every_row_matches_its_domain_model_field_for_field() -> None:
@@ -47,6 +61,7 @@ def test_every_row_matches_its_domain_model_field_for_field() -> None:
     assert _columns(EpisodeRow) == set(Episode.model_fields)
     assert _columns(JobRow) == set(Job.model_fields)
     assert _columns(SyncRunRow) == set(SyncRun.model_fields)
+    assert _columns(SyncRunUnitRow) == set(SyncRunUnit.model_fields)
 
 
 def test_media_items_episode_id_finally_has_a_target() -> None:
@@ -171,6 +186,8 @@ def test_every_new_enum_column_stores_values_not_names() -> None:
         (JobRow.__table__.c.status, JobStatus),
         (SyncRunRow.__table__.c.kind, SyncRunKind),
         (SyncRunRow.__table__.c.status, SyncRunStatus),
+        (SyncRunUnitRow.__table__.c.stage, WalkStage),
+        (SyncRunUnitRow.__table__.c.status, SyncRunUnitStatus),
     ]
     for column, enum_cls in cases:
         column_type = column.type
@@ -202,6 +219,9 @@ def test_every_not_null_column_a_raw_insert_may_omit_has_a_server_default() -> N
         SyncRunRow.__table__.c.items_unmatched,
         SyncRunRow.__table__.c.items_retracted,
         SyncRunRow.__table__.c.started_at,
+        SyncRunUnitRow.__table__.c.position,
+        SyncRunUnitRow.__table__.c.items_seen,
+        SyncRunUnitRow.__table__.c.status,
         SeasonRow.__table__.c.created_at,
         SeasonRow.__table__.c.updated_at,
         EpisodeRow.__table__.c.created_at,
@@ -242,6 +262,12 @@ def test_every_pydantic_bound_is_mirrored_by_a_named_check_constraint() -> None:
         # `SyncRun.position`'s `ge=0`.
         "ck_sync_runs_position_non_negative",
     }
+    assert _constraint_names(SyncRunUnitRow, "CheckConstraint") == {
+        "ck_sync_run_units_unit_key_not_empty",
+        "ck_sync_run_units_position_non_negative",
+        "ck_sync_run_units_expected_items_non_negative",
+        "ck_sync_run_units_items_seen_non_negative",
+    }
     assert _constraint_names(RawPayloadRow, "CheckConstraint") == {
         "ck_raw_payloads_provider_not_empty",
         "ck_raw_payloads_reference_not_empty",
@@ -259,6 +285,7 @@ def test_the_naming_convention_still_leaves_check_names_alone() -> None:
         (EpisodeRow, "ck_episodes_ck_"),
         (JobRow, "ck_jobs_ck_"),
         (SyncRunRow, "ck_sync_runs_ck_"),
+        (SyncRunUnitRow, "ck_sync_run_units_ck_"),
         (RawPayloadRow, "ck_raw_payloads_ck_"),
     ):
         names = {c.name for c in _table(row_type).constraints if isinstance(c.name, str)}

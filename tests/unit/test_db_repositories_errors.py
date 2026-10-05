@@ -202,7 +202,7 @@ async def test_a_failure_that_is_not_the_rows_fault_is_not_translated() -> None:
 
 
 # --------------------------------------------------------------------------
-# The re-raise, at every site that widened -- a property, not eleven cases
+# The re-raise, at every site that widened -- one property, not a case per site
 # --------------------------------------------------------------------------
 
 _SCANNED = (
@@ -244,7 +244,9 @@ WIDENED_SITES = frozenset(
         ("search.py", "replace"),
         ("search.py", "upsert_many"),
         ("sync.py", "add"),
+        ("sync.py", "add_units"),
         ("sync.py", "save"),
+        ("sync.py", "save_unit"),
         ("title.py", "add"),
         ("title.py", "update"),
     }

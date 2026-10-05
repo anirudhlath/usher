@@ -54,6 +54,17 @@ _job_duration = _meter.create_histogram(
 _propagator = TraceContextTextMapPropagator()
 
 
+class JobDeferred(Exception):
+    """A handler raises it when its work cannot start yet, though nothing failed.
+
+    `JobWorker` defers the job by `retry_after` seconds and spends no attempt.
+    """
+
+    def __init__(self, message: str, *, retry_after: float) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 @dataclass(frozen=True, slots=True)
 class JobScope:
     """One unit of work's own session, expressed without naming a session.
@@ -300,6 +311,9 @@ class JobWorker:
             try:
                 try:
                     await scope.handlers[job.kind](job)
+                except JobDeferred as exc:
+                    span.set_attribute("usher.job.deferred", True)
+                    await self._defer(job, exc, scope)
                 except PortDataMalformed as exc:
                     span.set_attribute("usher.job.parked", True)
                     await self._fail(job, exc, scope, retryable=False)
@@ -330,8 +344,8 @@ class JobWorker:
                     await scope.events.flush()
             finally:
                 # The clear at the end of this job, and it is here rather than on the
-                # two `except` arms because a bug that is not a `UsherPortError`
-                # propagates past both by design.
+                # `except` arms that settle the job because a bug propagates past them by
+                # design.
                 scope.events.discard()
         _job_duration.record(time.perf_counter() - started, {"kind": job.kind.value})
 
@@ -356,6 +370,31 @@ class JobWorker:
             attempts=None if outcome is None else outcome.attempts,
             disposition="unknown" if outcome is None else outcome.status.value,
             error=str(exc),
+        )
+
+    async def _defer(self, job: Job, exc: JobDeferred, scope: JobScope) -> None:
+        # `str(exc)` for `_fail`'s reason, since the column and these lines are read alike.
+        deferred = await scope.queue.defer(
+            job.id, reason=str(exc), run_after_seconds=exc.retry_after
+        )
+        await scope.commit()
+        if deferred is None:
+            # `_fail`'s `unknown`: the claim lapsed and the job was recovered or parked, so
+            # nothing moved, and saying it was deferred would misreport the row.
+            logger.warning(
+                "{kind} job {key} not deferred, since it is no longer running: {reason}",
+                kind=job.kind.value,
+                key=job.key,
+                reason=str(exc),
+            )
+            return
+        # `INFO`, not `_fail`'s warning, since nothing failed.
+        logger.info(
+            "{kind} job {key} deferred for {seconds:g} s: {reason}",
+            kind=job.kind.value,
+            key=job.key,
+            seconds=exc.retry_after,
+            reason=str(exc),
         )
 
 

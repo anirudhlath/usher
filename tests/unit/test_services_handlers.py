@@ -1,6 +1,7 @@
 """The three job handlers, and the remote-search tier only one of them uses."""
 
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -22,7 +23,7 @@ from usher.domain.bootstrap import BootstrapPhase
 from usher.domain.enums import EnrichmentState, MatchMethod, SourceKind, TitleKind
 from usher.domain.jobs import Job, JobKind, JobPriority
 from usher.domain.source import Source
-from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus
+from usher.domain.sync import STALE_AFTER, SyncRun, SyncRunKind, SyncRunStatus
 from usher.domain.title import Title
 from usher.ports.errors import PortDataMalformed, PortUnavailable, UsherPortError
 from usher.ports.ingest import MediaItemUpsert, WatchStateWrite
@@ -47,8 +48,9 @@ from usher.services.handlers import (
     watch_history_handler,
     watch_writeback_handler,
 )
+from usher.services.jobs import JobDeferred
 from usher.services.matching import MatchService
-from usher.services.reconcile import ReconcileService
+from usher.services.reconcile import AfterSeed, ReconcileService, WalkRefused
 from usher.services.watch_sync import WatchStateSyncService
 from usher.services.watch_write import WatchWriteService
 
@@ -58,6 +60,10 @@ _USER = uuid.UUID("0197a5b0-0000-7000-8000-0000000000ff")
 
 async def _noop() -> None:
     return None
+
+
+async def _beat() -> None:
+    """The walk's beat, as `_RecordingReconcile` hands it to an after-seed hook."""
 
 
 @pytest.fixture
@@ -150,8 +156,8 @@ async def test_the_enrich_handler_hands_the_service_the_rung_its_job_was_claimed
 async def test_an_enrich_key_that_is_not_a_uuid_parks_rather_than_killing_the_worker() -> None:
     """`uuid.UUID("not-a-uuid")` raises a `ValueError`.
 
-    and `JobWorker` deliberately lets anything that is not a `UsherPortError` propagate
-    -- "a bug in a handler is not an upstream failure".
+    and `JobWorker` deliberately lets anything but a `UsherPortError` or a `JobDeferred`
+    propagate -- "a bug in a handler is not an upstream failure".
 
     So without this translation one corrupted key takes the whole worker process down
     instead of parking its own job.
@@ -239,7 +245,7 @@ async def test_a_curate_key_that_is_not_a_uuid_parks_rather_than_killing_the_wor
     """`_title_id`'s reason, for a key that is not a title id.
 
     `uuid.UUID("not-a-uuid")` raises a `ValueError`, and `JobWorker`
-    deliberately lets anything that is not a `UsherPortError` propagate -- so
+    deliberately lets anything but a `UsherPortError` or a `JobDeferred` propagate -- so
     an unconverted key takes the worker process down instead of parking its
     own job. The conversion is shared with the three title-keyed kinds rather
     than written a fourth time; what differs is the sentence, because "job
@@ -550,7 +556,9 @@ class _RecordingReconcile(ReconcileService):
     call `super()`.
     """
 
-    def __init__(self, log: list[str], *, raises: Exception | None = None) -> None:
+    def __init__(
+        self, log: list[str], *, raises: Exception | None = None, seeded: bool = False
+    ) -> None:
         self.calls: list[tuple[uuid.UUID, SyncRunKind]] = []
         # The `max_items` each call was handed. `POST /admin/sources/{id}/sync`
         # is an operator asking for the whole thing, so the handler must pass
@@ -559,6 +567,8 @@ class _RecordingReconcile(ReconcileService):
         self.ceilings: list[int] = []
         self._log = log
         self._boom = raises
+        self._seeded = seeded
+        self.runs: list[SyncRun] = []
 
     async def reconcile(
         self,
@@ -567,13 +577,19 @@ class _RecordingReconcile(ReconcileService):
         adapter: SourceAdapter,
         *,
         max_items: int = 0,
+        plan: bool = True,
+        after_seed: AfterSeed | None = None,
     ) -> SyncRun:
         self.calls.append((source.id, kind))
         self.ceilings.append(max_items)
         self._log.append("reconcile")
         if self._boom is not None:
             raise self._boom
-        return SyncRun(source_id=source.id, kind=kind, status=SyncRunStatus.COMPLETED)
+        if self._seeded and after_seed is not None:
+            await after_seed(_beat)
+        run = SyncRun(source_id=source.id, kind=kind, status=SyncRunStatus.COMPLETED)
+        self.runs.append(run)
+        return run
 
 
 class _RecordingWatch(WatchStateSyncService):
@@ -581,10 +597,22 @@ class _RecordingWatch(WatchStateSyncService):
 
     def __init__(self, log: list[str], *, raises: Exception | None = None) -> None:
         self.calls: list[tuple[uuid.UUID, uuid.UUID]] = []
+        self.since_at_most: list[datetime | None] = []
+        self.beats: list[Callable[[], Awaitable[object]] | None] = []
         self._log = log
         self._boom = raises
 
-    async def sync(self, source: Source, adapter: SourceAdapter, *, user_id: uuid.UUID) -> SyncRun:
+    async def sync(
+        self,
+        source: Source,
+        adapter: SourceAdapter,
+        *,
+        user_id: uuid.UUID,
+        since_at_most: datetime | None = None,
+        beat: Callable[[], Awaitable[object]] | None = None,
+    ) -> SyncRun:
+        self.since_at_most.append(since_at_most)
+        self.beats.append(beat)
         self.calls.append((source.id, user_id))
         self._log.append("watch")
         if self._boom is not None:
@@ -696,6 +724,70 @@ async def test_the_sync_handler_closes_the_adapter_even_when_reconcile_raises(
         await adapter.get_item("anything")
 
 
+async def test_a_refused_walk_defers_the_job_so_the_queue_tries_it_again(
+    source: Source, adapter: FakeSourceAdapter
+) -> None:
+    """`JobDeferred`, on which `JobWorker` defers the job, spending no attempt.
+
+    Its `retry_after` holds the next try back for `STALE_AFTER`, by when a walk whose
+    process died has gone stale and the next try resumes it.
+    """
+    sources = FakeSourceRepository()
+    await sources.add(source)
+    events: list[str] = []
+    refusal = WalkRefused(f"a whole-library walk of {source.name} counts as live")
+    reconcile = _RecordingReconcile(events, raises=refusal)
+    watch = _RecordingWatch(events)
+
+    with pytest.raises(JobDeferred, match="counts as live") as caught:
+        await sync_handler(sources, reconcile, watch, _Opener(adapter), user_id=_USER)(
+            Job(kind=JobKind.SYNC, key=f"{source.id}:full")
+        )
+
+    assert caught.value.__cause__ is refusal
+    assert caught.value.retry_after == STALE_AFTER.total_seconds()
+    assert events == ["reconcile"], "the watch lane ran after the walk was refused"
+    with pytest.raises(PortUnavailable):
+        await adapter.get_item("anything")
+
+
+async def test_the_sync_handler_runs_the_watch_lane_after_the_seed_and_again_after_the_walk(
+    source: Source, adapter: FakeSourceAdapter
+) -> None:
+    """The second watch run reads back to the instant the walk began."""
+    sources = FakeSourceRepository()
+    await sources.add(source)
+    events: list[str] = []
+    reconcile = _RecordingReconcile(events, seeded=True)
+    watch = _RecordingWatch(events)
+
+    await sync_handler(sources, reconcile, watch, _Opener(adapter), user_id=_USER)(
+        Job(kind=JobKind.SYNC, key=f"{source.id}:full")
+    )
+
+    assert events == ["reconcile", "watch", "watch"]
+    [walk] = reconcile.runs
+    assert watch.since_at_most == [None, walk.started_at]
+
+
+async def test_the_sync_handlers_hook_hands_the_walks_beat_to_the_watch_lane(
+    source: Source, adapter: FakeSourceAdapter
+) -> None:
+    """So the walk's heartbeat moves with each batch the watch lane commits after the seed."""
+    sources = FakeSourceRepository()
+    await sources.add(source)
+    events: list[str] = []
+    reconcile = _RecordingReconcile(events, seeded=True)
+    watch = _RecordingWatch(events)
+
+    await sync_handler(sources, reconcile, watch, _Opener(adapter), user_id=_USER)(
+        Job(kind=JobKind.SYNC, key=f"{source.id}:full")
+    )
+
+    assert events == ["reconcile", "watch", "watch"], "the premise: the hook ran the watch lane"
+    assert watch.beats == [_beat, None]
+
+
 async def test_a_sync_key_with_no_lane_parks_rather_than_killing_the_worker() -> None:
     """`"{source_id}"` alone, with no `:lane`.
 
@@ -717,7 +809,8 @@ async def test_a_sync_key_whose_source_id_does_not_parse_parks_rather_than_killi
 ):
     """`uuid.UUID("not-a-uuid")` raises a `ValueError`.
 
-    and `JobWorker` deliberately lets anything that is not a `UsherPortError` propagate.
+    and `JobWorker` deliberately lets anything but a `UsherPortError` or a `JobDeferred`
+    propagate.
     """
     with pytest.raises(PortDataMalformed) as raised:
         await sync_handler(

@@ -98,8 +98,16 @@ when the walk stops:
   the page before (half the page, if it held fewer than 100), so a deletion
   mid-walk shifts nothing out of view unless more items than that vanish between
   two pages; the walk then logs a WARNING naming the page, and the next full
-  reconcile covers what it missed. Duplicates are permitted; silent truncation
-  is not.
+  reconcile covers what it missed. A resumed unit of a whole-library walk
+  re-reads only that overlap before where it stopped, and logs nothing: if more
+  items vanish ahead of it between attempts, it misses them, a full walk's sweep
+  retracts them, and the next full walk reads them again. Duplicates are
+  permitted; silent truncation is not, except across such a resume.
+- **A walk fails on a listing that 10,000 pages do not finish**, and each unit
+  of a whole-library walk is a listing of its own: at the default page size
+  that is one of 9,500,050 items or more, and fewer at a smaller page (the
+  [configuration guide](../guide/configuration.md#walking-a-large-library) has
+  the table).
 - **The delta cursor is widened by one second.**
 - **An unrecognised filter degrades to a full walk, never to an empty result.**
 - **A page that fails as unreachable is asked for again** — a 5xx, a 408, a
@@ -113,6 +121,19 @@ when the walk stops:
   sixth failure ends the walk, and its error says how many attempts it made over
   how long; each page gets its own six. Any other 4xx, an answer that is not a
   listing, a rejected credential and a closed adapter fail at once.
+- **At most `USHER_SYNC_WALKERS` listing requests are in flight** (default
+  **4**), the read-ahead included. A page that fails as unreachable or with a
+  429 drops that to one, and each run of ten pages that succeed raises it by
+  one, back up to the setting. A page waiting for its turn, or waiting to ask
+  again, holds no request.
+- **A whole-library walk is split into units.** Emby plans three stages: what
+  the account is watching, then each library's movies and series, then each
+  library's episodes in chunks of `USHER_SYNC_UNIT_MAX_ITEMS` (default
+  **100,000**), the largest library first. A library is any view but a
+  collection or a playlist. The first stage is planned only when the played
+  and the in-progress filters each narrow the library. When the libraries hold
+  fewer items than the source, everything after the first stage is one walk of
+  the whole source, and a WARNING names both numbers.
 
 The item lane filters on the library edit time, the watch lane on the user-data
 change time.
@@ -122,6 +143,14 @@ change time.
 `GET /admin/sources/{id}/status` ([07](07-client-api.md)) reports bad
 credentials, unreachable, and reachable-but-push-blocked as separate states,
 and the server's version as `server_version`.
+
+The status also carries `last_sync`: the source's live whole-library walk —
+`running`, its heartbeat under 10 minutes old — if it has one, and otherwise its
+newest full or delta walk. For a whole-library walk it says where the plan
+stands: the stage being walked, units done of units planned, and the items the
+plan expected. `usher sync-status` prints the same under each of a source's
+five most recent runs, and lists a live whole-library walk those leave out
+after them; every `sync.progress` frame carries it ([07](07-client-api.md)).
 
 `push_available` is three-valued: `null` ("not probed") when no push lane is
 running for the source, otherwise the live answer — a connection *and* at least
@@ -159,6 +188,44 @@ an oversized event on a cursorless source is discarded until the sync runs.
 deployment has a populated catalog and no `sync_runs` row, so it is refused
 until an operator syncs.
 
+**A whole-library walk — a full walk, or a delta with no cursor — walks the
+adapter's plan.** Up to `USHER_SYNC_WALKERS` units are fetched at once, the
+largest of a stage first, and one writer commits each unit's pages once they
+add up to `USHER_SYNC_BATCH_SIZE` items, and when the unit ends. No unit of a
+stage is fetched until every unit of the stages before it has committed, so an
+episode always finds its series. A walk's units are kept in `sync_run_units`
+with the position each has committed to, and the run's `heartbeat_at` moves on
+every commit and at least once a minute between commits, also while the watch
+lane runs after the seed. A unit that fails stops the walk: it is marked
+`failed` at its committed position, and pages fetched but not yet committed are
+dropped. A delta with a cursor, a bounded walk and the gap-closer keep the
+single walk.
+
+**An unfinished whole-library walk is resumed in place.** The next
+whole-library walk of the same kind continues the same `sync_runs` row, with
+the same `started_at`: completed units are skipped, and every other unit
+continues from the position it committed. Completed units are not read again
+however long ago they ran, so an item removed from one of their libraries since
+then stays available until the next full walk, which starts afresh. A run still
+`running` whose heartbeat is under 10 minutes old is a live walk, and a second
+is refused, saying as durations how long ago that heartbeat moved and how long
+until a walk whose process stopped can be resumed. `usher sync` exits non-zero,
+and a worker job is deferred: it spends none of its attempts, so it never parks,
+and tries again no sooner than 10 minutes later, when a walk whose process died
+has gone stale and is resumed.
+A run whose sweep was refused is not resumed, and neither is one that stopped
+before its units were stored or a full run from before units existed: a fresh
+walk starts, and such a run left `running` is closed `failed` with `superseded:
+a whole-library walk restarts`. A delta's claim reads only planned walks, so the
+gap-closer's walk of a source with no cursor never stands in its way.
+
+**The watch lane runs as soon as the seed has committed.** When a
+whole-library walk's plan starts with what the account is watching, `usher
+sync` and a worker job run the watch lane the moment that stage has committed —
+on a resumed walk too — and again after the walk, as before. The second run
+reads back to the instant the walk began, so a state saved meanwhile for an
+item the walk had not yet stored is not skipped.
+
 **A bounded walk records `FAILED`, never `COMPLETED`.**
 `USHER_PUSH_GAP_MAX_ITEMS` (default **20,000**; 0 is unlimited) stops a
 gap-closing delta that does have a cursor, with `error_code =
@@ -170,11 +237,11 @@ watch lane owns its own cursor and still walks whole.
 the row stays available until a walk sweeps it.
 
 **Retraction is a separate step, and it can decline.** Marking unseen items
-unavailable happens only after a walk returns normally, and even then it
-refuses to retract more than `sync_max_retract_fraction` (default `0.25`) of a
-source in one run, raising and changing nothing. `1.0` disables the ceiling.
-The ceiling is a fraction of what *Usher* holds for that source, not of the
-source itself.
+unavailable happens only after a walk returns normally — after a whole-library
+walk, once every unit has completed — and even then it refuses to retract more
+than `sync_max_retract_fraction` (default `0.25`) of a source in one run,
+raising and changing nothing. `1.0` disables the ceiling. The ceiling is a
+fraction of what *Usher* holds for that source, not of the source itself.
 
 An item that reappears in a walk is available again at that moment. The sweep
 only ever sets `false`.
@@ -194,13 +261,22 @@ with its own cursor.
 **A watch-lane delta is resumable.** A run checkpoints its position on
 `sync_runs.position`, and the next attempt reclaims that same row and resumes
 there, so a failure that outlasts a page's retries costs the page in flight
-rather than the whole walk. **Until a source has completed one `watch_state`
+rather than the whole walk. The run after a whole-library walk resumes a delta
+only when its cursor is at or before the instant the walk began; otherwise it
+starts afresh from that instant, and the delta, if still `running` and not
+alive (below), is closed `failed` with `superseded: a watch delta restarts from
+an earlier cursor`. **Until a source has completed one `watch_state`
 run, its watch lane has no cursor**, and its next run asks the source only for
 what the account has played or holds a resume position in — two filtered
 listings, a few requests on most libraries — and merges nothing else. That
-first walk is never resumed: an unfinished one still `running` is closed
-`failed` with `superseded: a first watch walk restarts`, and the next run starts
-again. Nothing schedules it.
+first walk is never resumed: an unfinished one still `running` and not alive
+(below) is closed `failed` with `superseded: a first watch walk restarts`, and
+the next run starts again. Nothing schedules it.
+A watch run moves its heartbeat when it starts, with every batch it commits,
+and at least once a minute between commits, also while it waits on a page. One
+still `running` whose heartbeat is under 10 minutes old is alive, and a second
+watch run neither closes nor resumes it: it walks beside it in a run of its
+own, a delta from the cursor or, with no cursor yet, a first walk.
 
 **Each batch is committed with the run's counters**, and a `sync_runs` row an
 operator can watch exists before the walk starts rather than after it finishes.

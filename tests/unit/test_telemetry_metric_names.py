@@ -182,7 +182,7 @@ async def test_every_metric_name_usher_emits_is_a_row_of_prd_10s_catalogue(
     assert "usher.jobs.queued" in declared, "the instrument scan missed a known instrument"
 
     catalogue = _catalogue_names()
-    assert len(catalogue) == 42, f"the catalogue table parse found {len(catalogue)} rows"
+    assert len(catalogue) == 44, f"the catalogue table parse found {len(catalogue)} rows"
     assert len(set(catalogue)) == len(catalogue), "the catalogue names are not distinct"
 
     assert declared == set(catalogue) - {_INHERITED}

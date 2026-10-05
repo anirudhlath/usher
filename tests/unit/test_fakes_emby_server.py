@@ -898,3 +898,126 @@ def test_only_a_series_takes_unplayed_episodes() -> None:
     server.add_item(MOVIE, T0)
     with pytest.raises(ValueError, match="only a Series has episodes"):
         server.set_unplayed_episodes(MOVIE.external_id, 1)
+
+
+# --- views, ParentId and IncludeItemTypes --------------------------------
+
+
+async def _listed(driver: _Driver, **params: str) -> list[str]:
+    # A page wide enough for every item, as `_filtered` asks for: the fake's default
+    # page of two would cut these three-item listings short.
+    body = await driver.session.json_body(
+        "GET",
+        f"/Users/{USER_ID}/Items",
+        params={"SortBy": "SortName", "Limit": "10", **params},
+        op="list",
+    )
+    return [entry["Id"] for entry in body["Items"]]
+
+
+def _given_three_movies(driver: _Driver) -> None:
+    for index in range(3):
+        driver.server.add_item(replace(MOVIE, external_id=f"m{index}", name=f"M {index}"), ADDED_AT)
+
+
+async def test_views_are_listed_with_their_collection_types(driver: _Driver) -> None:
+    films, sets, mixed = (f"{0xD001 + offset:032x}" for offset in range(3))
+    driver.server.add_view(films, "Films")
+    driver.server.add_view(sets, "Sets", collection_type="boxsets")
+    driver.server.add_view(mixed, "Mixed", collection_type=None)
+    body = await driver.session.json_body("GET", f"/Users/{USER_ID}/Views", op="views")
+    assert [(view["Id"], view["Name"], view.get("CollectionType")) for view in body["Items"]] == [
+        (films, "Films", "movies"),
+        (sets, "Sets", "boxsets"),
+        (mixed, "Mixed", None),
+    ]
+    assert {view["Type"] for view in body["Items"]} == {"CollectionFolder"}
+
+
+async def test_a_parent_id_lists_only_what_was_placed_in_that_view(driver: _Driver) -> None:
+    films, shows = f"{0xD001:032x}", f"{0xD002:032x}"
+    driver.server.add_view(films, "Films")
+    driver.server.add_view(shows, "Shows")
+    _given_three_movies(driver)
+    driver.server.place("m0", films)
+    driver.server.place("m1", films, shows)
+    assert await _listed(driver, ParentId=films) == ["m0", "m1"]
+    assert await _listed(driver, ParentId=shows) == ["m1"]
+
+
+async def test_a_parent_id_no_view_carries_lists_the_whole_library(driver: _Driver) -> None:
+    """The worst answer a server can give, so the adapter must never send one."""
+    films = f"{0xD001:032x}"
+    driver.server.add_view(films, "Films")
+    _given_three_movies(driver)
+    driver.server.place("m0", films)
+    assert await _listed(driver, ParentId=films) == ["m0"], "the control: a known view filters"
+    driver.server.remove_view(films)
+    assert await _listed(driver, ParentId=films) == ["m0", "m1", "m2"]
+
+
+async def test_include_item_types_lists_only_those_types(driver: _Driver) -> None:
+    driver.server.add_item(replace(MOVIE, external_id="m0", name="M 0"), ADDED_AT)
+    driver.server.add_item(
+        SourceItem(external_id="s0", name="S 0", kind=SourceItemKind.SERIES), ADDED_AT
+    )
+    driver.server.add_item(
+        SourceItem(
+            external_id="e0",
+            name="E 0",
+            kind=SourceItemKind.EPISODE,
+            series_external_id="s0",
+            season_number=1,
+            episode_number=1,
+        ),
+        ADDED_AT,
+    )
+    assert await _listed(driver, IncludeItemTypes="Episode") == ["e0"]
+    assert await _listed(driver, IncludeItemTypes="Movie,Series") == ["m0", "s0"]
+    assert await _listed(driver, IncludeItemTypes="Movie,Series,Episode") == ["e0", "m0", "s0"]
+
+
+# --- Ids and NextUp ------------------------------------------------------
+
+
+async def test_ids_lists_only_the_named_items(driver: _Driver) -> None:
+    _given_three_movies(driver)
+    assert await _listed(driver, Ids="m0,m2") == ["m0", "m2"]
+
+
+def _given_next_up(driver: _Driver) -> None:
+    driver.server.add_item(
+        SourceItem(external_id="s0", name="S 0", kind=SourceItemKind.SERIES), ADDED_AT
+    )
+    for index in range(3):
+        driver.server.add_item(
+            SourceItem(
+                external_id=f"e{index}",
+                name=f"E {index}",
+                kind=SourceItemKind.EPISODE,
+                series_external_id="s0",
+                season_number=1,
+                episode_number=index + 1,
+            ),
+            ADDED_AT,
+        )
+    driver.server.set_next_up("e2", "e0", "e1")
+
+
+async def test_next_up_lists_its_episodes_in_its_own_order_and_in_pages(driver: _Driver) -> None:
+    _given_next_up(driver)
+    body = await driver.session.json_body(
+        "GET",
+        "/Shows/NextUp",
+        params={"UserId": USER_ID, "StartIndex": "1", "Limit": "1"},
+        op="next_up",
+    )
+    assert [entry["Id"] for entry in body["Items"]] == ["e0"]
+    assert body["TotalRecordCount"] == 3
+
+
+async def test_next_up_refuses_a_request_that_names_no_user(driver: _Driver) -> None:
+    """Stricter than the real server may be, deliberately: the adapter must say whose it means."""
+    _given_next_up(driver)
+    with pytest.raises(PortUnavailable):
+        await driver.session.json_body("GET", "/Shows/NextUp", op="next_up")

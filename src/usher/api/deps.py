@@ -480,6 +480,7 @@ def get_reconcile_service(
         commit=session.commit,
         batch_size=settings.sync_batch_size,
         max_retract_fraction=settings.sync_max_retract_fraction,
+        walkers=settings.sync_walkers,
     )
 
 

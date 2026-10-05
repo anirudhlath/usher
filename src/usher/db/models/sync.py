@@ -21,7 +21,7 @@ from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from usher.db.base import Base, enum_column
-from usher.domain.sync import SyncRunKind, SyncRunStatus
+from usher.domain.sync import SyncRunKind, SyncRunStatus, SyncRunUnitStatus, WalkStage
 
 
 class SyncRunRow(Base):
@@ -73,6 +73,9 @@ class SyncRunRow(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Nullable with no server default: a run written before a writer heartbeat
+    # existed has none, and that absence is what marks it a walk without a plan.
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
         # "The cursor for the next delta walk" is a single-row lookup: the newest
@@ -83,6 +86,45 @@ class SyncRunRow(Base):
         CheckConstraint("items_unmatched >= 0", name="ck_sync_runs_items_unmatched_non_negative"),
         CheckConstraint("items_retracted >= 0", name="ck_sync_runs_items_retracted_non_negative"),
         CheckConstraint('"position" >= 0', name="ck_sync_runs_position_non_negative"),
+    )
+
+
+class SyncRunUnitRow(Base):
+    """One unit of a whole-library walk's plan.
+
+    Written only by `ReconcileService`'s writer: the plan in the commit after the
+    run's first heartbeat, then each unit's progress with the batch it describes.
+    `position` only rises and `completed` is final, the two rules `SyncRunRow`
+    follows, and `PostgresSyncRunRepository.save_unit` enforces both.
+    """
+
+    __tablename__ = "sync_run_units"
+
+    # CASCADE: a plan means nothing without the run it belongs to.
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("sync_runs.id", ondelete="CASCADE"), primary_key=True
+    )
+    # The adapter's own opaque key, stored the way `media_items.external_id` is.
+    unit_key: Mapped[str] = mapped_column(Text, primary_key=True)
+    stage: Mapped[WalkStage] = mapped_column(enum_column(WalkStage, length=16), nullable=False)
+    label: Mapped[str] = mapped_column(Text, nullable=False)
+    # Where the unit resumes, in the adapter's offsets.
+    position: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    expected_items: Mapped[int | None] = mapped_column(Integer)
+    items_seen: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    status: Mapped[SyncRunUnitStatus] = mapped_column(
+        enum_column(SyncRunUnitStatus, length=16),
+        nullable=False,
+        server_default=text("'pending'"),
+    )
+
+    __table_args__ = (
+        CheckConstraint("unit_key <> ''", name="ck_sync_run_units_unit_key_not_empty"),
+        CheckConstraint('"position" >= 0', name="ck_sync_run_units_position_non_negative"),
+        CheckConstraint(
+            "expected_items >= 0", name="ck_sync_run_units_expected_items_non_negative"
+        ),
+        CheckConstraint("items_seen >= 0", name="ck_sync_run_units_items_seen_non_negative"),
     )
 
 

@@ -51,6 +51,16 @@ _ID_KEYS = frozenset(
         "ServerId",
         "SeriesId",
         "SeasonId",
+        # A library view (`emby/view_item.json`) carries five more.
+        "ParentId",
+        "DisplayPreferencesId",
+        "Etag",
+        "Guid",
+        "PresentationUniqueKey",
+        # And the push fixtures, three more: a user id is never committed.
+        "UserId",
+        "DeviceId",
+        "MessageId",
     }
 )
 
@@ -338,6 +348,7 @@ def test_no_dataset_row_is_committed_anywhere() -> None:
         "tests/fixtures/emby/push_user_data_changed.json",
         "tests/fixtures/emby/push_library_changed.json",
         "tests/fixtures/emby/push_sessions.json",
+        "tests/fixtures/emby/view_item.json",
         "tests/fixtures/tmdb/movie.json",
         "tests/fixtures/tmdb/series.json",
         "tests/fixtures/tmdb/season.json",

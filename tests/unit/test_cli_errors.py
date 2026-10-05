@@ -5,7 +5,7 @@ import ast
 import contextlib
 import inspect
 import uuid
-from collections.abc import AsyncIterator, Callable, Coroutine
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,6 +16,7 @@ import pytest
 import uvicorn
 from sqlalchemy.exc import DBAPIError, MissingGreenlet, OperationalError
 
+from tests.fakes.source_adapter import FakeSourceAdapter
 from usher import cli as usher_cli
 from usher.config import Settings
 from usher.domain.enums import SourceKind
@@ -39,8 +40,9 @@ from usher.ports.errors import (
 # assertion.
 from usher.ports.ingest import AvailabilitySweepRefused
 from usher.ports.search import FilterNotSupported
-from usher.ports.source import SourceNotSupported
-from usher.services.reconcile import RETRACTION_ERROR_CODE
+from usher.ports.source import SourceAdapter, SourceNotSupported
+from usher.services.reconcile import RETRACTION_ERROR_CODE, AfterSeed
+from usher.services.watch_sync import WatchStateSyncService
 
 # A value that must never appear in anything this module asserts on. Spelled
 # once so a leak fails loudly rather than being read past.
@@ -678,12 +680,17 @@ class _StubAdapter:
         self.closed += 1
 
 
+async def _beat() -> None:
+    """A walk's beat, as `reconcile` hands it to an after-seed hook."""
+
+
 def _sync_against(
     monkeypatch: pytest.MonkeyPatch,
     *,
     walk: SyncRun,
     watch: SyncRun,
     second: tuple[SyncRun, SyncRun] | None = None,
+    seeded: SyncRun | None = None,
 ) -> list[_StubAdapter]:
     """Wire `_sync` to given run rows and nothing else.
 
@@ -694,6 +701,9 @@ def _sync_against(
     **`second` is not a convenience.** With one source, *"collect the failures and exit
     after the loop"* and *"exit on the first failing source"* are the same program, so a
     second source is what makes `_sync`'s load-bearing claim checkable.
+
+    `seeded` makes the first source's walk await its after-seed hook, whose watch run
+    answers with that row; the run after the walk still answers with `watch`.
     """
     _configured(monkeypatch)
     sources = [
@@ -718,15 +728,32 @@ def _sync_against(
 
         yield _Session()
 
+    # What the watch lane answers while the first source's after-seed hook runs.
+    hooked: list[SyncRun] = []
+
     # Indexed off the adapter the loop is holding rather than off a counter, so
     # a plant that walks one source twice is not silently handed the second
     # source's rows.
     class _Reconcile:
-        async def reconcile(self, _source: Source, _kind: object, adapter: object) -> SyncRun:
+        async def reconcile(
+            self,
+            _source: Source,
+            _kind: object,
+            adapter: object,
+            *,
+            after_seed: AfterSeed | None = None,
+            **kwargs: object,
+        ) -> SyncRun:
+            if seeded is not None and adapter is adapters[0] and after_seed is not None:
+                hooked.append(seeded)
+                await after_seed(_beat)
+                hooked.clear()
             return walks[adapters.index(adapter)]  # type: ignore[arg-type]
 
     class _Watch:
         async def sync(self, _source: Source, adapter: object, **kwargs: object) -> SyncRun:
+            if hooked:
+                return hooked[0]
             return watches[adapters.index(adapter)]  # type: ignore[arg-type]
 
     class _Pipeline:
@@ -953,6 +980,150 @@ def test_a_failed_watch_lane_is_a_non_zero_exit_without_the_retraction_hint(
     assert "--allow-full-retraction" not in combined, (
         "the hint belongs to the one failure it resolves, not to every failure"
     )
+
+
+def _printed(out: str) -> list[list[str]]:
+    """Each run Shared Emby's sync printed, as its kind and status."""
+    prefix = "Shared Emby: "
+    return [
+        line.removeprefix(prefix).split(" ")[:2]
+        for line in out.splitlines()
+        if line.startswith(prefix)
+    ]
+
+
+def test_a_failed_watch_run_after_the_seed_fails_the_command_however_the_rest_ends(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The hook's run fails; the walk, and the run after it in a row of its own, complete."""
+    hooked = _run(SyncRunKind.WATCH_STATE, SyncRunStatus.FAILED, error="source is unreachable")
+    after = _run(SyncRunKind.WATCH_STATE, SyncRunStatus.COMPLETED)
+    assert after.id != hooked.id, "the premise: the run after the walk is a row of its own"
+    _sync_against(
+        monkeypatch,
+        walk=_run(SyncRunKind.FULL, SyncRunStatus.COMPLETED),
+        watch=after,
+        seeded=hooked,
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        usher_cli.main(["sync"])
+
+    assert _printed(capsys.readouterr().out) == [
+        ["watch_state", "failed"],
+        ["full", "completed"],
+        ["watch_state", "completed"],
+    ], "the premise: the hook's run failed, then the walk and the run after it completed"
+    assert exit_info.value.code == (
+        "1 sync run(s) failed: watch_state; see the lines above and `usher sync-status`"
+    )
+
+
+def test_a_watch_row_failed_by_the_hook_and_again_after_the_walk_is_counted_once(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The run after the walk resumed the row the hook's run failed, and failed it again."""
+    hooked = _run(SyncRunKind.WATCH_STATE, SyncRunStatus.FAILED, error="source is unreachable")
+    resumed = hooked.evolve(error="source is still unreachable")
+    assert resumed.id == hooked.id, "the premise: the run after the walk is the hook's row"
+    _sync_against(
+        monkeypatch,
+        walk=_run(SyncRunKind.FULL, SyncRunStatus.COMPLETED),
+        watch=resumed,
+        seeded=hooked,
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        usher_cli.main(["sync"])
+
+    assert _printed(capsys.readouterr().out) == [
+        ["watch_state", "failed"],
+        ["full", "completed"],
+        ["watch_state", "failed"],
+    ], "the premise: both watch runs failed"
+    assert exit_info.value.code == (
+        "1 sync run(s) failed: watch_state; see the lines above and `usher sync-status`"
+    )
+
+
+def test_a_watch_row_failed_by_the_hook_and_completed_after_the_walk_is_no_failure(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The row ended completed, and so did the walk: the command exits 0, raising nothing."""
+    hooked = _run(SyncRunKind.WATCH_STATE, SyncRunStatus.FAILED, error="source is unreachable")
+    completed = hooked.evolve(status=SyncRunStatus.COMPLETED, error=None)
+    assert completed.id == hooked.id, "the premise: the run after the walk is the hook's row"
+    _sync_against(
+        monkeypatch,
+        walk=_run(SyncRunKind.FULL, SyncRunStatus.COMPLETED),
+        watch=completed,
+        seeded=hooked,
+    )
+
+    usher_cli.main(["sync"])
+
+    assert _printed(capsys.readouterr().out) == [
+        ["watch_state", "failed"],
+        ["full", "completed"],
+        ["watch_state", "completed"],
+    ]
+
+
+class _AnsweringWatch(WatchStateSyncService):
+    """A watch lane that gives one answer, and needs none of a real one's collaborators.
+
+    It records the beat each call was handed.
+    """
+
+    def __init__(self, answer: SyncRun) -> None:
+        self._answer = answer
+        self.beats: list[Callable[[], Awaitable[object]] | None] = []
+
+    async def sync(
+        self,
+        source: Source,
+        adapter: SourceAdapter,
+        *,
+        user_id: uuid.UUID,
+        since_at_most: datetime | None = None,
+        beat: Callable[[], Awaitable[object]] | None = None,
+    ) -> SyncRun:
+        self.beats.append(beat)
+        return self._answer
+
+
+def _seed_hook(watch: WatchStateSyncService, failed: list[SyncRun]) -> AfterSeed:
+    """`_sync`'s after-seed hook for a source called Shared Emby, over `watch`."""
+    source = Source(
+        kind=SourceKind.EMBY,
+        name="Shared Emby",
+        base_url="https://emby.invalid",
+        credentials_ref="ref-0",
+        device_id="device-0",
+    )
+    return usher_cli._watch_lane(watch, source, FakeSourceAdapter(source), new_id(), failed)
+
+
+async def test_a_failed_watch_run_after_the_seed_is_kept_for_the_exit_line(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Printed, and kept, so the command exits non-zero however the runs after it end."""
+    run = _run(SyncRunKind.WATCH_STATE, SyncRunStatus.FAILED, error="source is unreachable")
+    failed: list[SyncRun] = []
+
+    await _seed_hook(_AnsweringWatch(run), failed)(_beat)
+
+    assert failed == [run]
+    assert "Shared Emby: watch_state failed" in capsys.readouterr().out
+
+
+async def test_the_after_seed_hook_hands_the_walks_beat_to_the_watch_lane() -> None:
+    """So the walk's heartbeat moves with each batch the watch lane commits."""
+    watch = _AnsweringWatch(_run(SyncRunKind.WATCH_STATE, SyncRunStatus.COMPLETED))
+
+    await _seed_hook(watch, [])(_beat)
+
+    assert watch.beats == [_beat]
 
 
 # -- `--title` naming a title the catalog does not hold -----------------------

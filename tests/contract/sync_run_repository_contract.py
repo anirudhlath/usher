@@ -5,12 +5,23 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus
+from usher.domain.sync import (
+    SyncRun,
+    SyncRunKind,
+    SyncRunStatus,
+    SyncRunUnit,
+    SyncRunUnitStatus,
+    WalkStage,
+)
 from usher.ports.errors import RepositoryConflict, RepositoryNotFound
 from usher.ports.repository import SyncRunRepository
 
 EARLIER = datetime(2026, 7, 30, 3, 0, tzinfo=UTC)
 LATER = EARLIER + timedelta(days=1)
+
+# A library walk's own unit-key shapes, in byte order. A locale that skips punctuation,
+# as the test database's does, orders the two `episodes:` keys the other way round.
+UNIT_KEYS_IN_BYTE_ORDER = ("episodes:30:0:", "episodes:3:0:", "seed", "titles:3")
 
 
 def run(
@@ -29,6 +40,12 @@ def run(
             "started_at": started_at,
             **changes,
         }
+    )
+
+
+def unit(run_id: uuid.UUID, key: str, **changes: object) -> SyncRunUnit:
+    return SyncRunUnit.model_validate(
+        {"run_id": run_id, "unit_key": key, "stage": WalkStage.TITLES, "label": key, **changes}
     )
 
 
@@ -469,3 +486,199 @@ class SyncRunRepositoryContract:
         self, repository: SyncRunRepository, source_id: uuid.UUID
     ) -> None:
         assert await repository.latest_incomplete_run(source_id, SyncRunKind.WATCH_STATE) is None
+
+    # --- a whole-library walk's units and heartbeat ------------------------
+
+    async def test_a_runs_units_come_back_in_key_order(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        """Byte order, which is Python's `sorted`, and never the database's locale.
+
+        The keys are a library walk's own shapes, and the plan is added last key
+        first, so its order cannot come off the heap.
+        """
+        one = run(source_id)
+        await repository.add(one)
+        plan = [
+            unit(one.id, "titles:3"),
+            unit(one.id, "episodes:3:0:"),
+            unit(one.id, "seed"),
+            unit(one.id, "episodes:30:0:", expected_items=40),
+        ]
+        in_byte_order = list(UNIT_KEYS_IN_BYTE_ORDER)
+        assert [each.unit_key for each in plan] != in_byte_order, "the premise: added out of order"
+        # The premise that lets this case see the collation: a locale such as the
+        # test database's `en_US.utf8` compares letters and digits before punctuation,
+        # so it puts `episodes:3:0:` first, where bytes put `0` before `:`.
+        assert sorted(in_byte_order, key=lambda key: key.replace(":", "")) != in_byte_order, (
+            "the premise: a locale that skips punctuation orders these keys as bytes do"
+        )
+        await repository.add_units(plan)
+        stored = await repository.units_for(one.id)
+        assert [each.unit_key for each in stored] == in_byte_order
+        assert stored[0] == unit(one.id, "episodes:30:0:", expected_items=40)
+
+    async def test_a_units_position_rises_and_never_falls(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        """`save`'s checkpoint rule, per unit, with its positive control first.
+
+        Two attempts can hold one walk at once, and the slower one must not pull a
+        unit back to the page it started from.
+        """
+        one = run(source_id)
+        await repository.add(one)
+        first = unit(one.id, "alpha")
+        await repository.add_units([first])
+        running = first.evolve(status=SyncRunUnitStatus.RUNNING)
+
+        await repository.save_unit(running.evolve(position=2_000, items_seen=2_000))
+        [stored] = await repository.units_for(one.id)
+        assert stored.position == 2_000, "the positive control: a save moves the position"
+
+        await repository.save_unit(running.evolve(position=1_000, items_seen=1_000))
+        [stored] = await repository.units_for(one.id)
+        assert stored.position == 2_000, "a slower attempt pulled the unit's checkpoint back"
+        assert stored.items_seen == 1_000, "the rest of the row is the later write's"
+
+    async def test_a_completed_unit_takes_no_further_write(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        one = run(source_id)
+        await repository.add(one)
+        first = unit(one.id, "alpha")
+        await repository.add_units([first])
+        await repository.save_unit(
+            first.evolve(status=SyncRunUnitStatus.COMPLETED, position=7, items_seen=7)
+        )
+
+        await repository.save_unit(
+            first.evolve(status=SyncRunUnitStatus.FAILED, position=3, items_seen=3)
+        )
+
+        [stored] = await repository.units_for(one.id)
+        assert (stored.status, stored.position, stored.items_seen) == (
+            SyncRunUnitStatus.COMPLETED,
+            7,
+            7,
+        )
+
+    async def test_saving_a_unit_that_was_never_added_is_not_found(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        one = run(source_id)
+        await repository.add(one)
+        with pytest.raises(RepositoryNotFound):
+            await repository.save_unit(unit(one.id, "alpha"))
+
+    async def test_a_plan_holding_a_stored_unit_is_refused_whole(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        """All or nothing: a refused plan adds none of its units, not the ones before."""
+        one = run(source_id)
+        await repository.add(one)
+        await repository.add_units([unit(one.id, "alpha")])
+
+        with pytest.raises(RepositoryConflict) as caught:
+            await repository.add_units([unit(one.id, "bravo"), unit(one.id, "alpha")])
+
+        assert caught.value.constraint == "pk_sync_run_units"
+        assert [each.unit_key for each in await repository.units_for(one.id)] == ["alpha"]
+
+    async def test_a_plan_that_repeats_a_key_is_refused_whole(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        """A key twice in one plan is refused as a stored one is, on a run that exists.
+
+        Only the one fault: a plan that also names a missing run may be refused on
+        either constraint, and the port leaves that open.
+        """
+        one = run(source_id)
+        await repository.add(one)
+        await repository.add_units([unit(one.id, "alpha")])
+
+        with pytest.raises(RepositoryConflict) as caught:
+            await repository.add_units(
+                [unit(one.id, "bravo"), unit(one.id, "charlie"), unit(one.id, "bravo")]
+            )
+
+        assert caught.value.constraint == "pk_sync_run_units"
+        assert [each.unit_key for each in await repository.units_for(one.id)] == ["alpha"]
+
+    async def test_a_unit_of_a_run_that_does_not_exist_is_refused(
+        self, repository: SyncRunRepository
+    ) -> None:
+        with pytest.raises(RepositoryConflict) as caught:
+            await repository.add_units([unit(uuid.uuid4(), "alpha")])
+        assert caught.value.constraint == "fk_sync_run_units_run_id_sync_runs"
+
+    async def test_each_run_has_its_own_units(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        """One key in two runs is two units."""
+        one, other = run(source_id), run(source_id, started_at=LATER)
+        await repository.add(one)
+        await repository.add(other)
+        await repository.add_units([unit(one.id, "alpha", label="first")])
+        await repository.add_units([unit(other.id, "alpha", label="second")])
+
+        assert [each.label for each in await repository.units_for(one.id)] == ["first"]
+        assert [each.label for each in await repository.units_for(other.id)] == ["second"]
+        assert await repository.units_for(uuid.uuid4()) == []
+
+    async def test_the_heartbeat_survives_every_read(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        """`get`, `latest_incomplete_run` and `list_for_source` each carry it.
+
+        The last two read the row through a `SELECT *` of their own, so a column the
+        model lacked, or the model a column, fails there and nowhere else. The run is
+        a watch-state one: the kind `latest_incomplete_run` has always served.
+        """
+        one = run(source_id, kind=SyncRunKind.WATCH_STATE, heartbeat_at=EARLIER)
+        await repository.add(one)
+        await repository.save(one.evolve(heartbeat_at=LATER, items_seen=10))
+
+        stored = await repository.get(one.id)
+        incomplete = await repository.latest_incomplete_run(source_id, SyncRunKind.WATCH_STATE)
+        [listed] = await repository.list_for_source(source_id)
+        assert stored is not None and incomplete is not None
+        assert (stored.heartbeat_at, incomplete.heartbeat_at, listed.heartbeat_at) == (
+            LATER,
+            LATER,
+            LATER,
+        )
+
+    # --- the newest run of a kind, whatever its status ----------------------
+
+    async def test_the_latest_run_is_the_newest_of_its_kind_whatever_its_status(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        """Added newest first, so neither insertion order nor id order gives it away."""
+        newer = run(source_id, status=SyncRunStatus.COMPLETED, started_at=LATER)
+        await repository.add(newer)
+        older = run(source_id, status=SyncRunStatus.FAILED, started_at=EARLIER)
+        await repository.add(older)
+        assert older.started_at < newer.started_at, "the premise: the completed run is the newer"
+        assert newer.id < older.id, "the premise: the newer run holds the smaller id"
+
+        found = await repository.latest_run(source_id, SyncRunKind.FULL)
+
+        assert found is not None
+        assert found.id == newer.id
+        assert found.status is SyncRunStatus.COMPLETED
+
+    async def test_the_latest_run_is_scoped_by_kind_and_by_source(
+        self, repository: SyncRunRepository, source_id: uuid.UUID, other_source_id: uuid.UUID
+    ) -> None:
+        """Both decoys are newer than the run that answers, so only the scope keeps them out."""
+        await repository.add(run(source_id, kind=SyncRunKind.DELTA, started_at=LATER))
+        await repository.add(run(other_source_id, started_at=LATER))
+        assert await repository.latest_run(source_id, SyncRunKind.FULL) is None
+
+        own = run(source_id, started_at=EARLIER)
+        await repository.add(own)
+        found = await repository.latest_run(source_id, SyncRunKind.FULL)
+
+        assert found is not None
+        assert found.id == own.id

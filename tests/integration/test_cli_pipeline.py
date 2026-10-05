@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.fakes.embedding import FakeEmbedder
 from tests.fakes.llm_client import FakeLLMClient, usage
+from tests.fakes.source_adapter import FakeSourceAdapter
 from usher.cli import (
     _curate,
     _home,
@@ -27,6 +28,7 @@ from usher.cli import (
     _session_for,
     _similar,
     _suggest,
+    _sync,
     _sync_status,
     _unmatched,
     _work,
@@ -34,16 +36,27 @@ from usher.cli import (
 from usher.composition import build_pipeline, nothing, selected_sources
 from usher.config import Settings, get_settings
 from usher.db.repositories.source import PostgresSourceRepository
+from usher.db.repositories.sync import PostgresSyncRunRepository
 from usher.db.users import DEFAULT_USER_NAME, ensure_default_user
 from usher.domain.enums import EnrichmentState, SourceKind, TitleKind
 from usher.domain.ids import new_id
 from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.source import Source
+from usher.domain.sync import (
+    STALE_AFTER,
+    SyncRun,
+    SyncRunKind,
+    SyncRunStatus,
+    SyncRunUnit,
+    SyncRunUnitStatus,
+    WalkStage,
+)
 from usher.domain.title import Title
 from usher.ports.ingest import MediaItemUpsert
 from usher.ports.jobs import JobRequest
 from usher.ports.repository import ScoredNeighbor, TitleEmbeddingUpsert
 from usher.ports.search import SearchFilters, SuggestTier
+from usher.ports.source import DEFAULT_UNIT_KEY, SourceItem, SourceItemKind, SourceWatchState
 from usher.services.curation_validate import (
     ITEM_IDS_KEY,
     REASON_KEY,
@@ -135,6 +148,134 @@ async def test_sync_status_works_before_any_sync_has_run(
     for kind in JobKind:
         assert f"queue {kind.value}" in printed
     assert "parked jobs: 0" in printed
+
+
+async def test_sync_status_prints_where_a_whole_library_walks_plan_stands(
+    cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A planned run gets a plan line under it; a single walk's run gets none."""
+    source = Source(
+        kind=SourceKind.EMBY,
+        name="cli-planned",
+        base_url="https://emby.invalid",
+        credentials_ref=f"ref-{new_id()}",
+        device_id=str(new_id()),
+    )
+    planned = SyncRun(
+        source_id=source.id, kind=SyncRunKind.FULL, started_at=datetime(2026, 9, 2, tzinfo=UTC)
+    )
+    single = SyncRun(
+        source_id=source.id,
+        kind=SyncRunKind.DELTA,
+        status=SyncRunStatus.COMPLETED,
+        started_at=datetime(2026, 9, 1, tzinfo=UTC),
+    )
+    async with _session_for(cli_settings) as session:
+        await PostgresSourceRepository(session).add(source)
+        runs = PostgresSyncRunRepository(session)
+        await runs.add(single)
+        await runs.add(planned)
+        await runs.add_units(
+            [
+                SyncRunUnit(
+                    run_id=planned.id,
+                    unit_key="seed",
+                    stage=WalkStage.SEED,
+                    label="seed",
+                    status=SyncRunUnitStatus.COMPLETED,
+                ),
+                SyncRunUnit(
+                    run_id=planned.id,
+                    unit_key="titles:a",
+                    stage=WalkStage.TITLES,
+                    label="titles a",
+                    expected_items=4,
+                    status=SyncRunUnitStatus.RUNNING,
+                ),
+                SyncRunUnit(
+                    run_id=planned.id,
+                    unit_key="episodes:a",
+                    stage=WalkStage.EPISODES,
+                    label="episodes a",
+                    expected_items=6,
+                ),
+            ]
+        )
+        await session.commit()
+
+    await _sync_status(cli_settings)
+
+    lines = capsys.readouterr().out.splitlines()
+    at = next(
+        index
+        for index, line in enumerate(lines)
+        if line.startswith("cli-planned") and " full " in line
+    )
+    assert lines[at + 1].strip() == "plan: stage=titles units=1/3 expected=10"
+    assert lines[at + 2].startswith("cli-planned") and " delta " in lines[at + 2], (
+        "the premise: the single walk is listed next"
+    )
+    assert not lines[at + 3].strip().startswith("plan:"), "a single walk printed a plan line"
+
+
+@pytest.mark.parametrize("newer", [4, 5])
+async def test_sync_status_lists_a_live_whole_library_walk_newer_runs_push_out(
+    cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str], newer: int
+) -> None:
+    """Five newer runs push a live walk out of the five newest, and it is listed after them.
+
+    With four, it is the fifth, and is listed once.
+    """
+    source = Source(
+        kind=SourceKind.EMBY,
+        name="cli-live",
+        base_url="https://emby.invalid",
+        credentials_ref=f"ref-{new_id()}",
+        device_id=str(new_id()),
+    )
+    now = datetime.now(UTC)
+    walk = SyncRun(
+        source_id=source.id,
+        kind=SyncRunKind.FULL,
+        started_at=now - timedelta(hours=3),
+        heartbeat_at=now,
+    )
+    watched = [
+        SyncRun(
+            source_id=source.id,
+            kind=SyncRunKind.WATCH_STATE,
+            status=SyncRunStatus.COMPLETED,
+            started_at=now - timedelta(hours=2, minutes=-index),
+        )
+        for index in range(newer)
+    ]
+    async with _session_for(cli_settings) as session:
+        await PostgresSourceRepository(session).add(source)
+        runs = PostgresSyncRunRepository(session)
+        for one in (walk, *watched):
+            await runs.add(one)
+        await runs.add_units(
+            [
+                SyncRunUnit(
+                    run_id=walk.id,
+                    unit_key="titles:a",
+                    stage=WalkStage.TITLES,
+                    label="titles a",
+                    expected_items=4,
+                    status=SyncRunUnitStatus.RUNNING,
+                )
+            ]
+        )
+        await session.commit()
+        recent = {run.id for run in await runs.list_for_source(source.id, limit=5)}
+    assert (walk.id in recent) is (newer < 5), "the premise: where the five newest end"
+
+    await _sync_status(cli_settings)
+
+    lines = capsys.readouterr().out.splitlines()
+    listed = [index for index, line in enumerate(lines) if line.startswith("cli-live")]
+    assert [lines[index].split()[1] for index in listed] == ["watch_state"] * newer + ["full"]
+    assert lines[listed[-1] + 1].strip() == "plan: stage=titles units=0/1 expected=4"
 
 
 async def test_unmatched_reports_an_empty_review_queue(
@@ -732,6 +873,129 @@ def test_allow_full_retraction_is_the_only_way_past_the_ceiling(session: AsyncSe
     opened = build_pipeline(session, settings, max_retract_fraction=1.0)
     assert guarded.reconcile._max_retract_fraction == 0.1
     assert opened.reconcile._max_retract_fraction == 1.0
+
+
+async def test_usher_sync_exits_non_zero_when_a_live_walk_refuses_it(
+    cli_settings: Settings,
+    clean_slate: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Another process's walk, its heartbeat this instant: no walk here, and no watch lane."""
+    source = Source(
+        kind=SourceKind.EMBY,
+        name="cli-walking",
+        base_url="https://emby.invalid",
+        credentials_ref=f"ref-{new_id()}",
+        device_id=str(new_id()),
+    )
+    live = SyncRun(source_id=source.id, kind=SyncRunKind.FULL, heartbeat_at=datetime.now(UTC))
+    async with _session_for(cli_settings) as session:
+        await PostgresSourceRepository(session).add(source)
+        runs = PostgresSyncRunRepository(session)
+        await runs.add(live)
+        await runs.add_units(
+            [
+                SyncRunUnit(
+                    run_id=live.id,
+                    unit_key=DEFAULT_UNIT_KEY,
+                    stage=WalkStage.TITLES,
+                    label="the whole library",
+                )
+            ]
+        )
+        await session.commit()
+    adapter = FakeSourceAdapter(source)
+
+    async def _opened(pipeline: object, chosen: Source) -> FakeSourceAdapter:
+        return adapter
+
+    monkeypatch.setattr("usher.cli._open_adapter", _opened)
+
+    with pytest.raises(SystemExit) as exited:
+        await _sync(
+            cli_settings, source_name="cli-walking", kind="full", allow_full_retraction=False
+        )
+
+    out = capsys.readouterr().out
+    said = re.search(
+        r"^cli-walking: refused: a whole-library walk of cli-walking counts as live: its last"
+        r" heartbeat was (.+) ago, and if its process has stopped, it can be resumed in (.+)$",
+        out,
+        re.MULTILINE,
+    )
+    assert said is not None, out
+    assert _seconds(said[1]) + _seconds(said[2]) == STALE_AFTER.total_seconds(), (
+        "the heartbeat's age and the time left do not add up to the stale window"
+    )
+    assert "watch_state" not in out, "the watch lane ran after the walk was refused"
+    assert exited.value.code == (
+        "refused for cli-walking: a whole-library walk of each counts as live; "
+        "the lines above say how soon a stopped one can be resumed"
+    )
+
+
+def _seconds(duration: str) -> int:
+    """A refusal's duration -- "40 s", "9 min 20 s", "10 min" -- back in seconds."""
+    found = re.fullmatch(r"(?:(\d+) min)? ?(?:(\d+) s)?", duration)
+    assert found is not None and duration, f"not a duration: {duration!r}"
+    return int(found[1] or 0) * 60 + int(found[2] or 0)
+
+
+async def test_usher_sync_runs_the_watch_lane_as_soon_as_the_seed_has_committed(
+    cli_settings: Settings,
+    clean_slate: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The watch lane after the seed, the walk, then the watch lane read back to its start.
+
+    `m0` is watched, and the seed stores it, so the watch lane after the seed merges its
+    state. Its provider ids are what match it, to a stub title `_purge` removes by name.
+    """
+    source = Source(
+        kind=SourceKind.EMBY,
+        name="cli-seeded",
+        base_url="https://emby.invalid",
+        credentials_ref=f"ref-{new_id()}",
+        device_id=str(new_id()),
+    )
+    async with _session_for(cli_settings) as session:
+        await PostgresSourceRepository(session).add(source)
+        await session.commit()
+    adapter = FakeSourceAdapter(source)
+    for index, library in enumerate(("Watched", "Films")):
+        item = SourceItem(
+            external_id=f"m{index}",
+            name=f"cli-movie {index}",
+            kind=SourceItemKind.MOVIE,
+            year=2021,
+            provider_ids={"tmdb": str(9_900_000 + index)},
+        )
+        adapter.seed(item, datetime(2026, 7, 1, tzinfo=UTC))
+        adapter.place(item.external_id, library)
+    adapter.stage("Watched", WalkStage.SEED)
+    adapter.seed_state(SourceWatchState(external_id="m0", position_seconds=0, played=True))
+
+    async def _opened(pipeline: object, chosen: Source) -> FakeSourceAdapter:
+        return adapter
+
+    monkeypatch.setattr("usher.cli._open_adapter", _opened)
+
+    await _sync(cli_settings, source_name="cli-seeded", kind="full", allow_full_retraction=False)
+
+    lines = [
+        line for line in capsys.readouterr().out.splitlines() if line.startswith("cli-seeded: ")
+    ]
+    assert [line.split(" ")[1] for line in lines] == ["watch_state", "full", "watch_state"]
+    assert "merged=1" in lines[0].split(" ")
+    async with _session_for(cli_settings) as session:
+        runs = await PostgresSyncRunRepository(session).list_for_source(source.id)
+    [walk] = [run for run in runs if run.kind is SyncRunKind.FULL]
+    watches = sorted(
+        (run for run in runs if run.kind is SyncRunKind.WATCH_STATE), key=lambda run: run.started_at
+    )
+    assert [run.cursor_at for run in watches] == [None, walk.started_at]
 
 
 async def test_push_probe_reports_nothing_to_probe_before_it_opens_anything(

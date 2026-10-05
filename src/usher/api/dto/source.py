@@ -7,6 +7,7 @@ from pydantic import AwareDatetime, BaseModel, Field, SecretStr
 from usher.domain.enums import SourceKind
 from usher.domain.jobs import JobKind
 from usher.domain.source import Source
+from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus, WalkProgress, WalkStage
 from usher.ports.source import SourceStatus
 
 
@@ -44,6 +45,52 @@ class SourceResponse(BaseModel):
         )
 
 
+class SyncRunResponse(BaseModel):
+    """`last_sync`: a source's live whole-library walk, else its newest full or delta walk.
+
+    `stage`, `units_done`, `units_total` and `items_expected` say where a
+    whole-library walk's plan stands -- `walk_progress` -- and are `null` for a walk
+    without one. `heartbeat_at` tells a live `running` walk from a dead one: a
+    whole-library walk's writer moves it at least once a minute. `error` is the
+    run's own sentence, built like `SourceStatusResponse.detail` from translated
+    port errors.
+    """
+
+    kind: SyncRunKind
+    status: SyncRunStatus
+    started_at: AwareDatetime
+    finished_at: AwareDatetime | None
+    heartbeat_at: AwareDatetime | None
+    items_seen: int
+    items_matched: int
+    items_unmatched: int
+    items_retracted: int
+    error: str | None
+    stage: WalkStage | None
+    units_done: int | None
+    units_total: int | None
+    items_expected: int | None
+
+    @classmethod
+    def of(cls, run: SyncRun, walk: WalkProgress | None) -> "SyncRunResponse":
+        return cls(
+            kind=run.kind,
+            status=run.status,
+            started_at=run.started_at,
+            finished_at=run.finished_at,
+            heartbeat_at=run.heartbeat_at,
+            items_seen=run.items_seen,
+            items_matched=run.items_matched,
+            items_unmatched=run.items_unmatched,
+            items_retracted=run.items_retracted,
+            error=run.error,
+            stage=None if walk is None else walk.stage,
+            units_done=None if walk is None else walk.units_done,
+            units_total=None if walk is None else walk.units_total,
+            items_expected=None if walk is None else walk.items_expected,
+        )
+
+
 class SourceStatusResponse(BaseModel):
     """PRD 07's `GET /admin/sources/{id}/status`.
 
@@ -61,6 +108,9 @@ class SourceStatusResponse(BaseModel):
     path, and a transport error -- never a credential, never a
     `credentials_ref` -- which is what makes it safe to hand to a client
     verbatim.
+
+    `last_sync` is the source's live whole-library walk if it has one, else its newest
+    full or delta walk -- never the watch lane's -- or `null` before the first.
     """
 
     reachable: bool
@@ -69,9 +119,10 @@ class SourceStatusResponse(BaseModel):
     is_administrator: bool | None
     server_version: str | None
     detail: str | None
+    last_sync: SyncRunResponse | None
 
     @classmethod
-    def of(cls, status: SourceStatus) -> "SourceStatusResponse":
+    def of(cls, status: SourceStatus, last_sync: SyncRunResponse | None) -> "SourceStatusResponse":
         return cls(
             reachable=status.reachable,
             authenticated=status.authenticated,
@@ -79,6 +130,7 @@ class SourceStatusResponse(BaseModel):
             is_administrator=status.is_administrator,
             server_version=status.server_version,
             detail=status.detail,
+            last_sync=last_sync,
         )
 
 

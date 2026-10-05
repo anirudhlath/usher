@@ -232,6 +232,8 @@ def test_ingest_settings_have_usable_defaults(monkeypatch: pytest.MonkeyPatch) -
     settings = Settings()
     assert settings.sync_batch_size == 1_000
     assert settings.sync_max_retract_fraction == 0.25
+    assert settings.sync_walkers == 4
+    assert settings.sync_unit_max_items == 100_000
     assert settings.job_batch_size == 20
     assert settings.job_max_attempts == 5
     assert settings.job_backoff_seconds == 30.0
@@ -370,6 +372,41 @@ def test_sync_max_retract_fraction_is_a_fraction(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("USHER_SYNC_MAX_RETRACT_FRACTION", "1.5")
     with pytest.raises(ValidationError):
         Settings()
+
+
+@pytest.mark.parametrize(
+    ("value", "accepted"), [("0", False), ("1", True), ("16", True), ("17", False)]
+)
+def test_sync_walkers_is_from_one_to_sixteen(
+    monkeypatch: pytest.MonkeyPatch, value: str, accepted: bool
+) -> None:
+    """Zero would park every listing request, and past sixteen is a typo, not a tuning."""
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    monkeypatch.setenv("USHER_SYNC_WALKERS", value)
+    if accepted:
+        assert Settings().sync_walkers == int(value)
+    else:
+        with pytest.raises(ValidationError):
+            Settings()
+
+
+@pytest.mark.parametrize(
+    ("value", "accepted"),
+    [("999", False), ("1000", True), ("1000000", True), ("1000001", False)],
+)
+def test_sync_unit_max_items_is_from_one_page_to_a_million(
+    monkeypatch: pytest.MonkeyPatch, value: str, accepted: bool
+) -> None:
+    """Below a page a chunk is all overhead, and past a million it is a typo."""
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    monkeypatch.setenv("USHER_SYNC_UNIT_MAX_ITEMS", value)
+    if accepted:
+        assert Settings().sync_unit_max_items == int(value)
+    else:
+        with pytest.raises(ValidationError):
+            Settings()
 
 
 def test_metadata_provider_settings_have_usable_defaults(monkeypatch: pytest.MonkeyPatch) -> None:

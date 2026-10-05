@@ -39,9 +39,11 @@ from usher.cli import (
     _as_uuid,
     _bootstrap,
     _filters_from,
+    _plan_line,
     _print_search_answer,
     _run_lanes,
     _search,
+    _sync_failed,
     _unmatched,
     _vocabulary_line,
     build_parser,
@@ -65,6 +67,7 @@ from usher.domain.bootstrap import BootstrapPhase, ImportRun, ImportRunStatus
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.ids import new_id
 from usher.domain.search import SearchResult
+from usher.domain.sync import WalkProgress, WalkStage
 from usher.domain.title import Title
 from usher.ports.bulk import GENOME_TAG_COUNT, ImdbTitle
 from usher.ports.events import NullEventPublisher
@@ -2073,3 +2076,16 @@ def test_version_prints_the_package_version_and_reads_no_settings(
 
     assert excinfo.value.code == 0
     assert capsys.readouterr().out == f"usher {usher.__version__}\n"
+
+
+def test_the_exit_line_names_each_source_whose_walk_was_refused() -> None:
+    """No run failed, and the command still must not claim success."""
+    assert _sync_failed([], ["cli-a", "cli-b"]) == (
+        "refused for cli-a, cli-b: a whole-library walk of each counts as live; "
+        "the lines above say how soon a stopped one can be resumed"
+    )
+
+
+def test_a_plan_that_knew_no_counts_prints_its_expectation_as_unknown() -> None:
+    line = _plan_line(WalkProgress(stage=WalkStage.SEED, units_done=0, units_total=1))
+    assert line.split() == ["plan:", "stage=seed", "units=0/1", "expected=unknown"]

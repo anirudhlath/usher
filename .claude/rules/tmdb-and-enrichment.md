@@ -69,8 +69,8 @@ a v4 JWT and `_is_v4_token` picks header vs query form; `tmdb_requests_per_secon
   — off the provider's bookkeeping, a mapper that forgot an entry silently stops
   merging that field.
 - **A job key that does not parse must become a `UsherPortError` in the handler**,
-  which is why `services/handlers.py` converts every key: `JobWorker` lets
-  anything else propagate, so one corrupted key takes the worker down.
+  which is why `services/handlers.py` converts every key: `JobWorker` settles only
+  that and a `JobDeferred`, so one corrupted key would take the worker down.
 - **Two follow-up jobs per enriched title, always** — one `INDEX`, one `DERIVE`,
   at the `enrich` job's rung if that is `VISIBLE` or above, else `BACKFILL` (#73).
 - **Read season ids back before writing episodes** (`_store_hierarchy` does, as

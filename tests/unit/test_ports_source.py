@@ -4,29 +4,47 @@ import dataclasses
 import inspect
 import io
 from abc import ABC
+from collections.abc import AsyncIterator
+from contextlib import aclosing
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import pytest
 from loguru import logger
 from pydantic import SecretStr
 
 import usher.ports.source
-from usher.domain.enums import HdrFormat
+from usher.domain.enums import HdrFormat, SourceKind
+from usher.domain.ids import new_id
+from usher.domain.source import Source
+from usher.domain.sync import WalkStage
 from usher.ports.credentials import CredentialStore, SourceCredentials
+from usher.ports.errors import PortDataMalformed, PortUnavailable
 from usher.ports.source import (
     CANONICAL_PROVIDER_IDS,
+    DEFAULT_UNIT_KEY,
     INFUSE_SCHEME,
+    WHOLE_LIBRARY,
     PushProbe,
     SourceAdapter,
     SourceAdapterFactory,
     SourceEvent,
     SourceEventKind,
+    SourceItem,
+    SourceItemKind,
     SourceStatus,
     SourceWatchState,
     StreamTarget,
     StreamTargetKind,
+    UnitPage,
+    WalkPlan,
+    pages_of,
     redact_query,
     wrap_deep_link,
 )
+
+if TYPE_CHECKING:
+    from tests.fakes.source_adapter import FakeSourceAdapter
 
 
 def test_stream_target_carries_scheme_and_audio() -> None:
@@ -633,3 +651,194 @@ async def test_every_adapter_with_a_channel_answers_its_push_counts_for_itself(
 
     for implementation in (EmbyAdapter, FakeSourceAdapter):
         assert counter in vars(implementation), implementation.__name__
+
+
+# --- the walk plan ------------------------------------------------------------
+
+
+def _walked(*external_ids: str) -> list[SourceItem]:
+    return [
+        SourceItem(external_id=one, name=one, kind=SourceItemKind.MOVIE) for one in external_ids
+    ]
+
+
+async def _stream(items: list[SourceItem]) -> AsyncIterator[SourceItem]:
+    for item in items:
+        yield item
+
+
+async def _read(pages: AsyncIterator[UnitPage]) -> list[tuple[list[str], int]]:
+    return [([item.external_id for item in page.items], page.resume_at) async for page in pages]
+
+
+async def test_a_walk_is_paged_and_ends_on_its_short_page() -> None:
+    pages = await _read(pages_of(_stream(_walked("a", "b", "c", "d", "e")), size=2))
+    assert pages == [(["a", "b"], 2), (["c", "d"], 4), (["e"], 5)]
+
+
+async def test_a_resume_point_counts_the_items_it_skipped() -> None:
+    """`resume_at` is a `start_index`, so it counts what `start_index` skipped too.
+
+    Counted from the page's own items, a resumed unit would come back two pages
+    early and walk them twice; counted from nothing, it would come back at 0.
+    """
+    pages = await _read(pages_of(_stream(_walked("a", "b", "c", "d", "e")), start_index=3, size=2))
+    assert pages == [(["d", "e"], 5)]
+
+
+async def test_a_walk_that_fails_mid_page_yields_what_it_had_and_then_raises() -> None:
+    """The items received before the failure are still a page; the error still surfaces."""
+
+    async def failing() -> AsyncIterator[SourceItem]:
+        for item in _walked("a", "b", "c"):
+            yield item
+        raise PortUnavailable("source went away mid-walk")
+
+    seen: list[tuple[list[str], int]] = []
+    with pytest.raises(PortUnavailable):
+        async for page in pages_of(failing(), size=2):
+            seen.append(([item.external_id for item in page.items], page.resume_at))
+    assert seen == [(["a", "b"], 2), (["c"], 3)]
+
+
+async def test_a_walk_that_fails_on_a_page_boundary_yields_no_empty_page() -> None:
+    """A failure right after a full page holds nothing, so nothing more is yielded."""
+
+    async def failing() -> AsyncIterator[SourceItem]:
+        for item in _walked("a", "b"):
+            yield item
+        raise PortUnavailable("source went away on a page boundary")
+
+    seen: list[tuple[list[str], int]] = []
+    with pytest.raises(PortUnavailable):
+        async for page in pages_of(failing(), size=2):
+            seen.append(([item.external_id for item in page.items], page.resume_at))
+    assert seen == [(["a", "b"], 2)]
+
+
+async def test_a_walk_is_never_paged_into_an_empty_page() -> None:
+    """An empty page would read to the writer as progress that held nothing."""
+    assert await _read(pages_of(_stream([]), size=2)) == []
+    assert await _read(pages_of(_stream(_walked("a", "b")), size=2)) == [(["a", "b"], 2)]
+    assert await _read(pages_of(_stream(_walked("a", "b")), start_index=5, size=2)) == []
+
+
+async def test_a_consumer_that_stops_early_closes_the_walk_it_was_paging() -> None:
+    """The walk under the pages is closed at once, not whenever it is collected.
+
+    Left to the collector, a walk's read-ahead would keep a request in flight.
+    """
+    closed: list[bool] = []
+
+    async def walk() -> AsyncIterator[SourceItem]:
+        try:
+            for item in _walked("a", "b", "c", "d", "e"):
+                yield item
+        finally:
+            closed.append(True)
+
+    async with aclosing(pages_of(walk(), size=2)) as pages:
+        async for _ in pages:
+            break
+    assert closed == [True]
+
+
+def _fake() -> "FakeSourceAdapter":
+    from tests.fakes.source_adapter import FakeSourceAdapter
+
+    return FakeSourceAdapter(
+        Source(
+            kind=SourceKind.EMBY,
+            name="Walked Emby",
+            base_url="https://emby.invalid",
+            credentials_ref="ref-walked",
+            device_id=str(new_id()),
+        )
+    )
+
+
+async def test_the_default_plan_is_one_unit_holding_the_whole_library() -> None:
+    """Called on the port itself, past the fake's own override."""
+    plan = await SourceAdapter.plan_walk(_fake())
+    assert plan == WHOLE_LIBRARY
+    assert [(unit.key, unit.stage) for unit in plan.units] == [(DEFAULT_UNIT_KEY, WalkStage.TITLES)]
+
+
+async def test_the_default_unit_is_list_items_in_pages() -> None:
+    """An adapter that does not plan walks exactly as it always has, from any offset."""
+    adapter = _fake()
+    for item in _walked("m0", "m1", "m2"):
+        adapter.seed(item, datetime(2026, 7, 1, tzinfo=UTC))
+    pages = await _read(SourceAdapter.list_unit(adapter, DEFAULT_UNIT_KEY, start_index=1))
+    assert pages == [(["m1", "m2"], 3)]
+
+
+def test_the_default_unit_refuses_a_key_no_plan_could_name() -> None:
+    with pytest.raises(PortDataMalformed):
+        SourceAdapter.list_unit(_fake(), "library:Films")
+
+
+def _seed(
+    adapter: "FakeSourceAdapter", *external_ids: str, libraries: tuple[str, ...] = ()
+) -> None:
+    """Seed each id as a movie, placed in every one of `libraries`."""
+    for item in _walked(*external_ids):
+        adapter.seed(item, datetime(2026, 7, 1, tzinfo=UTC))
+        adapter.place(item.external_id, *libraries)
+
+
+async def test_the_fake_plans_one_whole_walk_while_an_item_sits_in_no_library() -> None:
+    """A unit per library would leave the loose item out of every unit."""
+    adapter = _fake()
+    _seed(adapter, "m0", libraries=("Films",))
+    premise = await adapter.plan_walk()
+    assert [unit.key for unit in premise.units] == ["library:Films"], "the premise"
+
+    _seed(adapter, "m1")
+    assert await adapter.plan_walk() == WalkPlan(WHOLE_LIBRARY.units, expected_total=2)
+
+
+async def test_the_fake_forgets_an_item_out_of_every_library_it_was_placed_in() -> None:
+    """Seeding a forgotten id again places it nowhere, rather than back where it was."""
+    adapter = _fake()
+    _seed(adapter, "m0", libraries=("Films",))
+    _seed(adapter, "m1", libraries=("Films", "Favourites"))
+
+    async def counts() -> list[tuple[str, int | None]]:
+        return [(unit.key, unit.expected_items) for unit in (await adapter.plan_walk()).units]
+
+    assert await counts() == [("library:Films", 2), ("library:Favourites", 1)]
+    adapter.forget("m1")
+    assert await counts() == [("library:Films", 1), ("library:Favourites", 0)]
+
+    _seed(adapter, "m1")
+    walks = [await _read(adapter.list_unit(f"library:{name}")) for name in ("Films", "Favourites")]
+    assert walks == [[(["m0"], 1)], []]
+
+
+async def test_the_fake_s_own_whole_library_unit_resumes_from_its_start_index() -> None:
+    """The fake's override of the port default, called on the fake itself, in its own pages."""
+    adapter = _fake()
+    _seed(adapter, "m0", "m1", "m2", "m3")
+    assert await _read(adapter.list_unit(DEFAULT_UNIT_KEY, start_index=1)) == [
+        (["m1", "m2"], 3),
+        (["m3"], 4),
+    ]
+
+
+async def test_the_fake_refuses_a_library_it_was_never_given() -> None:
+    adapter = _fake()
+    _seed(adapter, "m0", libraries=("Films",))
+    with pytest.raises(PortDataMalformed):
+        async with aclosing(adapter.list_unit("library:Nope")) as pages:
+            async for _ in pages:
+                pass
+
+
+async def test_the_fake_refuses_a_library_named_without_its_unit_prefix() -> None:
+    adapter = _fake()
+    _seed(adapter, "m0", libraries=("Films",))
+    with pytest.raises(PortDataMalformed):
+        async with aclosing(adapter.list_unit("Films")) as pages:
+            async for _ in pages:
+                pass

@@ -9,7 +9,7 @@ from loguru import logger
 from usher.domain.bootstrap import BootstrapPhase
 from usher.domain.jobs import Job
 from usher.domain.source import MediaItem, Source
-from usher.domain.sync import SyncRunKind
+from usher.domain.sync import STALE_AFTER, SyncRunKind
 from usher.domain.watch import WatchState
 from usher.ports.errors import PortDataMalformed
 from usher.ports.repository import MediaItemRepository, SourceRepository, WatchStateRepository
@@ -18,9 +18,9 @@ from usher.services.curation import CurationService
 from usher.services.derive import DeriveService
 from usher.services.enrich import EnrichService
 from usher.services.index import IndexService
-from usher.services.jobs import Handler
+from usher.services.jobs import Handler, JobDeferred
 from usher.services.matching import MatchService
-from usher.services.reconcile import ReconcileService
+from usher.services.reconcile import ReconcileService, WalkRefused
 from usher.services.watch_sync import WatchStateSyncService
 
 #: `SyncRunKind` has a third member, `WATCH_STATE`, which is never a lane an
@@ -228,6 +228,12 @@ def sync_handler(
 
     `POST /admin/sources/{id}/sync` lands here as an enqueue rather than as a
     synchronous walk.
+
+    The watch lane also runs as soon as a whole-library walk's seed has committed,
+    handed the walk's beat, which it awaits with each commit and beat of its own so
+    the walk is not taken for dead while it waits on the watch lane.
+
+    A walk refused because another is alive defers the job, and the queue tries it again.
     """
 
     async def handle(job: Job) -> None:
@@ -254,8 +260,19 @@ def sync_handler(
             )
             return
         try:
-            await reconcile.reconcile(source, lane, adapter)
-            await watch.sync(source, adapter, user_id=user_id)
+            run = await reconcile.reconcile(
+                source,
+                lane,
+                adapter,
+                after_seed=lambda beat: watch.sync(source, adapter, user_id=user_id, beat=beat),
+            )
+        except WalkRefused as exc:
+            # Not a failure: `JobWorker` defers the job without spending an attempt, so a
+            # long walk never parks it, and tries it again no sooner than `STALE_AFTER`, by
+            # when a walk whose process died has gone stale and the retry resumes it.
+            raise JobDeferred(str(exc), retry_after=STALE_AFTER.total_seconds()) from exc
+        else:
+            await watch.sync(source, adapter, user_id=user_id, since_at_most=run.started_at)
         finally:
             await adapter.aclose()
 

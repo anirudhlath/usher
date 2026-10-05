@@ -1,7 +1,7 @@
 """Pipeline spans, under a real FastAPI server span."""
 
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from datetime import UTC, datetime
 from typing import Annotated
 
@@ -25,14 +25,21 @@ from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
 from usher.domain.source import Source
 from usher.domain.sync import SyncRunKind
-from usher.ports.source import SourceItem, SourceItemKind
+from usher.ports.source import (
+    WHOLE_LIBRARY,
+    SourceItem,
+    SourceItemKind,
+    UnitPage,
+    WalkPlan,
+    pages_of,
+)
 from usher.services.rows import ROW_PROVIDERS
 
 _SERVER_SPAN = "GET /_probe/sync"
 
 
 class _Adapter:
-    """The smallest `list_items` `ReconcileService` uses, with no network.
+    """The smallest `list_items`, `plan_walk` and `list_unit` `ReconcileService` uses, no network.
 
     `tests/integration/test_services_reconcile.py` uses the same shape and
     for the same reason: `FakeSourceAdapter` carries a session model and a
@@ -48,6 +55,12 @@ class _Adapter:
     async def _walk(self) -> AsyncIterator[SourceItem]:
         for item in self._items:
             yield item
+
+    async def plan_walk(self) -> WalkPlan:
+        return WHOLE_LIBRARY
+
+    def list_unit(self, key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage]:
+        return pages_of(self._walk(), start_index=start_index)
 
 
 def _movie(external_id: str) -> SourceItem:

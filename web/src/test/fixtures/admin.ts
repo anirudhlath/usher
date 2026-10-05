@@ -67,7 +67,8 @@ export const sources: SourceResponse[] = [sourceLivingRoom, sourceUnreachable]
 
 /**
  * Reachable, authenticated, pushing — and holding an administrator session,
- * which the UI must warn about rather than celebrate.
+ * which the UI must warn about rather than celebrate. `last_sync` is a
+ * whole-library walk part-way through its episodes.
  */
 export const sourceStatusHealthy: SourceStatusResponse = {
   reachable: true,
@@ -76,12 +77,29 @@ export const sourceStatusHealthy: SourceStatusResponse = {
   is_administrator: true,
   server_version: '4.9.5.0',
   detail: null,
+  last_sync: {
+    kind: 'full',
+    status: 'running',
+    started_at: '2026-10-01T03:00:00Z',
+    finished_at: null,
+    heartbeat_at: '2026-10-01T03:41:12Z',
+    items_seen: 412000,
+    items_matched: 398211,
+    items_unmatched: 13789,
+    items_retracted: 0,
+    error: null,
+    stage: 'episodes',
+    units_done: 9,
+    units_total: 14,
+    items_expected: 1130000,
+  },
 }
 
 /**
  * Unreachable. The three booleans that depend on reaching the server are
  * `null` — never asked — rather than `false`, which would claim we asked and
  * the answer was no. `detail` is the server's own words and is shown verbatim.
+ * `last_sync` is `null`: nothing has walked this source.
  */
 export const sourceStatusUnreachable: SourceStatusResponse = {
   reachable: false,
@@ -90,6 +108,7 @@ export const sourceStatusUnreachable: SourceStatusResponse = {
   is_administrator: null,
   server_version: null,
   detail: 'Connection refused after 5.0 s (http://192.168.50.61:8096/System/Info)',
+  last_sync: null,
 }
 
 /** 202. `kind` is the queue's own vocabulary; `key` is what coalescing keys on. */

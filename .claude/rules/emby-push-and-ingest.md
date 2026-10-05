@@ -18,6 +18,9 @@ paths:
 Beside it `EmbyPushChannel` → `PushSupervisor` → `PushApplyService` run the
 websocket, and `WatchWriteService` the client's own writes back out.
 
+A whole-library walk's walkers only fetch; the reconcile task is the one writer,
+because `AsyncSession` is not safe to share between tasks.
+
 ## Commands
 
 ```bash
@@ -58,8 +61,7 @@ says nothing about a source left out of step by a parked write-back.
 - 🔴 **The write-back route is `POST /Users/{user}/Items/{item}/UserData`** with
   a JSON body (204). The session-scoped `PlayingItems/{item}/Progress` and
   `Sessions/Playing/Progress` answer **400**, keying off a play session Usher
-  never has — and `FakeEmbyServer` implemented the adapter's own guess, so the
-  whole contract suite passed against a write-back that had never worked.
+  never has.
 - **That body must name `Played` even when `Played` is not what is changing** —
   it takes the DTO default and a position-only body unplays a played item.
   (`PlayCount` and `LastPlayedDate` survive the same omission.)
@@ -99,13 +101,11 @@ says nothing about a source left out of step by a parked write-back.
   library, whose frames are `Sessions` mapping to none. `_streak` compares
   `push_messages_received` across a connection, so N empty stale-outs in a row
   still park it: N stale limits of unbroken silence is what reads as broken.
-  Seeing any of this needs a fake with an **unbounded** supply of connections.
 - **`ItemsRemoved` fires on a library from which nothing was removed**, so count
   it and retract nothing on it, or one refresh marks a present file unavailable.
 - **A dropped socket raises `PortUnavailable` rather than hanging, and Emby
   re-delivers nothing**, so **the gap-closing delta is the only cover there
-  is**; no real `429` has ever been seen. Do not let the queue fill during that
-  walk.
+  is**. Do not let the queue fill during that walk.
 - 🔒 **`socket_logger()`'s level is the token defence; `configure_logging` is
   what it defends against** — that sets `propagate = True` on every existing
   logger and a root handler at level 0, so at `DEBUG` the `websockets` URL logs
@@ -125,8 +125,11 @@ delta, permanently.
 runs `watch.sync(...)`** (#41): a source with completed delta runs and no
 completed `watch_state` run passes it and runs the watch lane's first walk, two
 filtered listings (`FIRST_WALK_FILTERS`), and **neither log line names it**.
-An unfinished first walk is superseded, never resumed (`SUPERSEDED_ERROR`):
-`save` only raises `position`, so its row cannot be reset.
+An unfinished first walk is superseded, never resumed
+(`watch_sync.SUPERSEDED_ERROR`): `save` only raises `position`, so its row
+cannot be reset. A `running` watch run whose heartbeat is under `STALE_AFTER`
+old is alive, first walk or delta, and is left alone: the next run walks beside
+it.
 
 ## The match ladder
 
@@ -143,8 +146,7 @@ job is enqueued at `BACKFILL` for that remote search.
   job**, and `IngestService` attaches it as `MatchMethod.SERIES_PARENT`.
 - **Tier 4 is not the fallback its position suggests** — name+year out-resolves
   the `tmdb_id` tier on a real library, most catalog titles carrying no
-  `tmdb_id`. A probe with **no** year resolves nothing at all: the year
-  `BETWEEN` propagates `NULL`, so "0.0%" there is not a bug.
+  `tmdb_id`.
 - **A malformed `ProviderIds.Imdb` is real** (bare digits, no `tt`), and
   **`_as_imdb` is the guard, not `_usable_ids`**: removing the latter's filtering
   raises nothing, while dropping `_as_imdb`'s pattern check raises a
@@ -183,6 +185,8 @@ job is enqueued at `BACKFILL` for that remote search.
   instant is later than `run.started_at`, so the sweep still spares everything and
   no retraction test fails; what breaks is the column's meaning. **Assert
   `stored.last_seen_at == run.started_at`.**
+- **A resumed whole-library walk keeps its run's `started_at`**: every item an
+  earlier attempt saw carries that instant, and a fresh one retracts them all.
 - **An episode's `MediaItem` carries two ids and its `WatchState` may carry one**
   (`num_nonnulls(title_id, episode_id) = 1`), so `_watch_target` collapses the
   pair with the episode winning: passing both raises `PortDataMalformed` and
@@ -191,8 +195,7 @@ job is enqueued at `BACKFILL` for that remote search.
 - **A history backfill must carry its own fresh `observed_at`, and both test
   layers are blind to why.** The trigger stamps the *write* instant, so a backfill
   carrying the walk's instant is refused by the row it exists to repair; the fake
-  accepts what Postgres refuses and `now()` is frozen per transaction, so the
-  integration suite stages it with `clock_timestamp()` in a raw `INSERT`.
+  accepts what Postgres refuses and `now()` is frozen per transaction.
   **Skipping `resolve_seasons`/`resolve_episodes`** is the same shape: unit cases
   stay green — a dict has no foreign keys — and the FK fails on walk two.
 

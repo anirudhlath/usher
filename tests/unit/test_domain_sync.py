@@ -6,7 +6,16 @@ import pytest
 from pydantic import ValidationError
 
 from usher.domain.ids import new_id
-from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus
+from usher.domain.sync import (
+    STAGE_ORDER,
+    SyncRun,
+    SyncRunKind,
+    SyncRunStatus,
+    SyncRunUnit,
+    SyncRunUnitStatus,
+    WalkStage,
+    walk_progress,
+)
 
 SOURCE_ID = new_id()
 
@@ -111,3 +120,116 @@ def test_a_run_starts_at_position_zero_and_refuses_a_negative_one() -> None:
 
     with pytest.raises(ValidationError):
         one.evolve(position=-1)
+
+
+def test_a_whole_library_walk_runs_its_stages_seed_then_titles_then_episodes() -> None:
+    """The stage barrier's order, and every stage has a place in it.
+
+    A stage missing from the order is a stage whose units are never walked.
+    """
+    assert STAGE_ORDER == (WalkStage.SEED, WalkStage.TITLES, WalkStage.EPISODES)
+    assert set(STAGE_ORDER) == set(WalkStage)
+
+
+def test_a_unit_starts_pending_at_position_zero() -> None:
+    unit = SyncRunUnit(run_id=new_id(), unit_key="all", stage=WalkStage.TITLES, label="all")
+    assert (unit.status, unit.position, unit.items_seen) == (SyncRunUnitStatus.PENDING, 0, 0)
+    assert unit.expected_items is None
+
+
+@pytest.mark.parametrize(
+    "changes", [{"unit_key": ""}, {"position": -1}, {"items_seen": -1}, {"expected_items": -1}]
+)
+def test_a_unit_refuses_an_empty_key_and_negative_counts(changes: dict[str, object]) -> None:
+    fields: dict[str, object] = {
+        "run_id": new_id(),
+        "unit_key": "all",
+        "stage": WalkStage.TITLES,
+        "label": "all",
+    }
+    with pytest.raises(ValidationError):
+        SyncRunUnit.model_validate(fields | changes)
+
+
+def test_a_run_has_no_heartbeat_until_a_writer_gives_it_one() -> None:
+    assert SyncRun(source_id=SOURCE_ID, kind=SyncRunKind.FULL).heartbeat_at is None
+
+
+# -- where a whole-library walk's plan stands --------------------------------
+
+_RUN = new_id()
+
+
+def _unit(
+    key: str,
+    stage: WalkStage,
+    status: SyncRunUnitStatus = SyncRunUnitStatus.PENDING,
+    expected_items: int | None = None,
+) -> SyncRunUnit:
+    return SyncRunUnit(
+        run_id=_RUN,
+        unit_key=key,
+        stage=stage,
+        label=key,
+        status=status,
+        expected_items=expected_items,
+    )
+
+
+def test_a_walk_without_units_has_no_progress() -> None:
+    assert walk_progress([]) is None
+
+
+def test_a_walk_stands_at_the_first_stage_still_holding_an_open_unit() -> None:
+    """In walking order: neither the list's order nor the stages' spelling decides it."""
+    units = [
+        _unit("episodes:a", WalkStage.EPISODES),
+        _unit("titles:a", WalkStage.TITLES, SyncRunUnitStatus.RUNNING),
+        _unit("titles:b", WalkStage.TITLES, SyncRunUnitStatus.COMPLETED),
+        _unit("seed", WalkStage.SEED, SyncRunUnitStatus.COMPLETED),
+    ]
+    assert min(WalkStage.EPISODES, WalkStage.TITLES) is WalkStage.EPISODES, (
+        "the premise: the stages' spelling alone would answer episodes"
+    )
+
+    progress = walk_progress(units)
+
+    assert progress is not None
+    assert (progress.stage, progress.units_done, progress.units_total) == (WalkStage.TITLES, 2, 4)
+
+
+@pytest.mark.parametrize(
+    ("stages", "last"),
+    [
+        ((WalkStage.SEED, WalkStage.TITLES), WalkStage.TITLES),
+        ((WalkStage.EPISODES, WalkStage.TITLES), WalkStage.EPISODES),
+    ],
+)
+def test_a_finished_walk_stands_at_the_last_stage_its_plan_has(
+    stages: tuple[WalkStage, ...], last: WalkStage
+) -> None:
+    """In walking order, and over the stages this plan has rather than every stage."""
+    units = [_unit(f"{stage.value}:a", stage, SyncRunUnitStatus.COMPLETED) for stage in stages]
+
+    progress = walk_progress(units)
+
+    assert progress is not None
+    assert (progress.stage, progress.units_done, progress.units_total) == (last, 2, 2)
+
+
+@pytest.mark.parametrize(
+    ("counts", "expected"), [((None, 4, 6), 10), ((None, 0), 0), ((None, None), None)]
+)
+def test_items_expected_sums_the_counts_the_plan_knew(
+    counts: tuple[int | None, ...], expected: int | None
+) -> None:
+    """A unit with no count adds nothing; a plan that knew none has no total, and zero is one."""
+    units = [
+        _unit(f"titles:{index}", WalkStage.TITLES, expected_items=count)
+        for index, count in enumerate(counts)
+    ]
+
+    progress = walk_progress(units)
+
+    assert progress is not None
+    assert progress.items_expected == expected

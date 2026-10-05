@@ -32,6 +32,12 @@ couples the two.** The endpoint requires `prompt_tokens + llm_max_output_tokens
 the failure arrives as a parked job rather than as a startup refusal: no setting
 knows `max_model_len`.
 
+**`USHER_SYNC_WALKERS` is how many units a whole-library walk fetches at once,
+and the cap on listing requests in flight to a source** (default 4; 1 is one at
+a time); the cap backs off by itself. **`USHER_SYNC_UNIT_MAX_ITEMS`** (default
+100,000) is the size of the episode chunks such a walk splits a library into
+([03](03-sources-and-sync.md#walking-the-library)).
+
 Two things are **not** settings:
 
 - **Concurrency per lane.** `USHER_JOB_CONCURRENCY` is the worker's global
@@ -202,6 +208,9 @@ A Postgres-backed queue.
   `PortDataMalformed` means the upstream answered and the answer was wrong.
 - **Poison threshold** — after `job_max_attempts` attempts a job is *parked*
   with its error, not retried forever and not silently dropped.
+- **A deferred job spends no attempt and never parks.** A sync refused because
+  another walk of its source is still alive is tried again 10 minutes later,
+  however many times that takes.
 - **Work that has become impossible *completes*, and does not park.** A job
   naming an item its source has since deleted, or one no configured source
   addresses, completes. A job whose *key* is unparseable parks.

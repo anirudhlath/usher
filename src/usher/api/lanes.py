@@ -446,11 +446,15 @@ class LaneSupervisor:
                 SyncRunKind.DELTA,
                 adapter,
                 max_items=self._settings.push_gap_max_items,
+                # One stream, even unbounded and with no cursor: PRD 03 keeps the
+                # gap-closer off the planned walk.
+                plan=False,
             )
             # Unconditionally, after a bounded item walk as much as a whole one.
-            # `reconcile` never raises, so a truncated walk arrives as a returned
-            # `FAILED` run rather than as control flow, and the watch lane must
-            # still run -- a different lane with a different cursor.
+            # `reconcile` never raises here: with `plan=False` it claims no run, so
+            # nothing refuses it. A truncated walk arrives as a returned `FAILED` run
+            # rather than as control flow, and the watch lane must still run -- a
+            # different lane with a different cursor.
             await pipeline.watch.sync(source, adapter, user_id=await self._user_id())
 
     async def _write_push_available(self, source: Source, available: bool) -> None:

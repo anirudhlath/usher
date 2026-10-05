@@ -387,6 +387,81 @@ class JobQueueContract:
         assert job.attempts == 1
         assert job.run_after is None
 
+    async def test_a_deferred_job_waits_without_spending_an_attempt(
+        self, queue: JobQueue, clear_backoff: ClearBackoff
+    ) -> None:
+        """Work that could not start yet, though nothing failed.
+
+        Back to `pending` at the same count with its reason recorded, and held back for
+        the whole wait. Claimable again once the wait is cleared, which is what stops a
+        job no claim could ever take from passing the first half.
+        """
+        await queue.enqueue([JobRequest(kind=JobKind.ENRICH, key="t1", priority=JobPriority.NEW)])
+        claimed = await queue.claim([JobKind.ENRICH])
+        before = datetime.now(UTC)
+        job = await queue.defer(
+            claimed[0].id, reason="a walk is already running", run_after_seconds=600.0
+        )
+        assert job is not None
+        assert job.status is JobStatus.PENDING
+        assert job.attempts == 0, "a deferral spent an attempt"
+        assert job.last_error == "a walk is already running"
+        assert job.run_after is not None
+        assert job.run_after >= before + timedelta(seconds=600), (
+            f"deferred only {job.run_after - before} against a 600 s wait"
+        )
+        assert await queue.claim([JobKind.ENRICH]) == []
+        await clear_backoff()
+        assert [job.key for job in await queue.claim([JobKind.ENRICH])] == ["t1"]
+
+    async def test_a_deferral_never_parks_a_job_one_attempt_short_of_the_ceiling(
+        self, queue: JobQueue, clear_backoff: ClearBackoff
+    ) -> None:
+        """One more failure would park this job, and a deferral is not a failure.
+
+        However often it is deferred -- a long walk refusing every try -- only its
+        failures count toward parking it.
+        """
+        await queue.enqueue([JobRequest(kind=JobKind.ENRICH, key="t1", priority=JobPriority.NEW)])
+        for _ in range(self.max_attempts - 1):
+            claimed = await queue.claim([JobKind.ENRICH])
+            await queue.fail(claimed[0].id, error="upstream said no", retryable=True)
+            await clear_backoff()
+        claimed = await queue.claim([JobKind.ENRICH])
+        assert claimed[0].attempts == self.max_attempts - 1, "the premise: one failure short"
+        job = await queue.defer(claimed[0].id, reason="not yet", run_after_seconds=600.0)
+        assert job is not None
+        assert (job.status, job.attempts) == (JobStatus.PENDING, self.max_attempts - 1)
+        assert await queue.parked() == []
+
+    async def test_deferring_an_unknown_job_returns_none(self, queue: JobQueue) -> None:
+        """A worker whose claim a restart requeued out from under it: `None`, not a raise."""
+        assert await queue.defer(uuid.uuid4(), reason="gone", run_after_seconds=600.0) is None
+
+    async def test_deferring_a_parked_job_leaves_it_parked(self, queue: JobQueue) -> None:
+        """A deferral that arrives after another worker parked the job moves nothing.
+
+        `None`, as for an unknown id, and still parked with its own error: un-parking
+        poison is the failure parking exists to end.
+        """
+        await queue.enqueue([JobRequest(kind=JobKind.ENRICH, key="t1", priority=JobPriority.NEW)])
+        claimed = await queue.claim([JobKind.ENRICH])
+        await queue.fail(claimed[0].id, error="TMDb returned a list", retryable=False)
+        assert await queue.defer(claimed[0].id, reason="not yet", run_after_seconds=600.0) is None
+        assert [(job.key, job.last_error) for job in await queue.parked()] == [
+            ("t1", "TMDb returned a list")
+        ]
+
+    async def test_a_negative_wait_never_dates_a_deferral_before_now(self, queue: JobQueue) -> None:
+        """Clamped at zero, as `fail` clamps its own hint."""
+        await queue.enqueue([JobRequest(kind=JobKind.ENRICH, key="t1", priority=JobPriority.NEW)])
+        claimed = await queue.claim([JobKind.ENRICH])
+        before = datetime.now(UTC)
+        job = await queue.defer(claimed[0].id, reason="not yet", run_after_seconds=-999.0)
+        assert job is not None
+        assert job.run_after is not None
+        assert job.run_after >= before, f"a -999 s wait dated it {before - job.run_after} early"
+
     async def test_a_parked_job_is_not_claimed(
         self, queue: JobQueue, clear_backoff: ClearBackoff
     ) -> None:

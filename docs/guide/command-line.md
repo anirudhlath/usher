@@ -113,7 +113,7 @@ Register a source through the admin API (see the
 usher sync                              # every enabled source, full walk
 usher sync --source "Living Room"       # one source, by name
 usher sync --kind delta                 # only what changed since the last completed walk
-usher sync-status                       # recent walks, queue depth, parked jobs
+usher sync-status                       # recent walks and their plans, queue depth, parked jobs
 ```
 
 - **A new source needs one `usher sync`.** Once the server is running, it keeps
@@ -121,10 +121,20 @@ usher sync-status                       # recent walks, queue depth, parked jobs
   what changed. A source that has never completed a walk has nothing to resume
   from, so the server logs a warning and waits for you rather than walking the
   whole library on its own. `USHER_PUSH_GAP_CLOSE` changes that behaviour.
-- **The watch-state walk follows the item walk.** Each watch state has to match
-  an item first.
-- **`usher sync` exits non-zero if any walk failed**, after it has tried every
-  source, so cron can notice.
+- **The watch-state walk follows the item walk**, because each watch state has
+  to match an item first. When it can, a walk of a whole library stores what
+  your account is watching first and runs the watch-state walk straight after,
+  so your own shelves fill long before the rest of the library has been read.
+- **`usher sync` exits non-zero if any walk failed or was refused**, after it
+  has tried every source, so cron can notice. A walk of a whole library is
+  refused while another of the same kind is still running for that source. An
+  interrupted one counts as running until it has been quiet for 10 minutes, and
+  the refusal says how long is left to wait.
+- **`usher sync-status` shows how far a large walk has got.** Under a walk of a
+  whole library it prints the stage being read, the pieces done of the pieces
+  planned, and how many items the plan expected.
+- **A walk of a whole library that stops part-way resumes.** The next walk of
+  the same kind continues where each piece stopped, rather than starting again.
 - **The retraction guard** refuses a walk that would mark more than
   `USHER_SYNC_MAX_RETRACT_FRACTION` (25%) of a source's items unavailable, and
   changes nothing. If you really did remove that much, run the walk with

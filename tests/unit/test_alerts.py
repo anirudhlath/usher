@@ -1178,8 +1178,8 @@ def test_every_rule_carries_a_window_a_severity_and_a_description_naming_its_ser
     None
 ):
     """PRD 10's alerts are pages, and a page has to land somewhere."""
-    assert len(_dashboard_three_panel_titles()) == 10, (
-        "Dashboard 3 has ten panels; this scan found "
+    assert len(_dashboard_three_panel_titles()) == 11, (
+        "Dashboard 3 has eleven panels; this scan found "
         f"{len(_dashboard_three_panel_titles())}: {sorted(_dashboard_three_panel_titles())}"
     )
     assert len(panel_titles(_DASHBOARD_FIVE)) == 8, (

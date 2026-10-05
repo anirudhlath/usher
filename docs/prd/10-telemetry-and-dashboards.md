@@ -31,7 +31,7 @@ Auto-instrumentation for FastAPI, SQLAlchemy and httpx, plus explicit spans on
 the pipeline:
 
 ```
-sync.reconcile                    ← one per SyncRun
+sync.reconcile                    ← one per walk attempt, a refused one included
 └── ingest.item                   ← one per batch
     └── match.title               ← the five-tier ladder, batched
 
@@ -106,7 +106,7 @@ control that does nothing.
 
 ### Metrics — OpenTelemetry → Prometheus
 
-**Every row is emitted today. 42 rows: 41 instruments Usher declares, plus one
+**Every row is emitted today. 44 rows: 43 instruments Usher declares, plus one
 `FastAPIInstrumentor` supplies.**
 
 | Metric | Type | Labels | Emitted |
@@ -129,10 +129,12 @@ control that does nothing.
 | `usher.match.result` | counter | method, confident | ✅ M4 |
 | `usher.sync.run.duration` | histogram | source, kind, status | ✅ M4 |
 | `usher.sync.retraction.fraction` | histogram | source, outcome | ✅ M10 |
+| `usher.sync.unit.duration` | histogram | source, stage | ✅ fast first sync |
 | `usher.watch_state.run.duration` | histogram | source, status | ✅ M4 |
 | `usher.watch_state.backfilled` | counter | source | ✅ M4 |
 | `usher.source.request.duration` | histogram | source, op | ✅ M3 |
 | `usher.source.throttle.wait` | histogram | source | ✅ M10 |
+| `usher.source.listing.concurrency` | gauge | source | ✅ fast first sync |
 | `usher.source.push.connected` | gauge | source | ✅ M5 |
 | `usher.source.push.reconnects` | counter | source | ✅ M5 |
 | `usher.source.push.events` | counter | source, kind | ✅ M5 |
@@ -153,6 +155,17 @@ control that does nothing.
 | `usher.scheduler.job.duration` | histogram | job | ✅ M10 |
 | `usher.scheduler.job.failures` | counter | job | ✅ M10 |
 | `usher.scheduler.job.due` | gauge | job | ✅ M10 |
+
+**`usher.source.listing.concurrency` is written after every listing page**, by
+the adapter that sent it, so an adapter that never lists leaves no reading. It
+reads `USHER_SYNC_WALKERS` while a walk is healthy, 1 straight after a failure,
+and climbs back a step per ten pages. Two walks of one source at once write one
+series.
+
+**`usher.sync.unit.duration` is seconds per unit of a whole-library walk**,
+from the moment a walker claims the unit to the unit's last commit, recorded
+once for each unit that completes; a unit that fails records nothing. `stage` is
+`seed`, `titles` or `episodes`.
 
 **The three scheduler rows.** `job` is the scheduled job's name, which is
 stable.
@@ -332,11 +345,13 @@ latency against the 5 s read-through target** · parked jobs · sync run outcome
 and duration · **push connection uptime and reconnect count** · **push events
 applied, by kind**, which separates "the lane is up" from "the lane is doing
 anything" · Emby request latency · TMDb requests/sec against the
-`USHER_TMDB_REQUESTS_PER_SECOND` ceiling, with 429 count.
+`USHER_TMDB_REQUESTS_PER_SECOND` ceiling, with 429 count · **whole-library
+walks: the listing limit and the mean unit duration, by stage**.
 
-✅ **Every panel here is backed by real data as of M9.** ⚠️ A panel that drains
-the whole unmatched queue should page with the keyset cursor; the `OFFSET` form
-is quadratic in queue depth.
+✅ **Every panel here is backed by real data as of M9, except the
+whole-library walk panel, which is unbacked until a planned walk runs against
+a real source.** ⚠️ A panel that drains the whole unmatched queue should page
+with the keyset cursor; the `OFFSET` form is quadratic in queue depth.
 
 ### 4 — Performance
 

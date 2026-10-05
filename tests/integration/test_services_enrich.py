@@ -67,6 +67,11 @@ class _ReadsOnItsOwnConnection(JobQueue):
     ) -> Job | None:
         raise NotImplementedError
 
+    async def defer(
+        self, job_id: uuid.UUID, *, reason: str, run_after_seconds: float
+    ) -> Job | None:
+        raise NotImplementedError
+
     async def touch(self, job_ids: Sequence[uuid.UUID]) -> int:
         raise NotImplementedError
 

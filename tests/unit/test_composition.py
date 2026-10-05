@@ -62,6 +62,7 @@ from usher.composition import (
     SourceRegistry,
     UnitOfWork,
     _worker_handlers,
+    adapter_factory,
     build_curation_service,
     build_enrich_service,
     build_pipeline,
@@ -72,6 +73,7 @@ from usher.composition import (
     metadata_provider,
     nothing,
     run_bootstrap,
+    source_gates,
     unit_of_work,
     worker_concurrency,
     worker_kinds,
@@ -3399,6 +3401,44 @@ def _gate_of(adapter: SourceAdapter, kind: SourceKind = SourceKind.EMBY) -> obje
     is an **identity** assertion.
     """
     return _GATE_READERS[kind](adapter)
+
+
+async def test_the_walker_setting_reaches_every_adapter_the_deployment_builds() -> None:
+    """`USHER_SYNC_WALKERS`, from `Settings` through `adapter_factory` to the listing limit.
+
+    The factory's own test hands it the value directly, so a composition root that
+    dropped it would leave every deployment on the adapter's default of four.
+    """
+    settings = _settings(sync_walkers=3)
+    adapter = adapter_factory(settings, source_gates(settings)).build(_GATED, _GATE_CREDENTIALS)
+    try:
+        assert isinstance(adapter, EmbyAdapter), "the premise: the factory built an Emby adapter"
+        assert adapter._listing_limit.limit == 3
+    finally:
+        await adapter.aclose()
+
+
+async def test_the_walk_settings_reach_the_reconciler_and_the_adapter() -> None:
+    """`USHER_SYNC_WALKERS` reaches `ReconcileService`, `USHER_SYNC_UNIT_MAX_ITEMS` the adapter.
+
+    `create_async_engine` does not connect, and nothing here issues a statement.
+    """
+    engine = create_async_engine("postgresql+asyncpg://usher:usher@127.0.0.1:1/usher")
+    try:
+        pipeline = build_pipeline(
+            AsyncSession(engine), _settings(sync_walkers=3, sync_unit_max_items=5_000)
+        )
+        assert pipeline.reconcile._walkers == 3
+        adapter = pipeline.adapters.build(_GATED, _GATE_CREDENTIALS)
+        try:
+            assert isinstance(adapter, EmbyAdapter), (
+                "the premise: the factory built an Emby adapter"
+            )
+            assert adapter._unit_max_items == 5_000
+        finally:
+            await adapter.aclose()
+    finally:
+        await engine.dispose()
 
 
 def _source_of(kind: SourceKind, name: str, ref: str) -> Source:

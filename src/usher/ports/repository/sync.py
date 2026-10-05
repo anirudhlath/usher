@@ -2,12 +2,14 @@
 
 import uuid
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from pydantic import AwareDatetime
 
-from usher.domain.sync import SyncRun, SyncRunKind
+from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus, SyncRunUnit, is_live
 
 __all__ = [
     "CachedPayload",
@@ -27,8 +29,9 @@ class SyncRunRepository(ABC):
     cleanly.
 
     `latest_incomplete_run` is the one affordance that reads against that
-    grain, and only for `WATCH_STATE`: it hands a walk back its own unfinished
-    row, which the next attempt continues in place when the walk is a delta.
+    grain: it hands the watch lane, or a whole-library walk, back its own
+    unfinished row, which the next attempt continues in place -- the watch
+    lane's only when its walk is a delta. `live_walk` reads it for a report.
     """
 
     @abstractmethod
@@ -66,22 +69,79 @@ class SyncRunRepository(ABC):
         """
 
     @abstractmethod
+    async def latest_run(self, source_id: uuid.UUID, kind: SyncRunKind) -> SyncRun | None:
+        """The newest run of this kind, whatever its status; `None` if there is none.
+
+        Newest by `started_at`, then by `id`, which is the order `list_for_source` uses.
+        """
+
+    @abstractmethod
+    async def latest_planned_run(self, source_id: uuid.UUID, kind: SyncRunKind) -> SyncRun | None:
+        """The newest run of this kind that carries a heartbeat, whatever its status.
+
+        `None` if none does. Newest by `started_at`, then by `id`, as `latest_run`. On
+        the item lanes only a planned walk carries a heartbeat, so a single walk's row
+        is never this read's answer.
+        """
+
     async def latest_incomplete_run(
-        self, source_id: uuid.UUID, kind: SyncRunKind
+        self, source_id: uuid.UUID, kind: SyncRunKind, *, planned: bool = False
     ) -> SyncRun | None:
         """The newest run of this kind, **iff it did not complete**.
 
         The walk a resumed run continues. `None` when the newest one
-        completed, and when there is none at all.
+        completed, and when there is none at all. With `planned`, the newest
+        is `latest_planned_run`'s, so on the item lanes a single walk's row is
+        never the answer, however new.
 
         "The newest, and only if it is not completed", never "the newest one
         that is not completed": the second hands back an old failure forever
         once a later run has completed, so every later walk resumes from a
         position that run already passed.
 
-        `WATCH_STATE` only. The item lanes restart from their cursor; this lane
-        resumes, so a long delta that fails costs a page rather than the run.
+        The watch lane's, and a whole-library walk's: a cursored delta restarts
+        from its cursor, but a walk of the whole library has to cost a page
+        rather than the run when it fails.
         """
+        read = self.latest_planned_run if planned else self.latest_run
+        newest = await read(source_id, kind)
+        # The newest row, and *then* the status test -- never "the newest that is not".
+        return None if newest is None or newest.status is SyncRunStatus.COMPLETED else newest
+
+    async def live_walk(self, source_id: uuid.UUID, now: datetime) -> SyncRun | None:
+        """The source's live whole-library walk, the newer if both item lanes have one.
+
+        Each item lane's `latest_incomplete_run(planned=True)`, kept if `is_live` at
+        `now`. A planned walk keeps its first `started_at` for hours, so newer rows stand
+        in front of it in any report of the newest; this is what finds it.
+        """
+        found: list[SyncRun] = []
+        for kind in (SyncRunKind.FULL, SyncRunKind.DELTA):
+            run = await self.latest_incomplete_run(source_id, kind, planned=True)
+            if run is not None and is_live(run, now):
+                found.append(run)
+        return max(found, key=lambda run: (run.started_at, run.id), default=None)
+
+    @abstractmethod
+    async def add_units(self, units: Sequence[SyncRunUnit]) -> None:
+        """Insert a whole-library walk's plan, all of it or none of it.
+
+        A unit whose key is already stored or repeats in the plan, or whose run does
+        not exist, raises `RepositoryConflict` and adds nothing. A plan that both names
+        a missing run and holds a stored or repeated key may raise on either constraint.
+        """
+
+    @abstractmethod
+    async def save_unit(self, unit: SyncRunUnit) -> None:
+        """Update one stored unit, under `save`'s two rules.
+
+        `position` never moves back, and a `completed` unit takes no further write.
+        An unknown `(run_id, unit_key)` raises `RepositoryNotFound`.
+        """
+
+    @abstractmethod
+    async def units_for(self, run_id: uuid.UUID) -> list[SyncRunUnit]:
+        """A run's units in `unit_key` order; empty for a run without a plan."""
 
     @abstractmethod
     async def list_for_source(self, source_id: uuid.UUID, *, limit: int = 20) -> list[SyncRun]:

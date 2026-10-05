@@ -7,7 +7,7 @@ import re
 import sys
 import time
 import uuid
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -54,7 +54,7 @@ from usher.domain.bootstrap import BootstrapPhase
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.source import Source
-from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus
+from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus, WalkProgress, walk_progress
 from usher.eval.errors import EvalDependencyMissing
 from usher.eval.goldens.suggest import GATE_SEED
 from usher.ports.errors import (
@@ -83,12 +83,13 @@ from usher.services.curation_validate import DropReason
 from usher.services.genres import GenreNormalisationService
 from usher.services.home import ComposeReport, HomeService
 from usher.services.jobs import JobWorker, WorkerLoop
-from usher.services.reconcile import RETRACTION_ERROR_CODE
+from usher.services.reconcile import RETRACTION_ERROR_CODE, AfterSeed, WalkRefused
 from usher.services.restore import RestoreRefused, RestoreReport, RestoreService
 from usher.services.rotation import RotationReport, RotationService
 from usher.services.rows import ROW_PROVIDERS, enabled_row_providers, row_provider_settings
 from usher.services.rows.cache import RowCache
 from usher.services.search import SearchAnswer, SemanticSearchUnavailable
+from usher.services.watch_sync import WatchStateSyncService
 from usher.telemetry import (
     configure_telemetry,
     register_queue_gauges,
@@ -298,7 +299,7 @@ async def _session_for(settings: Settings) -> AsyncIterator[AsyncSession]:
 async def _sync(
     settings: Settings, *, source_name: str | None, kind: str, allow_full_retraction: bool
 ) -> None:
-    """Walk each selected source: items first, then watch state."""
+    """Walk each selected source: items, then watch state, which also runs once a seed lands."""
     async with _session_for(settings) as session:
         pipeline = build_pipeline(
             session, settings, max_retract_fraction=1.0 if allow_full_retraction else None
@@ -310,6 +311,7 @@ async def _sync(
         user_id = await ensure_default_user(session)
         await session.commit()
         failed: list[SyncRun] = []
+        refused: list[str] = []
         for source in sources:
             adapter = await _open_adapter(pipeline, source)
             if adapter is None:
@@ -319,55 +321,112 @@ async def _sync(
                 # already documents: one adapter is one connection pool, and
                 # a walk that raises would otherwise leak it for the rest of
                 # the process.
-                run = await pipeline.reconcile.reconcile(source, SyncRunKind(kind), adapter)
+                hook = _watch_lane(pipeline.watch, source, adapter, user_id, failed)
+                run = await pipeline.reconcile.reconcile(
+                    source, SyncRunKind(kind), adapter, after_seed=hook
+                )
                 print(
                     f"{source.name}: {run.kind.value} {run.status.value} "
                     f"seen={run.items_seen} matched={run.items_matched} "
                     f"unmatched={run.items_unmatched} retracted={run.items_retracted}"
                     + (f" error={run.error}" if run.error else "")
                 )
-                watch = await pipeline.watch.sync(source, adapter, user_id=user_id)
-                print(
-                    f"{source.name}: watch_state {watch.status.value} "
-                    f"seen={watch.items_seen} merged={watch.items_matched} "
-                    f"unmatched={watch.items_unmatched}"
-                    + (f" error={watch.error}" if watch.error else "")
+                watch = await pipeline.watch.sync(
+                    source, adapter, user_id=user_id, since_at_most=run.started_at
                 )
+                print(_watch_line(source, watch))
+                # This run may have resumed the row the after-seed run failed, and it holds
+                # that row's last word: one row is counted once, and not at all if it completed.
+                failed[:] = [one for one in failed if one.id != watch.id]
                 failed.extend(one for one in (run, watch) if one.status is SyncRunStatus.FAILED)
+            except WalkRefused as exc:
+                # Another process is walking this source, and runs its watch lane after.
+                print(f"{source.name}: refused: {exc}")
+                refused.append(source.name)
             finally:
                 await adapter.aclose()
-        if failed:
-            raise SystemExit(_sync_failed(failed))
+        if failed or refused:
+            raise SystemExit(_sync_failed(failed, refused))
 
 
-def _sync_failed(runs: Sequence[SyncRun]) -> str:
-    """The exit line for a sync in which at least one run recorded `FAILED`.
+def _sync_failed(runs: Sequence[SyncRun], refused: Sequence[str] = ()) -> str:
+    """The exit line for a sync in which a run recorded `FAILED` or a walk was refused.
 
     The per-run detail is already on stdout above -- including each `error`,
-    which for a refusal is the two numbers and the ceiling. This says *which*
-    lanes failed and stops the command claiming success, rather than repeating
-    what was printed a line earlier.
+    which for a sweep refusal is the two numbers and the ceiling. This says
+    *which* lanes failed and stops the command claiming success, rather than
+    repeating what was printed a line earlier. A walk is refused when another
+    process's walk of that source and kind is still alive.
 
-    **`--allow-full-retraction` is named only when a refusal is among them**,
-    and that is the whole reason `RETRACTION_ERROR_CODE` exists. It is the one
-    failure here an operator has a command for; a read timeout is not, and an
-    escape hatch offered for every failure is one people learn to paste
+    **`--allow-full-retraction` is named only when a sweep refusal is among
+    them**, and that is the whole reason `RETRACTION_ERROR_CODE` exists. It is
+    the one failure here an operator has a command for; a read timeout is not,
+    and an escape hatch offered for every failure is one people learn to paste
     without reading. `error_code` is what is matched rather than the refusal's
     English, because that sentence is built from three numbers in
     `ports/ingest.py` and is a standing candidate for rewording.
     """
-    lanes = ", ".join(f"{one.kind.value}" for one in runs)
-    line = f"{len(runs)} sync run(s) failed: {lanes}; see the lines above and `usher sync-status`"
+    lines: list[str] = []
+    if runs:
+        lanes = ", ".join(f"{one.kind.value}" for one in runs)
+        lines.append(
+            f"{len(runs)} sync run(s) failed: {lanes}; see the lines above and `usher sync-status`"
+        )
+    if refused:
+        lines.append(
+            f"refused for {', '.join(refused)}: a whole-library walk of each counts as live; "
+            "the lines above say how soon a stopped one can be resumed"
+        )
     if any(one.error_code == RETRACTION_ERROR_CODE for one in runs):
-        line += (
-            "\nthe availability sweep refused: if the removal was intended, "
+        lines.append(
+            "the availability sweep refused: if the removal was intended, "
             "re-run with `usher sync --allow-full-retraction`"
         )
-    return line
+    return "\n".join(lines)
+
+
+def _watch_line(source: Source, watch: SyncRun) -> str:
+    """One watch-state run, as `usher sync` prints it."""
+    return (
+        f"{source.name}: watch_state {watch.status.value} "
+        f"seen={watch.items_seen} merged={watch.items_matched} "
+        f"unmatched={watch.items_unmatched}" + (f" error={watch.error}" if watch.error else "")
+    )
+
+
+def _watch_lane(
+    watch: WatchStateSyncService,
+    source: Source,
+    adapter: SourceAdapter,
+    user_id: uuid.UUID,
+    failed: list[SyncRun],
+) -> AfterSeed:
+    """The watch lane as a walk's `after_seed`, printed and kept like the run after the walk.
+
+    The walk's beat goes on to `watch.sync`, which awaits it with each commit and beat of
+    its own, so the walk's heartbeat keeps moving while the watch lane runs.
+    """
+
+    async def run(beat: Callable[[], Awaitable[None]]) -> None:
+        watched = await watch.sync(source, adapter, user_id=user_id, beat=beat)
+        print(_watch_line(source, watched))
+        if watched.status is SyncRunStatus.FAILED:
+            failed.append(watched)
+
+    return run
+
+
+def _plan_line(walk: WalkProgress) -> str:
+    """Where a whole-library walk's plan stands, as `sync-status` prints it under its run."""
+    expected = "unknown" if walk.items_expected is None else str(walk.items_expected)
+    return (
+        f"{'':<24} plan: stage={walk.stage.value} "
+        f"units={walk.units_done}/{walk.units_total} expected={expected}"
+    )
 
 
 async def _sync_status(settings: Settings) -> None:
-    """Every source's recent runs, plus queue depth and parked count.
+    """Every source's recent runs and live walk, their plans, queue depth and parked count.
 
     Must work against an empty database: a command an operator can only run
     *after* a successful sync is no use for diagnosing why the sync did not
@@ -382,6 +441,11 @@ async def _sync_status(settings: Settings) -> None:
             if not runs:
                 report.append(f"{source.name}: no sync has been run yet")
                 continue
+            # A live walk keeps its first `started_at` for hours, so newer runs can push it
+            # out of the five; it is listed after them.
+            live = await pipeline.runs.live_walk(source.id, datetime.now(UTC))
+            if live is not None and live.id not in {run.id for run in runs}:
+                runs.append(live)
             for run in runs:
                 report.append(
                     f"{source.name:<24} {run.kind.value:<12} {run.status.value:<10} "
@@ -389,6 +453,9 @@ async def _sync_status(settings: Settings) -> None:
                     f"unmatched={run.items_unmatched} retracted={run.items_retracted}"
                     + (f" error={run.error}" if run.error else "")
                 )
+                walk = walk_progress(await pipeline.runs.units_for(run.id))
+                if walk is not None:
+                    report.append(_plan_line(walk))
         depth = await pipeline.queue.depth()
         parked = await pipeline.queue.parked(limit=1000)
     if not sources:

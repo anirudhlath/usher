@@ -8,6 +8,37 @@ Versioning is `0.x` while the wire contract may still move —
 
 ## [Unreleased]
 
+### Added
+
+- Listing requests to a source are capped at `USHER_SYNC_WALKERS` (default 4)
+  and back off on their own: an outage or a 429 drops the cap to one,
+  and every ten pages that succeed raise it by one. The gauge
+  `usher.source.listing.concurrency` shows the cap.
+- A whole-library walk — a full sync, or a source's first delta — walks a plan:
+  what the account is watching, then each library's movies and series, then its
+  episodes in chunks of `USHER_SYNC_UNIT_MAX_ITEMS` (default 100,000).
+  `USHER_SYNC_WALKERS` units are fetched at once while one writer commits them;
+  each unit's position is kept in `sync_run_units`, and the run's
+  `heartbeat_at` shows the writer is alive.
+- A whole-library walk that fails or is killed resumes where it stopped: the
+  same run, each unit from the position it committed. While one is alive — its
+  heartbeat under 10 minutes old — a second is refused, saying how long until
+  one whose process stopped can be resumed: `usher sync` exits non-zero, and a
+  worker job is deferred 10 minutes, spending none of its attempts. A
+  watch-state walk started while another is alive runs beside it instead of
+  closing or resuming the other's run.
+- The watch lane runs as soon as a whole-library walk has stored what the
+  account is watching — played, in progress and next up — so a household's own
+  shelves fill long before the walk ends. It still runs after the walk.
+- `GET /admin/sources/{id}/status` carries `last_sync`: the source's live
+  whole-library walk if it has one, and otherwise its newest full or delta
+  walk. It, every `sync.progress` frame and `usher sync-status` say where a
+  whole-library walk's plan stands: the stage being walked, units done of
+  units planned, and the items the plan expected. `usher sync-status` lists a
+  live whole-library walk even when newer runs push it out of the five it
+  shows. A histogram, `usher.sync.unit.duration`, and a new Dashboard 3 panel
+  show how long each unit takes beside the listing limit's backoff.
+
 ### Changed
 
 - **`USHER_SOURCE_PAGE_SIZE` defaults to 1,000, up from 200.** A page of 1,000
