@@ -259,7 +259,11 @@ with its own cursor.
 **A watch-lane delta is resumable.** A run checkpoints its position on
 `sync_runs.position`, and the next attempt reclaims that same row and resumes
 there, so a failure that outlasts a page's retries costs the page in flight
-rather than the whole walk. **Until a source has completed one `watch_state`
+rather than the whole walk. The run after a whole-library walk resumes a delta
+only when its cursor is at or before the instant the walk began; otherwise it
+starts afresh from that instant, and the delta, if still `running` and not
+alive (below), is closed `failed` with `superseded: a watch delta restarts from
+an earlier cursor`. **Until a source has completed one `watch_state`
 run, its watch lane has no cursor**, and its next run asks the source only for
 what the account has played or holds a resume position in — two filtered
 listings, a few requests on most libraries — and merges nothing else. That

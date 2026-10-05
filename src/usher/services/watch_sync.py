@@ -35,6 +35,9 @@ _backfilled = _meter.create_counter(
 # grepping `sync_runs.error` read the same words.
 SUPERSEDED_ERROR = "superseded: a first watch walk restarts"
 
+# What a superseded delta's row says: it restarts to read from before its own cursor.
+DELTA_SUPERSEDED_ERROR = "superseded: a watch delta restarts from an earlier cursor"
+
 
 def _now() -> datetime:
     return datetime.now(UTC)
@@ -117,6 +120,21 @@ class _Progress:
         self.run = run
 
 
+def _superseding(run: SyncRun, since_at_most: AwareDatetime | None) -> str | None:
+    """Why an unfinished watch run is closed rather than resumed, or `None` to resume it.
+
+    A first walk is a few hundred states, so its position means nothing to the next
+    one, and an old-style walk's 300,000 would skip its whole played listing. A delta
+    whose cursor is later than `since_at_most` cannot read from that instant: its
+    position counts into its own cursor's stream.
+    """
+    if run.cursor_at is None:
+        return SUPERSEDED_ERROR
+    if since_at_most is not None and run.cursor_at > since_at_most:
+        return DELTA_SUPERSEDED_ERROR
+    return None
+
+
 def _watch_target(target: MediaItemTarget) -> MediaItemTarget | None:
     """What a `MediaItem` is matched to, collapsed to what a watch state carries.
 
@@ -178,7 +196,8 @@ class WatchStateSyncService:
         """Walk this source's watch state into the catalog.
 
         A fresh delta reads from `since_at_most` when that is earlier than its own
-        cursor, so a caller can cover what its item walk stored after this lane's
+        cursor, and an unfinished delta whose cursor is later is closed rather than
+        resumed, so a caller can cover what its item walk stored after this lane's
         last run began. `beat` is awaited after each batch this walk commits and each
         beat of its own heartbeat, due `heartbeat_seconds` after its last commit or beat,
         so a caller whose own run waits on this walk can keep that run's heartbeat moving,
@@ -207,8 +226,8 @@ class WatchStateSyncService:
                 # one key under one conflict rule. A row with no heartbeat predates
                 # heartbeats, and is taken for dead.
                 incomplete = None
-            if incomplete is not None and incomplete.cursor_at is None:
-                await self._supersede(incomplete, attempt_started)
+            if incomplete is not None and (error := _superseding(incomplete, since_at_most)):
+                await self._supersede(incomplete, attempt_started, error)
                 incomplete = None
             if incomplete is None:
                 cursor = await self._runs.latest_completed_cursor(
@@ -347,17 +366,15 @@ class WatchStateSyncService:
                 recovered += 1
         return recovered
 
-    async def _supersede(self, run: SyncRun, now: AwareDatetime) -> None:
-        """Close an unfinished first walk instead of resuming it.
+    async def _supersede(self, run: SyncRun, now: AwareDatetime, error: str) -> None:
+        """Close an unfinished run instead of resuming it, with `error` saying why.
 
-        A first walk is a few hundred states, so its position means nothing to the
-        next one, and an old-style walk's 300,000 would skip its whole played
-        listing. `save` only ever raises `position`, so the row is closed rather
-        than reset. One already `FAILED` is closed already, and keeps its own error.
+        `save` only ever raises `position`, so the row is closed rather than reset.
+        One already `FAILED` is closed already, and keeps its own error.
         """
         if run.status is SyncRunStatus.RUNNING:
             await self._runs.save(
-                run.evolve(status=SyncRunStatus.FAILED, error=SUPERSEDED_ERROR, finished_at=now)
+                run.evolve(status=SyncRunStatus.FAILED, error=error, finished_at=now)
             )
 
     async def _walk(

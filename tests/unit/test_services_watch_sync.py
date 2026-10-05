@@ -1770,30 +1770,56 @@ async def test_since_at_most_leaves_a_first_walk_without_a_cursor(fixture: _Fixt
 
 
 async def test_since_at_most_leaves_a_resumed_deltas_cursor_alone(fixture: _Fixture) -> None:
-    """Its position counts into the stream its own cursor selects.
+    """A delta whose cursor is at `since_at_most` already reads from that instant.
 
-    The row keeps its `cursor_at` whatever the walk reads from, so what is
-    asserted is the walk: a state changed before that cursor stays unread.
+    So it resumes in place: its own row, its own cursor and its own position.
     """
     resumed_from = datetime(2026, 9, 2, tzinfo=UTC)
-    await fixture.given_matched("movie-1", changed_at=resumed_from - timedelta(hours=12))
-    fixture.adapter.seed_state(
-        SourceWatchState(external_id="movie-1", position_seconds=640, played=False)
-    )
     failed = SyncRun(
         source_id=fixture.source.id,
         kind=SyncRunKind.WATCH_STATE,
         status=SyncRunStatus.FAILED,
         cursor_at=resumed_from,
+        position=1,
+        items_seen=1,
         started_at=resumed_from + timedelta(days=1),
         finished_at=resumed_from + timedelta(days=1),
     )
     await fixture.runs.add(failed)
     run = await fixture.service.sync(
-        fixture.source, fixture.adapter, user_id=fixture.user_id, since_at_most=T0
+        fixture.source, fixture.adapter, user_id=fixture.user_id, since_at_most=resumed_from
     )
-    assert (run.id, run.cursor_at) == (failed.id, resumed_from), "the premise: the delta resumed"
-    assert run.items_seen == 0, "the resumed walk read from a moved cursor"
+    assert (run.id, run.cursor_at) == (failed.id, resumed_from), "the delta did not resume"
+    assert fixture.adapter.resumed_from == [1]
+
+
+async def test_since_at_most_supersedes_a_delta_whose_cursor_is_later(fixture: _Fixture) -> None:
+    """Its position counts into its own cursor's stream, so it cannot be rewound in place.
+
+    Resumed, it would skip a state saved after the walk began and before that cursor.
+    It is closed instead, and a fresh delta reads from `since_at_most`.
+    """
+    walk_began = T0 - timedelta(days=1)
+    dead = await _given_watch_run(fixture, heartbeat_at=None)
+    await fixture.given_matched("movie-1", changed_at=walk_began + timedelta(hours=12))
+    fixture.adapter.seed_state(
+        SourceWatchState(external_id="movie-1", position_seconds=640, played=False)
+    )
+    assert dead.cursor_at is not None and dead.cursor_at > walk_began, "the premise: later"
+
+    run = await fixture.service.sync(
+        fixture.source, fixture.adapter, user_id=fixture.user_id, since_at_most=walk_began
+    )
+
+    assert run.id != dead.id, "the delta resumed from its later cursor"
+    assert (run.cursor_at, fixture.adapter.resumed_from) == (walk_began, [0])
+    assert run.items_seen == 1, "the state saved after the walk began was skipped"
+    closed = await fixture.runs.get(dead.id)
+    assert closed is not None
+    assert (closed.status, closed.error) == (
+        SyncRunStatus.FAILED,
+        "superseded: a watch delta restarts from an earlier cursor",
+    )
 
 
 # -- beat: a caller's run, waiting on this walk, kept alive by it ------------
