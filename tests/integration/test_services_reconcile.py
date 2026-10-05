@@ -453,6 +453,50 @@ async def test_a_failed_whole_library_walk_resumes_in_place_against_real_sql(
     assert (unit.status, unit.position, unit.items_seen) == (SyncRunUnitStatus.COMPLETED, 5, 5)
 
 
+async def test_a_failed_planned_delta_resumes_in_place_after_the_gap_closer_walks_against_real_sql(
+    service: ReconcileService,
+    runs: PostgresSyncRunRepository,
+    source: Source,
+    adapter: _Adapter,
+) -> None:
+    """The gap-closer's single walk of a source with no cursor writes the newest delta row.
+
+    That row has no heartbeat, and the planned delta's claim passes over it through the
+    real statement, to the failed walk it resumes.
+    """
+    for index in range(5):
+        adapter.items[f"m{index}"] = _item(f"m{index}")
+    adapter.fail_after = 3
+    first = await service.reconcile(source, SyncRunKind.DELTA, adapter)  # type: ignore[arg-type]
+    [unit] = await runs.units_for(first.id)
+    assert (first.status, unit.status, unit.position) == (
+        SyncRunStatus.FAILED,
+        SyncRunUnitStatus.FAILED,
+        2,
+    ), "the premise: a planned delta committed one page, then failed"
+    adapter.fail_after = None
+    gap = await service.reconcile(
+        source,
+        SyncRunKind.DELTA,
+        adapter,  # type: ignore[arg-type]
+        max_items=1,
+        plan=False,
+    )
+    assert (gap.status, gap.heartbeat_at) == (SyncRunStatus.FAILED, None), (
+        "the premise: the gap-closer left an unfinished single walk's row"
+    )
+    assert gap.started_at > first.started_at, "the premise: the gap-closer's row is the newer"
+
+    second = await service.reconcile(source, SyncRunKind.DELTA, adapter)  # type: ignore[arg-type]
+
+    assert second.id == first.id, "the planned delta restarted instead of resuming"
+    stored = await runs.get(first.id)
+    assert stored is not None
+    assert (stored.status, stored.items_seen) == (SyncRunStatus.COMPLETED, 5)
+    [unit] = await runs.units_for(first.id)
+    assert (unit.status, unit.position) == (SyncRunUnitStatus.COMPLETED, 5)
+
+
 async def test_a_run_that_failed_does_not_move_the_delta_cursor(
     service: ReconcileService,
     runs: PostgresSyncRunRepository,

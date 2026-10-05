@@ -48,6 +48,14 @@ ORDER BY started_at DESC, id DESC
 LIMIT 1
 """
 
+# `_NEWEST` among the runs that carry a heartbeat: on the item lanes, the planned walks.
+_NEWEST_PLANNED = """
+SELECT * FROM sync_runs
+WHERE source_id = :source_id AND kind = :kind AND heartbeat_at IS NOT NULL
+ORDER BY started_at DESC, id DESC
+LIMIT 1
+"""
+
 # `id` as a tiebreak so paging is stable: a source whose runs share a
 # `started_at` would otherwise show an operator the same run twice and hide
 # another.
@@ -170,11 +178,19 @@ class PostgresSyncRunRepository(SyncRunRepository):
         return found
 
     async def latest_run(self, source_id: uuid.UUID, kind: SyncRunKind) -> SyncRun | None:
+        return await self._newest(_NEWEST, source_id, kind)
+
+    async def latest_planned_run(self, source_id: uuid.UUID, kind: SyncRunKind) -> SyncRun | None:
+        return await self._newest(_NEWEST_PLANNED, source_id, kind)
+
+    async def _newest(
+        self, statement: str, source_id: uuid.UUID, kind: SyncRunKind
+    ) -> SyncRun | None:
         with self._session.no_autoflush:
             found = (
                 (
                     await self._session.execute(
-                        text(_NEWEST), {"source_id": source_id, "kind": kind.value}
+                        text(statement), {"source_id": source_id, "kind": kind.value}
                     )
                 )
                 .mappings()

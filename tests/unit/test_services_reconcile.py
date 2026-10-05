@@ -1762,6 +1762,62 @@ async def test_an_unfinished_delta_with_no_plan_is_left_alone() -> None:
     assert await fixture.runs.get(delta.id) == delta
 
 
+async def test_a_live_planned_delta_still_refuses_a_second_after_the_gap_closer_walks() -> None:
+    """The gap-closer's single walk adds a newer delta row, with no heartbeat and no units.
+
+    A delta's claim reads only planned walks, so that row neither hides the live walk
+    nor lets a second one start beside it.
+    """
+    fixture = _Fixture(clock=_Clock(NOW))
+    _shelve(fixture, "Films", range(2))
+    live = await _given_walk(
+        fixture,
+        heartbeat_at=NOW,
+        kind=SyncRunKind.DELTA,
+        units=[("Films", SyncRunUnitStatus.RUNNING, 1)],
+    )
+    gap = await fixture.service.reconcile(
+        fixture.source, SyncRunKind.DELTA, fixture.adapter, max_items=1, plan=False
+    )
+    assert gap.started_at > live.started_at, "the premise: the gap-closer's row is the newer"
+    assert (gap.status, gap.heartbeat_at) == (SyncRunStatus.FAILED, None), (
+        "the premise: the gap-closer left an unfinished single walk's row"
+    )
+
+    with pytest.raises(WalkRefused):
+        await fixture.service.reconcile(fixture.source, SyncRunKind.DELTA, fixture.adapter)
+
+    assert await fixture.runs.get(live.id) == live, "a refused walk wrote the live row"
+    listed = {run.id for run in await fixture.runs.list_for_source(fixture.source.id)}
+    assert listed == {live.id, gap.id}, "a second walk started beside the live one"
+
+
+async def test_a_failed_planned_delta_still_resumes_in_place_after_the_gap_closer_walks() -> None:
+    """Its unit failed at 2, and the walk after the gap-closer's continues it from 2."""
+    fixture = _Fixture(clock=_Clock(NOW))
+    _shelve(fixture, "Films", range(3))
+    failed = await _given_walk(
+        fixture,
+        heartbeat_at=NOW - timedelta(hours=1),
+        status=SyncRunStatus.FAILED,
+        kind=SyncRunKind.DELTA,
+        units=[("Films", SyncRunUnitStatus.FAILED, 2)],
+    )
+    gap = await fixture.service.reconcile(
+        fixture.source, SyncRunKind.DELTA, fixture.adapter, max_items=1, plan=False
+    )
+    assert gap.started_at > failed.started_at, "the premise: the gap-closer's row is the newer"
+    assert (gap.status, gap.heartbeat_at) == (SyncRunStatus.FAILED, None), (
+        "the premise: the gap-closer left an unfinished single walk's row"
+    )
+    fixture.adapter.unit_starts.clear()
+
+    run = await fixture.service.reconcile(fixture.source, SyncRunKind.DELTA, fixture.adapter)
+
+    assert (run.id, run.status) == (failed.id, SyncRunStatus.COMPLETED), "the walk restarted"
+    assert fixture.adapter.unit_starts == [("library:Films", 2)]
+
+
 async def test_a_walk_whose_sweep_was_refused_walks_again_rather_than_resuming() -> None:
     """Four rows the walk never saw are two thirds of the source, so the sweep refuses.
 

@@ -53,9 +53,20 @@ class FakeSyncRunRepository(SyncRunRepository):
         return max(run.started_at for run in completed)
 
     async def latest_run(self, source_id: uuid.UUID, kind: SyncRunKind) -> SyncRun | None:
-        # Newest by `(started_at, id)`, the Postgres arm's `ORDER BY`.
+        return self._newest(source_id, kind, planned=False)
+
+    async def latest_planned_run(self, source_id: uuid.UUID, kind: SyncRunKind) -> SyncRun | None:
+        return self._newest(source_id, kind, planned=True)
+
+    def _newest(self, source_id: uuid.UUID, kind: SyncRunKind, *, planned: bool) -> SyncRun | None:
+        # Newest by `(started_at, id)`, the Postgres arm's `ORDER BY`; `planned` is its
+        # `heartbeat_at IS NOT NULL`.
         found = [
-            one for one in self._runs.values() if one.source_id == source_id and one.kind is kind
+            one
+            for one in self._runs.values()
+            if one.source_id == source_id
+            and one.kind is kind
+            and (one.heartbeat_at is not None or not planned)
         ]
         return max(found, key=lambda one: (one.started_at, one.id)) if found else None
 

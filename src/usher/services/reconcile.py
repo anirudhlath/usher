@@ -367,17 +367,23 @@ class ReconcileService:
     async def _claim(self, source: Source, kind: SyncRunKind) -> SyncRun | None:
         """The unfinished whole-library walk this one resumes, or `None` for a fresh one.
 
+        A delta reads only planned walks, so a single walk's row -- the gap-closer's,
+        which walks a source with no cursor as one stream -- never stands in its way,
+        however new. A full walk reads its kind's newest row: no caller walks a full
+        walk as one stream, so that row is a planned walk's or one from before units.
+
         A `running` row whose heartbeat is under `STALE_AFTER` old is a live walk, and
         raises `WalkRefused`. A row with units resumes, unless its sweep was refused:
         its walk is what that refusal doubts, so the library is read again. Every
-        other unfinished row of a whole-library walk -- one that died before its plan
-        was stored, or a full walk from before units existed -- is superseded. A delta
-        with neither units nor a heartbeat is a single walk's, and is left alone.
+        other unfinished row read here -- one that died before its plan was stored,
+        or a full walk from before units existed -- is superseded.
 
         Not atomic: the check is a read and the claim a later write, with nothing
         locking between them, so two walks that start together can both proceed.
         """
-        newest = await self._runs.latest_incomplete_run(source.id, kind)
+        newest = await self._runs.latest_incomplete_run(
+            source.id, kind, planned=kind is SyncRunKind.DELTA
+        )
         if newest is None:
             return None
         if (
@@ -389,8 +395,7 @@ class ReconcileService:
         has_units = bool(await self._runs.units_for(newest.id))
         if has_units and newest.error_code != RETRACTION_ERROR_CODE:
             return newest
-        if has_units or newest.heartbeat_at is not None or kind is SyncRunKind.FULL:
-            await self._supersede(newest)
+        await self._supersede(newest)
         return None
 
     async def _supersede(self, run: SyncRun) -> None:

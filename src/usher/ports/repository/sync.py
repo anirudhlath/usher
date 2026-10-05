@@ -74,13 +74,24 @@ class SyncRunRepository(ABC):
         Newest by `started_at`, then by `id`, which is the order `list_for_source` uses.
         """
 
+    @abstractmethod
+    async def latest_planned_run(self, source_id: uuid.UUID, kind: SyncRunKind) -> SyncRun | None:
+        """The newest run of this kind that carries a heartbeat, whatever its status.
+
+        `None` if none does. Newest by `started_at`, then by `id`, as `latest_run`. On
+        the item lanes only a planned walk carries a heartbeat, so a single walk's row
+        is never this read's answer.
+        """
+
     async def latest_incomplete_run(
-        self, source_id: uuid.UUID, kind: SyncRunKind
+        self, source_id: uuid.UUID, kind: SyncRunKind, *, planned: bool = False
     ) -> SyncRun | None:
         """The newest run of this kind, **iff it did not complete**.
 
         The walk a resumed run continues. `None` when the newest one
-        completed, and when there is none at all.
+        completed, and when there is none at all. With `planned`, the newest
+        is `latest_planned_run`'s, so on the item lanes a single walk's row is
+        never the answer, however new.
 
         "The newest, and only if it is not completed", never "the newest one
         that is not completed": the second hands back an old failure forever
@@ -91,7 +102,8 @@ class SyncRunRepository(ABC):
         from its cursor, but a walk of the whole library has to cost a page
         rather than the run when it fails.
         """
-        newest = await self.latest_run(source_id, kind)
+        read = self.latest_planned_run if planned else self.latest_run
+        newest = await read(source_id, kind)
         # The newest row, and *then* the status test -- never "the newest that is not".
         return None if newest is None or newest.status is SyncRunStatus.COMPLETED else newest
 

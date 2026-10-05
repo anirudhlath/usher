@@ -212,7 +212,8 @@ spends none of its attempts, so it never parks, and tries again no sooner than
 A run whose sweep was refused is not resumed, and neither is one that stopped
 before its units were stored or a full run from before units existed: a fresh
 walk starts, and such a run left `running` is closed `failed` with `superseded:
-a whole-library walk restarts`.
+a whole-library walk restarts`. A delta's claim reads only planned walks, so the
+gap-closer's walk of a source with no cursor never stands in its way.
 
 **The watch lane runs as soon as the seed has committed.** When a
 whole-library walk's plan starts with what the account is watching, `usher
