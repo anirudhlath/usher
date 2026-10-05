@@ -45,6 +45,7 @@ from usher.services.matching import MatchService
 from usher.services.reconcile import (
     CEILING_ERROR_CODE,
     RETRACTION_ERROR_CODE,
+    STALE_AFTER,
     ReconcileService,
     WalkRefused,
     _recorded_failure,
@@ -1556,6 +1557,27 @@ async def test_a_running_walk_is_refused_until_its_heartbeat_is_ten_minutes_old(
     assert (run.id, run.status) == (walking.id, SyncRunStatus.COMPLETED)
     assert fixture.checkpoints[0] == (0, NOW), "the claim's commit kept the dead walk's heartbeat"
     assert fixture.adapter.unit_starts == [("library:Films", 2)]
+
+
+async def test_a_refused_walk_is_marked_on_its_span(spans: InMemorySpanExporter) -> None:
+    """Beside `usher.sync.truncated`: Usher declined, and nothing upstream failed.
+
+    The walk resumed once the live one has gone stale carries no such mark.
+    """
+    clock = _Clock(NOW)
+    fixture = _Fixture(clock=clock)
+    _shelve(fixture, "Films", range(3))
+    await _given_walk(fixture, heartbeat_at=NOW, units=[("Films", SyncRunUnitStatus.RUNNING, 2)])
+    with pytest.raises(WalkRefused):
+        await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    clock.now = NOW + STALE_AFTER
+    run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    assert run.status is SyncRunStatus.COMPLETED
+    pipeline = [span for span in spans.get_finished_spans() if span.name == "sync.reconcile"]
+    assert [(span.attributes or {}).get("usher.sync.refused") for span in pipeline] == [
+        True,
+        None,
+    ]
 
 
 async def test_a_failed_walk_resumes_however_fresh_its_heartbeat() -> None:

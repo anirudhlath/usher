@@ -48,7 +48,7 @@ from usher.services.handlers import (
     watch_writeback_handler,
 )
 from usher.services.matching import MatchService
-from usher.services.reconcile import ReconcileService, WalkRefused
+from usher.services.reconcile import STALE_AFTER, ReconcileService, WalkRefused
 from usher.services.watch_sync import WatchStateSyncService
 from usher.services.watch_write import WatchWriteService
 
@@ -702,7 +702,8 @@ async def test_a_refused_walk_fails_the_job_so_the_queue_retries_it(
 ) -> None:
     """`PortUnavailable`, which `JobWorker` fails as retryable rather than logging as a crash.
 
-    A walk whose process died is then resumed once its heartbeat is stale.
+    Its hint holds the retry back for `STALE_AFTER`, by when a walk whose process died
+    has gone stale and the retry resumes it.
     """
     sources = FakeSourceRepository()
     await sources.add(source)
@@ -717,6 +718,7 @@ async def test_a_refused_walk_fails_the_job_so_the_queue_retries_it(
         )
 
     assert caught.value.__cause__ is refusal
+    assert caught.value.retry_after == STALE_AFTER.total_seconds()
     assert events == ["reconcile"], "the watch lane ran after the walk was refused"
     with pytest.raises(PortUnavailable):
         await adapter.get_item("anything")

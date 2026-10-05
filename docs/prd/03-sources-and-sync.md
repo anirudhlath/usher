@@ -197,9 +197,11 @@ whole-library walk of the same kind continues the same `sync_runs` row, with
 the same `started_at`: completed units are skipped, and every other unit
 continues from the position it committed. A run still `running` whose
 heartbeat is under 10 minutes old is a live walk, and a second is refused —
-`usher sync` exits non-zero, and a worker job fails and is retried. A run whose
-sweep was refused is not resumed, and neither is one that stopped before its
-units were stored or a full run from before units existed: a fresh walk
+`usher sync` exits non-zero, and a worker job fails and is retried no sooner
+than 10 minutes later, when a walk whose process died has gone stale and is
+resumed. Five refusals park the job, as five failures of any kind do. A run
+whose sweep was refused is not resumed, and neither is one that stopped before
+its units were stored or a full run from before units existed: a fresh walk
 starts, and such a run left `running` is closed `failed` with `superseded: a
 whole-library walk restarts`.
 

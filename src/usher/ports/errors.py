@@ -23,7 +23,14 @@ class PortUnavailable(UsherPortError):
     raises it as an error. A caller that sees this degrades rather than
     fails: PRD 08's "a degraded subsystem narrows functionality; it never
     fails a request that local state can answer."
+
+    `retry_after` is seconds before asking again is worth it, when whoever
+    raises this knows; `None` when it does not.
     """
+
+    def __init__(self, *args: object, retry_after: float | None = None) -> None:
+        super().__init__(*args)
+        self.retry_after = retry_after
 
 
 class PortAuthFailed(UsherPortError):

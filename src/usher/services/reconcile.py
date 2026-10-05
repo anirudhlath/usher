@@ -189,7 +189,12 @@ class ReconcileService:
             span.set_attribute("usher.sync.kind", kind.value)
             cursor = await self.cursor_for(source, kind)
             planned = plan and not max_items and (kind is SyncRunKind.FULL or cursor is None)
-            claimed = await self._claim(source, kind) if planned else None
+            try:
+                claimed = await self._claim(source, kind) if planned else None
+            except WalkRefused:
+                # Beside `usher.sync.truncated`: Usher declined, and nothing upstream failed.
+                span.set_attribute("usher.sync.refused", True)
+                raise
             if claimed is None:
                 run = SyncRun(
                     source_id=source.id,

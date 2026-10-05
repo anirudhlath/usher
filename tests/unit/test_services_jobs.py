@@ -527,6 +527,28 @@ async def test_a_429_carrying_a_retry_after_backs_off_no_sooner_than_the_upstrea
     )
 
 
+async def test_an_unavailable_upstream_carrying_a_retry_after_backs_off_no_sooner_than_that(
+    fixture: _Fixture,
+) -> None:
+    """`PortUnavailable` carries the same hint as a 429, honoured the same way.
+
+    A refused walk raises one, holding its retry back until the walk it was refused
+    by has had time to go stale.
+    """
+    refusal = PortUnavailable("a whole-library walk is already running", retry_after=600.0)
+    fixture.register(JobKind.ENRICH, fixture.raising(refusal))
+    await fixture.given("t1")
+    before = datetime.now(UTC)
+    await fixture.worker.run_once()
+    outcome = fixture.queue.jobs_of(JobKind.ENRICH)[0]
+    assert outcome.attempts == 1
+    assert outcome.last_error == "a whole-library walk is already running"
+    assert outcome.run_after is not None
+    assert outcome.run_after - before >= timedelta(seconds=600), (
+        f"backed off only {outcome.run_after - before} against a 600 s hint"
+    )
+
+
 async def test_a_claim_requeued_out_from_under_the_worker_does_not_crash(
     fixture: _Fixture,
 ) -> None:

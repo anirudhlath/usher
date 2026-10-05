@@ -15,7 +15,12 @@ from opentelemetry.trace import Link
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 from usher.domain.jobs import BOOTSTRAP_CONCURRENCY, Job, JobKind
-from usher.ports.errors import PortDataMalformed, PortRateLimited, UsherPortError
+from usher.ports.errors import (
+    PortDataMalformed,
+    PortRateLimited,
+    PortUnavailable,
+    UsherPortError,
+)
 from usher.ports.jobs import JobQueue
 from usher.services.events import DeferredEventPublisher
 
@@ -341,7 +346,9 @@ class JobWorker:
         # `str(exc)`, never the exception object and never a payload: PRD 08's
         # credentials-are-never-logged rule applies to a column an operator reads and to
         # this log line alike.
-        retry_after_seconds = exc.retry_after if isinstance(exc, PortRateLimited) else None
+        retry_after_seconds = (
+            exc.retry_after if isinstance(exc, PortRateLimited | PortUnavailable) else None
+        )
         outcome = await scope.queue.fail(
             job.id, error=str(exc), retryable=retryable, retry_after_seconds=retry_after_seconds
         )

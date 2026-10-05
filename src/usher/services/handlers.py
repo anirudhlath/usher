@@ -20,7 +20,7 @@ from usher.services.enrich import EnrichService
 from usher.services.index import IndexService
 from usher.services.jobs import Handler
 from usher.services.matching import MatchService
-from usher.services.reconcile import ReconcileService, WalkRefused
+from usher.services.reconcile import STALE_AFTER, ReconcileService, WalkRefused
 from usher.services.watch_sync import WatchStateSyncService
 
 #: `SyncRunKind` has a third member, `WATCH_STATE`, which is never a lane an
@@ -259,8 +259,9 @@ def sync_handler(
             await reconcile.reconcile(source, lane, adapter)
         except WalkRefused as exc:
             # A port failure, so `JobWorker` fails the job for a retry instead of logging
-            # a crash: a walk whose process died is resumed once its heartbeat is stale.
-            raise PortUnavailable(str(exc)) from exc
+            # a crash, and retries it no sooner than `STALE_AFTER`: by then a walk whose
+            # process died has gone stale, and the retry resumes it.
+            raise PortUnavailable(str(exc), retry_after=STALE_AFTER.total_seconds()) from exc
         else:
             await watch.sync(source, adapter, user_id=user_id)
         finally:
