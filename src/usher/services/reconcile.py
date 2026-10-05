@@ -181,7 +181,8 @@ class ReconcileService:
         self._heartbeat_seconds = heartbeat_seconds
         self._clock = clock
         # A unit's duration is two readings of this, never of `clock`: a wall clock
-        # stepped mid-unit would record a negative duration, or an inflated one.
+        # stepped back mid-unit loses the point, which the histogram drops as negative,
+        # and one stepped forward inflates it.
         self._timer = timer
 
     async def reconcile(

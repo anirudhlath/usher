@@ -2059,9 +2059,10 @@ async def test_a_unit_is_timed_from_its_walkers_claim_to_its_last_commit(
 ) -> None:
     """Once per completed unit, under its stage, from the claim rather than the stage's start.
 
-    One walker, so Shorts is claimed only once Films has completed: the 90 s that pass
-    while Films is held are Films' alone, and Shorts records none of them. They pass on
-    the timer while the wall clock stands still, so a duration read off the clock is 0.
+    One walker, so Shorts is not claimed until Films' last page has been fetched, after
+    the hold: the 90 s that pass while Films is held are Films' alone, and Shorts records
+    none of them. They pass on the timer while the wall clock stands still, so a duration
+    read off the clock is 0.
     """
     timer = _Timer()
     fixture = _Fixture(batch_size=1, walkers=1, clock=_Clock(NOW), timer=timer)
@@ -2095,8 +2096,9 @@ async def test_a_unit_is_timed_from_its_walkers_claim_to_its_last_commit(
 async def test_a_unit_that_fails_records_no_duration(meter_reader: InMemoryMetricReader) -> None:
     """Films completes and is timed; Shorts, claimed after it, fails and records nothing.
 
-    One walker, so Shorts is claimed only once Films has completed. Films is held for
-    90 s on the timer, so its point cannot pass for one Shorts recorded at no cost.
+    One walker, so Shorts is not claimed until Films' last page has been fetched, after
+    the hold. Films is held for 90 s on the timer, so its point cannot pass for one Shorts
+    recorded at no cost.
     """
     timer = _Timer()
     fixture = _Fixture(batch_size=1, walkers=1, clock=_Clock(NOW), timer=timer)
