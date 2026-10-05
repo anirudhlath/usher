@@ -1794,3 +1794,70 @@ async def test_a_cursored_delta_walks_beside_a_live_whole_library_walk() -> None
     assert delta.cursor_at is not None, "the premise: the full walk gave the delta its cursor"
     assert delta.status is SyncRunStatus.COMPLETED
     assert await fixture.runs.get(live.id) == live
+
+
+# -- after_seed: the watch lane, as soon as the seed has committed -----------
+
+
+async def test_the_hook_runs_once_the_seed_has_committed_and_before_any_title_is_fetched() -> None:
+    fixture = _Fixture()
+    _shelve(fixture, "Watched", range(2), stage=WalkStage.SEED)
+    _shelve(fixture, "Films", range(10, 13))
+
+    async def after_seed() -> None:
+        fixture.journal.append(("after_seed", "-"))
+
+    await fixture.service.reconcile(
+        fixture.source, SyncRunKind.FULL, fixture.adapter, after_seed=after_seed
+    )
+
+    assert fixture.journal.count(("after_seed", "-")) == 1
+    hook = fixture.journal.index(("after_seed", "-"))
+    assert fixture.journal.index(("completed", "library:Watched")) < hook
+    assert hook < fixture.journal.index(("fetched", "library:Films"))
+
+
+async def test_a_plan_without_a_seed_never_runs_the_hook() -> None:
+    fixture = _Fixture()
+    _shelve(fixture, "Films", range(3))
+    calls: list[str] = []
+
+    async def after_seed() -> None:
+        calls.append("after_seed")
+
+    run = await fixture.service.reconcile(
+        fixture.source, SyncRunKind.FULL, fixture.adapter, after_seed=after_seed
+    )
+    assert run.status is SyncRunStatus.COMPLETED, "the premise: the plan was walked"
+    assert calls == []
+
+
+async def test_a_resume_whose_seed_had_completed_still_runs_the_hook() -> None:
+    """The attempt that committed the seed may have died before its watch run did.
+
+    The hook records how many unit walks had been asked for when it ran: one, the
+    seed, on the first attempt; none on the resume, which skips the seed.
+    """
+    fixture = _Fixture()
+    _shelve(fixture, "Watched", range(2), stage=WalkStage.SEED)
+    _shelve(fixture, "Films", range(10, 13))
+    fixture.adapter.fail_unit_after("Films", 1)
+    calls: list[int] = []
+
+    async def after_seed() -> None:
+        calls.append(len(fixture.adapter.unit_starts))
+
+    first = await fixture.service.reconcile(
+        fixture.source, SyncRunKind.FULL, fixture.adapter, after_seed=after_seed
+    )
+    assert first.status is SyncRunStatus.FAILED, "the premise: the walk failed after its seed"
+    fixture.adapter.clear_failure()
+    fixture.adapter.unit_starts.clear()
+
+    second = await fixture.service.reconcile(
+        fixture.source, SyncRunKind.FULL, fixture.adapter, after_seed=after_seed
+    )
+
+    assert second.id == first.id, "the premise: the second attempt resumed the first"
+    assert fixture.adapter.unit_starts == [("library:Films", 0)]
+    assert calls == [1, 0]

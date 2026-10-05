@@ -5,7 +5,7 @@ import ast
 import contextlib
 import inspect
 import uuid
-from collections.abc import AsyncIterator, Callable, Coroutine
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,6 +16,7 @@ import pytest
 import uvicorn
 from sqlalchemy.exc import DBAPIError, MissingGreenlet, OperationalError
 
+from tests.fakes.source_adapter import FakeSourceAdapter
 from usher import cli as usher_cli
 from usher.config import Settings
 from usher.domain.enums import SourceKind
@@ -39,8 +40,9 @@ from usher.ports.errors import (
 # assertion.
 from usher.ports.ingest import AvailabilitySweepRefused
 from usher.ports.search import FilterNotSupported
-from usher.ports.source import SourceNotSupported
+from usher.ports.source import SourceAdapter, SourceNotSupported
 from usher.services.reconcile import RETRACTION_ERROR_CODE
+from usher.services.watch_sync import WatchStateSyncService
 
 # A value that must never appear in anything this module asserts on. Spelled
 # once so a leak fails loudly rather than being read past.
@@ -722,7 +724,9 @@ def _sync_against(
     # a plant that walks one source twice is not silently handed the second
     # source's rows.
     class _Reconcile:
-        async def reconcile(self, _source: Source, _kind: object, adapter: object) -> SyncRun:
+        async def reconcile(
+            self, _source: Source, _kind: object, adapter: object, **kwargs: object
+        ) -> SyncRun:
             return walks[adapters.index(adapter)]  # type: ignore[arg-type]
 
     class _Watch:
@@ -953,6 +957,50 @@ def test_a_failed_watch_lane_is_a_non_zero_exit_without_the_retraction_hint(
     assert "--allow-full-retraction" not in combined, (
         "the hint belongs to the one failure it resolves, not to every failure"
     )
+
+
+class _AnsweringWatch(WatchStateSyncService):
+    """A watch lane that gives one answer, and needs none of a real one's collaborators."""
+
+    def __init__(self, answer: SyncRun) -> None:
+        self._answer = answer
+
+    async def sync(
+        self,
+        source: Source,
+        adapter: SourceAdapter,
+        *,
+        user_id: uuid.UUID,
+        since_at_most: datetime | None = None,
+    ) -> SyncRun:
+        return self._answer
+
+
+def _seed_hook(answer: SyncRun, failed: list[SyncRun]) -> Callable[[], Awaitable[None]]:
+    """`_sync`'s after-seed hook for a source called Shared Emby, over that watch lane."""
+    source = Source(
+        kind=SourceKind.EMBY,
+        name="Shared Emby",
+        base_url="https://emby.invalid",
+        credentials_ref="ref-0",
+        device_id="device-0",
+    )
+    return usher_cli._watch_lane(
+        _AnsweringWatch(answer), source, FakeSourceAdapter(source), new_id(), failed
+    )
+
+
+async def test_a_failed_watch_run_after_the_seed_is_kept_for_the_exit_line(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Printed, and kept, so the command exits non-zero however the runs after it end."""
+    run = _run(SyncRunKind.WATCH_STATE, SyncRunStatus.FAILED, error="source is unreachable")
+    failed: list[SyncRun] = []
+
+    await _seed_hook(run, failed)()
+
+    assert failed == [run]
+    assert "Shared Emby: watch_state failed" in capsys.readouterr().out
 
 
 # -- `--title` naming a title the catalog does not hold -----------------------

@@ -150,11 +150,20 @@ class WatchStateSyncService:
         self._batch_size = batch_size
         self._clock = clock
 
-    async def sync(self, source: Source, adapter: SourceAdapter, *, user_id: uuid.UUID) -> SyncRun:
+    async def sync(
+        self,
+        source: Source,
+        adapter: SourceAdapter,
+        *,
+        user_id: uuid.UUID,
+        since_at_most: AwareDatetime | None = None,
+    ) -> SyncRun:
         """Walk this source's watch state into the catalog.
 
-        A run another process is still walking is left to it, and this walk runs
-        beside it in a row of its own. Never raises a `UsherPortError`.
+        A fresh delta reads from `since_at_most` when that is earlier than its own
+        cursor, so a caller can cover what its item walk stored after this lane's
+        last run began. A run another process is still walking is left to it, and
+        this walk runs beside it in a row of its own. Never raises a `UsherPortError`.
         """
         started = time.perf_counter()
         with _tracer.start_as_current_span("sync.watch_state") as span:
@@ -188,6 +197,10 @@ class WatchStateSyncService:
                 cursor = await self._runs.latest_completed_cursor(
                     source.id, SyncRunKind.WATCH_STATE
                 )
+                if cursor is not None and since_at_most is not None:
+                    # Never past the instant the caller's item walk began: a state saved
+                    # since then may be for an item that walk had not yet stored.
+                    cursor = min(cursor, since_at_most)
                 run = SyncRun(
                     source_id=source.id,
                     kind=SyncRunKind.WATCH_STATE,

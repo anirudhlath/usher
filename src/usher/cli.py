@@ -7,7 +7,7 @@ import re
 import sys
 import time
 import uuid
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -89,6 +89,7 @@ from usher.services.rotation import RotationReport, RotationService
 from usher.services.rows import ROW_PROVIDERS, enabled_row_providers, row_provider_settings
 from usher.services.rows.cache import RowCache
 from usher.services.search import SearchAnswer, SemanticSearchUnavailable
+from usher.services.watch_sync import WatchStateSyncService
 from usher.telemetry import (
     configure_telemetry,
     register_queue_gauges,
@@ -298,7 +299,7 @@ async def _session_for(settings: Settings) -> AsyncIterator[AsyncSession]:
 async def _sync(
     settings: Settings, *, source_name: str | None, kind: str, allow_full_retraction: bool
 ) -> None:
-    """Walk each selected source: items first, then watch state."""
+    """Walk each selected source: items, then watch state, which also runs once a seed lands."""
     async with _session_for(settings) as session:
         pipeline = build_pipeline(
             session, settings, max_retract_fraction=1.0 if allow_full_retraction else None
@@ -320,20 +321,20 @@ async def _sync(
                 # already documents: one adapter is one connection pool, and
                 # a walk that raises would otherwise leak it for the rest of
                 # the process.
-                run = await pipeline.reconcile.reconcile(source, SyncRunKind(kind), adapter)
+                hook = _watch_lane(pipeline.watch, source, adapter, user_id, failed)
+                run = await pipeline.reconcile.reconcile(
+                    source, SyncRunKind(kind), adapter, after_seed=hook
+                )
                 print(
                     f"{source.name}: {run.kind.value} {run.status.value} "
                     f"seen={run.items_seen} matched={run.items_matched} "
                     f"unmatched={run.items_unmatched} retracted={run.items_retracted}"
                     + (f" error={run.error}" if run.error else "")
                 )
-                watch = await pipeline.watch.sync(source, adapter, user_id=user_id)
-                print(
-                    f"{source.name}: watch_state {watch.status.value} "
-                    f"seen={watch.items_seen} merged={watch.items_matched} "
-                    f"unmatched={watch.items_unmatched}"
-                    + (f" error={watch.error}" if watch.error else "")
+                watch = await pipeline.watch.sync(
+                    source, adapter, user_id=user_id, since_at_most=run.started_at
                 )
+                print(_watch_line(source, watch))
                 failed.extend(one for one in (run, watch) if one.status is SyncRunStatus.FAILED)
             except WalkRefused as exc:
                 # Another process is walking this source, and runs its watch lane after.
@@ -378,6 +379,33 @@ def _sync_failed(runs: Sequence[SyncRun], refused: Sequence[str] = ()) -> str:
             "re-run with `usher sync --allow-full-retraction`"
         )
     return "\n".join(lines)
+
+
+def _watch_line(source: Source, watch: SyncRun) -> str:
+    """One watch-state run, as `usher sync` prints it."""
+    return (
+        f"{source.name}: watch_state {watch.status.value} "
+        f"seen={watch.items_seen} merged={watch.items_matched} "
+        f"unmatched={watch.items_unmatched}" + (f" error={watch.error}" if watch.error else "")
+    )
+
+
+def _watch_lane(
+    watch: WatchStateSyncService,
+    source: Source,
+    adapter: SourceAdapter,
+    user_id: uuid.UUID,
+    failed: list[SyncRun],
+) -> Callable[[], Awaitable[None]]:
+    """The watch lane as a walk's `after_seed`, printed and kept like the run after the walk."""
+
+    async def run() -> None:
+        watched = await watch.sync(source, adapter, user_id=user_id)
+        print(_watch_line(source, watched))
+        if watched.status is SyncRunStatus.FAILED:
+            failed.append(watched)
+
+    return run
 
 
 async def _sync_status(settings: Settings) -> None:

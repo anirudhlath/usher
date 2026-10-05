@@ -268,6 +268,7 @@ class _RecordingReconcile(ReconcileService):
         *,
         max_items: int = 0,
         plan: bool = True,
+        after_seed: Callable[[], Awaitable[object]] | None = None,
     ) -> SyncRun:
         self._walks.append((source.name, kind))
         # Recorded as well as counted, for the reason `_CountingQueue`
@@ -275,7 +276,9 @@ class _RecordingReconcile(ReconcileService):
         # *what the lane passed*, and "the gap closed" is what a lane
         # passing nothing produces too.
         self._ceilings.append(max_items)
-        return await super().reconcile(source, kind, adapter, max_items=max_items, plan=plan)
+        return await super().reconcile(
+            source, kind, adapter, max_items=max_items, plan=plan, after_seed=after_seed
+        )
 
 
 class _RecordingWatchSync(WatchStateSyncService):
@@ -305,9 +308,16 @@ class _RecordingWatchSync(WatchStateSyncService):
         )
         self._walks = walks
 
-    async def sync(self, source: Source, adapter: SourceAdapter, *, user_id: uuid.UUID) -> SyncRun:
+    async def sync(
+        self,
+        source: Source,
+        adapter: SourceAdapter,
+        *,
+        user_id: uuid.UUID,
+        since_at_most: datetime | None = None,
+    ) -> SyncRun:
         self._walks.append(source.name)
-        return await super().sync(source, adapter, user_id=user_id)
+        return await super().sync(source, adapter, user_id=user_id, since_at_most=since_at_most)
 
 
 @dataclass(slots=True)

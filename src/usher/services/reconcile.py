@@ -20,6 +20,7 @@ from usher.domain.sync import (
     SyncRunStatus,
     SyncRunUnit,
     SyncRunUnitStatus,
+    WalkStage,
 )
 from usher.ports.errors import UsherPortError
 from usher.ports.events import ClientEvent, ClientEventKind, EventPublisher
@@ -171,6 +172,7 @@ class ReconcileService:
         *,
         max_items: int = 0,
         plan: bool = True,
+        after_seed: Callable[[], Awaitable[object]] | None = None,
     ) -> SyncRun:
         """Walk `source` and reconcile it.
 
@@ -179,7 +181,8 @@ class ReconcileService:
         walk is one stream.
 
         A whole-library walk resumes its kind's unfinished run in place and raises
-        `WalkRefused` while that run is alive; see `_claim`.
+        `WalkRefused` while that run is alive; see `_claim`. `after_seed` is awaited
+        once a plan's `SEED` stage has committed.
 
         Never raises a `UsherPortError`.
         """
@@ -224,7 +227,13 @@ class ReconcileService:
             try:
                 truncated = False
                 if planned:
-                    await self._walk_plan(source, progress, adapter, resumed=claimed is not None)
+                    await self._walk_plan(
+                        source,
+                        progress,
+                        adapter,
+                        resumed=claimed is not None,
+                        after_seed=after_seed,
+                    )
                 else:
                     truncated = await self._walk(source, progress, adapter, cursor, max_items)
                 if truncated:
@@ -400,7 +409,13 @@ class ReconcileService:
         return truncated
 
     async def _walk_plan(
-        self, source: Source, progress: _Progress, adapter: SourceAdapter, *, resumed: bool
+        self,
+        source: Source,
+        progress: _Progress,
+        adapter: SourceAdapter,
+        *,
+        resumed: bool,
+        after_seed: Callable[[], Awaitable[object]] | None,
     ) -> None:
         """Walk the adapter's plan, or a resumed run's stored units, one stage at a time.
 
@@ -412,6 +427,9 @@ class ReconcileService:
         A fresh plan's units are stored with the heartbeat that follows the plan. A
         stage starts only once every unit of the stages before it has committed
         complete, so every episode finds its series. A unit already complete is skipped.
+
+        `after_seed` is awaited once the `SEED` stage has committed, also when an
+        earlier attempt committed it, since that attempt may have died before its hook.
         """
         if resumed:
             units = await self._runs.units_for(progress.run.id)
@@ -447,6 +465,16 @@ class ReconcileService:
             ]
             if staged:
                 await self._walk_stage(source, progress, adapter, staged)
+            if (
+                stage is WalkStage.SEED
+                and after_seed is not None
+                and any(unit.stage is WalkStage.SEED for unit in units)
+            ):
+                # Nothing beats while the hook runs, so a watch walk in it that outlasts
+                # `STALE_AFTER` leaves this walk looking dead. That watch walk is a filtered
+                # first walk or a cursored delta: a seed is planned only when both watch
+                # filters narrow the library, so a server ignoring them never gets here.
+                await after_seed()
 
     async def _walk_stage(
         self,

@@ -207,6 +207,13 @@ before its units were stored or a full run from before units existed: a fresh
 walk starts, and such a run left `running` is closed `failed` with `superseded:
 a whole-library walk restarts`.
 
+**The watch lane runs as soon as the seed has committed.** When a
+whole-library walk's plan starts with what the account is watching, `usher
+sync` and a worker job run the watch lane the moment that stage has committed —
+on a resumed walk too — and again after the walk, as before. The second run
+reads back to the instant the walk began, so a state saved meanwhile for an
+item the walk had not yet stored is not skipped.
+
 **A bounded walk records `FAILED`, never `COMPLETED`.**
 `USHER_PUSH_GAP_MAX_ITEMS` (default **20,000**; 0 is unlimited) stops a
 gap-closing delta that does have a cursor, with `error_code =

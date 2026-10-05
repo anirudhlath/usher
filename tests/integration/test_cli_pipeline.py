@@ -48,7 +48,7 @@ from usher.ports.ingest import MediaItemUpsert
 from usher.ports.jobs import JobRequest
 from usher.ports.repository import ScoredNeighbor, TitleEmbeddingUpsert
 from usher.ports.search import SearchFilters, SuggestTier
-from usher.ports.source import DEFAULT_UNIT_KEY
+from usher.ports.source import DEFAULT_UNIT_KEY, SourceItem, SourceItemKind
 from usher.services.curation_validate import (
     ITEM_IDS_KEY,
     REASON_KEY,
@@ -787,6 +787,57 @@ async def test_usher_sync_exits_non_zero_when_a_live_walk_refuses_it(
     assert exited.value.code == (
         "refused for cli-walking: a whole-library walk of each is already running"
     )
+
+
+async def test_usher_sync_runs_the_watch_lane_as_soon_as_the_seed_has_committed(
+    cli_settings: Settings,
+    clean_slate: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The watch lane after the seed, the walk, then the watch lane read back to its start."""
+    source = Source(
+        kind=SourceKind.EMBY,
+        name="cli-seeded",
+        base_url="https://emby.invalid",
+        credentials_ref=f"ref-{new_id()}",
+        device_id=str(new_id()),
+    )
+    async with _session_for(cli_settings) as session:
+        await PostgresSourceRepository(session).add(source)
+        await session.commit()
+    adapter = FakeSourceAdapter(source)
+    for index, library in enumerate(("Watched", "Films")):
+        item = SourceItem(
+            external_id=f"m{index}",
+            name=f"cli-movie {index}",
+            kind=SourceItemKind.MOVIE,
+            year=2021,
+        )
+        adapter.seed(item, datetime(2026, 7, 1, tzinfo=UTC))
+        adapter.place(item.external_id, library)
+    adapter.stage("Watched", WalkStage.SEED)
+
+    async def _opened(pipeline: object, chosen: Source) -> FakeSourceAdapter:
+        return adapter
+
+    monkeypatch.setattr("usher.cli._open_adapter", _opened)
+
+    await _sync(cli_settings, source_name="cli-seeded", kind="full", allow_full_retraction=False)
+
+    printed = [
+        line.split(" ")[1]
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith("cli-seeded: ")
+    ]
+    assert printed == ["watch_state", "full", "watch_state"]
+    async with _session_for(cli_settings) as session:
+        runs = await PostgresSyncRunRepository(session).list_for_source(source.id)
+    [walk] = [run for run in runs if run.kind is SyncRunKind.FULL]
+    watches = sorted(
+        (run for run in runs if run.kind is SyncRunKind.WATCH_STATE), key=lambda run: run.started_at
+    )
+    assert [run.cursor_at for run in watches] == [None, walk.started_at]
 
 
 async def test_push_probe_reports_nothing_to_probe_before_it_opens_anything(

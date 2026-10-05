@@ -121,8 +121,10 @@ usher sync-status                       # recent walks, queue depth, parked jobs
   what changed. A source that has never completed a walk has nothing to resume
   from, so the server logs a warning and waits for you rather than walking the
   whole library on its own. `USHER_PUSH_GAP_CLOSE` changes that behaviour.
-- **The watch-state walk follows the item walk.** Each watch state has to match
-  an item first.
+- **The watch-state walk follows the item walk**, because each watch state has
+  to match an item first. When it can, a walk of a whole library stores what
+  your account is watching first and runs the watch-state walk straight after,
+  so your own shelves fill long before the rest of the library has been read.
 - **`usher sync` exits non-zero if any walk failed or was refused**, after it
   has tried every source, so cron can notice. A walk of a whole library is
   refused while another of the same kind is still running for that source.

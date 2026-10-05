@@ -1722,3 +1722,67 @@ async def test_every_batch_of_a_watch_walk_moves_its_heartbeat() -> None:
     assert fixture.positions == [2, 4, 5], "the premise: three batches committed"
     beats = [saved.heartbeat_at for saved in fixture.saved if saved.status is SyncRunStatus.RUNNING]
     assert beats == [NOW + timedelta(seconds=seconds) for seconds in (1, 2, 3)]
+
+
+# -- since_at_most: the run after a walk reads back to the walk's start ------
+
+
+async def test_since_at_most_moves_a_fresh_deltas_cursor_back(fixture: _Fixture) -> None:
+    """A state saved after the walk began, and before this lane's last run, is read."""
+    walk_began = datetime(2026, 9, 1, tzinfo=UTC)
+    await fixture.given_completed_walk(at=walk_began + timedelta(days=1))
+    await fixture.given_matched("movie-0")
+    await fixture.given_matched("movie-1", changed_at=walk_began + timedelta(hours=12))
+    fixture.adapter.seed_state(
+        SourceWatchState(external_id="movie-1", position_seconds=640, played=False)
+    )
+
+    run = await fixture.service.sync(
+        fixture.source, fixture.adapter, user_id=fixture.user_id, since_at_most=walk_began
+    )
+
+    assert run.cursor_at == walk_began
+    assert run.items_seen == 1, "the walk did not read from the moved cursor"
+
+
+async def test_since_at_most_never_moves_a_cursor_forward(fixture: _Fixture) -> None:
+    await fixture.given_completed_walk(at=T0)
+    run = await fixture.service.sync(
+        fixture.source, fixture.adapter, user_id=fixture.user_id, since_at_most=LATER
+    )
+    assert run.cursor_at == T0
+
+
+async def test_since_at_most_leaves_a_first_walk_without_a_cursor(fixture: _Fixture) -> None:
+    """No completed run, so nothing to move back: the walk asks for what was watched."""
+    run = await fixture.service.sync(
+        fixture.source, fixture.adapter, user_id=fixture.user_id, since_at_most=T0
+    )
+    assert run.cursor_at is None
+
+
+async def test_since_at_most_leaves_a_resumed_deltas_cursor_alone(fixture: _Fixture) -> None:
+    """Its position counts into the stream its own cursor selects.
+
+    The row keeps its `cursor_at` whatever the walk reads from, so what is
+    asserted is the walk: a state changed before that cursor stays unread.
+    """
+    resumed_from = datetime(2026, 9, 2, tzinfo=UTC)
+    await fixture.given_matched("movie-1", changed_at=resumed_from - timedelta(hours=12))
+    fixture.adapter.seed_state(
+        SourceWatchState(external_id="movie-1", position_seconds=640, played=False)
+    )
+    failed = SyncRun(
+        source_id=fixture.source.id,
+        kind=SyncRunKind.WATCH_STATE,
+        status=SyncRunStatus.FAILED,
+        cursor_at=resumed_from,
+        started_at=resumed_from + timedelta(days=1),
+        finished_at=resumed_from + timedelta(days=1),
+    )
+    await fixture.runs.add(failed)
+    run = await fixture.service.sync(
+        fixture.source, fixture.adapter, user_id=fixture.user_id, since_at_most=T0
+    )
+    assert (run.id, run.cursor_at) == (failed.id, resumed_from), "the premise: the delta resumed"
+    assert run.items_seen == 0, "the resumed walk read from a moved cursor"

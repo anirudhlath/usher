@@ -25,6 +25,9 @@ Versioning is `0.x` while the wire contract may still move —
   heartbeat under 10 minutes old — a second is refused, and `usher sync` exits
   non-zero. A watch-state walk started while another is alive runs beside it
   instead of closing or resuming the other's run.
+- The watch lane runs as soon as a whole-library walk has stored what the
+  account is watching — played, in progress and next up — so a household's own
+  shelves fill long before the walk ends. It still runs after the walk.
 
 ### Changed
 

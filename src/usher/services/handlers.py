@@ -229,6 +229,8 @@ def sync_handler(
     `POST /admin/sources/{id}/sync` lands here as an enqueue rather than as a
     synchronous walk.
 
+    The watch lane also runs as soon as a whole-library walk's seed has committed.
+
     A walk refused because another is alive defers the job, and the queue tries it again.
     """
 
@@ -256,14 +258,19 @@ def sync_handler(
             )
             return
         try:
-            await reconcile.reconcile(source, lane, adapter)
+            run = await reconcile.reconcile(
+                source,
+                lane,
+                adapter,
+                after_seed=lambda: watch.sync(source, adapter, user_id=user_id),
+            )
         except WalkRefused as exc:
             # Not a failure: `JobWorker` defers the job without spending an attempt, so a
             # long walk never parks it, and tries it again no sooner than `STALE_AFTER`, by
             # when a walk whose process died has gone stale and the retry resumes it.
             raise JobDeferred(str(exc), retry_after=STALE_AFTER.total_seconds()) from exc
         else:
-            await watch.sync(source, adapter, user_id=user_id)
+            await watch.sync(source, adapter, user_id=user_id, since_at_most=run.started_at)
         finally:
             await adapter.aclose()
 

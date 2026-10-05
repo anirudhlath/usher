@@ -1,6 +1,7 @@
 """The three job handlers, and the remote-search tier only one of them uses."""
 
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -551,7 +552,9 @@ class _RecordingReconcile(ReconcileService):
     call `super()`.
     """
 
-    def __init__(self, log: list[str], *, raises: Exception | None = None) -> None:
+    def __init__(
+        self, log: list[str], *, raises: Exception | None = None, seeded: bool = False
+    ) -> None:
         self.calls: list[tuple[uuid.UUID, SyncRunKind]] = []
         # The `max_items` each call was handed. `POST /admin/sources/{id}/sync`
         # is an operator asking for the whole thing, so the handler must pass
@@ -560,6 +563,8 @@ class _RecordingReconcile(ReconcileService):
         self.ceilings: list[int] = []
         self._log = log
         self._boom = raises
+        self._seeded = seeded
+        self.runs: list[SyncRun] = []
 
     async def reconcile(
         self,
@@ -569,13 +574,18 @@ class _RecordingReconcile(ReconcileService):
         *,
         max_items: int = 0,
         plan: bool = True,
+        after_seed: Callable[[], Awaitable[object]] | None = None,
     ) -> SyncRun:
         self.calls.append((source.id, kind))
         self.ceilings.append(max_items)
         self._log.append("reconcile")
         if self._boom is not None:
             raise self._boom
-        return SyncRun(source_id=source.id, kind=kind, status=SyncRunStatus.COMPLETED)
+        if self._seeded and after_seed is not None:
+            await after_seed()
+        run = SyncRun(source_id=source.id, kind=kind, status=SyncRunStatus.COMPLETED)
+        self.runs.append(run)
+        return run
 
 
 class _RecordingWatch(WatchStateSyncService):
@@ -583,10 +593,19 @@ class _RecordingWatch(WatchStateSyncService):
 
     def __init__(self, log: list[str], *, raises: Exception | None = None) -> None:
         self.calls: list[tuple[uuid.UUID, uuid.UUID]] = []
+        self.since_at_most: list[datetime | None] = []
         self._log = log
         self._boom = raises
 
-    async def sync(self, source: Source, adapter: SourceAdapter, *, user_id: uuid.UUID) -> SyncRun:
+    async def sync(
+        self,
+        source: Source,
+        adapter: SourceAdapter,
+        *,
+        user_id: uuid.UUID,
+        since_at_most: datetime | None = None,
+    ) -> SyncRun:
+        self.since_at_most.append(since_at_most)
         self.calls.append((source.id, user_id))
         self._log.append("watch")
         if self._boom is not None:
@@ -723,6 +742,25 @@ async def test_a_refused_walk_defers_the_job_so_the_queue_tries_it_again(
     assert events == ["reconcile"], "the watch lane ran after the walk was refused"
     with pytest.raises(PortUnavailable):
         await adapter.get_item("anything")
+
+
+async def test_the_sync_handler_runs_the_watch_lane_after_the_seed_and_again_after_the_walk(
+    source: Source, adapter: FakeSourceAdapter
+) -> None:
+    """The second watch run reads back to the instant the walk began."""
+    sources = FakeSourceRepository()
+    await sources.add(source)
+    events: list[str] = []
+    reconcile = _RecordingReconcile(events, seeded=True)
+    watch = _RecordingWatch(events)
+
+    await sync_handler(sources, reconcile, watch, _Opener(adapter), user_id=_USER)(
+        Job(kind=JobKind.SYNC, key=f"{source.id}:full")
+    )
+
+    assert events == ["reconcile", "watch", "watch"]
+    [walk] = reconcile.runs
+    assert watch.since_at_most == [None, walk.started_at]
 
 
 async def test_a_sync_key_with_no_lane_parks_rather_than_killing_the_worker() -> None:
