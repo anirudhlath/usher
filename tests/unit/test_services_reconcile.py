@@ -3,7 +3,7 @@
 import asyncio
 import contextlib
 import uuid
-from collections.abc import AsyncGenerator, Callable, Iterator, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from itertools import groupby, pairwise
 
@@ -1804,7 +1804,7 @@ async def test_the_hook_runs_once_the_seed_has_committed_and_before_any_title_is
     _shelve(fixture, "Watched", range(2), stage=WalkStage.SEED)
     _shelve(fixture, "Films", range(10, 13))
 
-    async def after_seed() -> None:
+    async def after_seed(beat: Callable[[], Awaitable[None]]) -> None:
         fixture.journal.append(("after_seed", "-"))
 
     await fixture.service.reconcile(
@@ -1822,14 +1822,78 @@ async def test_a_plan_without_a_seed_never_runs_the_hook() -> None:
     _shelve(fixture, "Films", range(3))
     calls: list[str] = []
 
-    async def after_seed() -> None:
+    async def after_seed(beat: Callable[[], Awaitable[None]]) -> None:
+        calls.append("after_seed")
+
+    await fixture.service.reconcile(
+        fixture.source, SyncRunKind.FULL, fixture.adapter, after_seed=after_seed
+    )
+    assert fixture.adapter.unit_starts == [("library:Films", 0)], "the premise: the plan was walked"
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("kind", "max_items"),
+    [(SyncRunKind.DELTA, 0), (SyncRunKind.FULL, 10)],
+    ids=["a cursored delta", "a full walk with max_items"],
+)
+async def test_a_walk_that_is_not_planned_never_runs_the_hook(
+    kind: SyncRunKind, max_items: int
+) -> None:
+    """The library has a seed, and the planned walk ahead of this one ran the hook.
+
+    That walk is also what gives the delta its cursor.
+    """
+    fixture = _Fixture()
+    _shelve(fixture, "Watched", range(2), stage=WalkStage.SEED)
+    _shelve(fixture, "Films", range(10, 13))
+    calls: list[str] = []
+
+    async def after_seed(beat: Callable[[], Awaitable[None]]) -> None:
+        calls.append("after_seed")
+
+    await fixture.service.reconcile(
+        fixture.source, SyncRunKind.FULL, fixture.adapter, after_seed=after_seed
+    )
+    assert calls == ["after_seed"], "the premise: a planned walk of this library runs the hook"
+    calls.clear()
+
+    run = await fixture.service.reconcile(
+        fixture.source, kind, fixture.adapter, max_items=max_items, after_seed=after_seed
+    )
+
+    assert run.status is SyncRunStatus.COMPLETED, "the premise: the walk ran to its end"
+    assert await fixture.runs.units_for(run.id) == [], "the premise: the walk was not planned"
+    assert calls == []
+
+
+async def test_a_seed_that_fails_never_runs_the_hook() -> None:
+    """The walk ends `failed` at the seed; the resume, once its seed commits, runs the hook."""
+    fixture = _Fixture()
+    _shelve(fixture, "Watched", range(2), stage=WalkStage.SEED)
+    _shelve(fixture, "Films", range(10, 13))
+    fixture.adapter.fail_unit_after("Watched", 1)
+    calls: list[str] = []
+
+    async def after_seed(beat: Callable[[], Awaitable[None]]) -> None:
         calls.append("after_seed")
 
     run = await fixture.service.reconcile(
         fixture.source, SyncRunKind.FULL, fixture.adapter, after_seed=after_seed
     )
-    assert run.status is SyncRunStatus.COMPLETED, "the premise: the plan was walked"
+
+    assert fixture.adapter.unit_starts == [("library:Watched", 0)], (
+        "the premise: the seed, and nothing after it, was walked"
+    )
+    assert run.status is SyncRunStatus.FAILED
     assert calls == []
+    fixture.adapter.clear_failure()
+    resumed = await fixture.service.reconcile(
+        fixture.source, SyncRunKind.FULL, fixture.adapter, after_seed=after_seed
+    )
+    assert resumed.id == run.id, "the premise: the second attempt resumed the first"
+    assert resumed.status is SyncRunStatus.COMPLETED
+    assert calls == ["after_seed"]
 
 
 async def test_a_resume_whose_seed_had_completed_still_runs_the_hook() -> None:
@@ -1844,7 +1908,7 @@ async def test_a_resume_whose_seed_had_completed_still_runs_the_hook() -> None:
     fixture.adapter.fail_unit_after("Films", 1)
     calls: list[int] = []
 
-    async def after_seed() -> None:
+    async def after_seed(beat: Callable[[], Awaitable[None]]) -> None:
         calls.append(len(fixture.adapter.unit_starts))
 
     first = await fixture.service.reconcile(
@@ -1861,3 +1925,29 @@ async def test_a_resume_whose_seed_had_completed_still_runs_the_hook() -> None:
     assert second.id == first.id, "the premise: the second attempt resumed the first"
     assert fixture.adapter.unit_starts == [("library:Films", 0)]
     assert calls == [1, 0]
+
+
+async def test_the_hook_is_handed_a_beat_that_moves_the_walks_heartbeat() -> None:
+    """A watch walk in the hook can outlast `STALE_AFTER`; its beats keep this walk alive.
+
+    The clock stands at `NOW` through the seed's commits and moves just before the beat,
+    so only a beat that saves and commits can leave the moved instant on the run.
+    """
+    clock = _Clock(NOW)
+    fixture = _Fixture(clock=clock)
+    _shelve(fixture, "Watched", range(2), stage=WalkStage.SEED)
+    _shelve(fixture, "Films", range(10, 13))
+    committed: list[tuple[int, datetime | None]] = []
+
+    async def after_seed(beat: Callable[[], Awaitable[None]]) -> None:
+        committed.append(fixture.checkpoints[-1])
+        clock.now = NOW + STALE_AFTER
+        await beat()
+        committed.append(fixture.checkpoints[-1])
+
+    await fixture.service.reconcile(
+        fixture.source, SyncRunKind.FULL, fixture.adapter, after_seed=after_seed
+    )
+
+    assert committed[0] == (2, NOW), "the premise: the seed's commits beat at NOW"
+    assert committed[1] == (2, NOW + STALE_AFTER)

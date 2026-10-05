@@ -1786,3 +1786,28 @@ async def test_since_at_most_leaves_a_resumed_deltas_cursor_alone(fixture: _Fixt
     )
     assert (run.id, run.cursor_at) == (failed.id, resumed_from), "the premise: the delta resumed"
     assert run.items_seen == 0, "the resumed walk read from a moved cursor"
+
+
+# -- beat: a caller's run, waiting on this walk, kept alive by it ------------
+
+
+async def test_beat_is_awaited_once_after_each_batch_the_walk_commits() -> None:
+    """Each beat sees its batch's commit and not the next one's.
+
+    A walk commits once as it starts, once per batch and once as it ends, so the
+    commits a beat counts are its batch's place plus the start.
+    """
+    fixture = _Fixture(batch_size=2)
+    await fixture.given_completed_walk()
+    for index in range(5):
+        await fixture.given_matched(f"movie-{index}")
+    beats: list[int] = []
+
+    async def beat() -> None:
+        beats.append(fixture.commits)
+
+    await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id, beat=beat)
+
+    assert fixture.positions == [2, 4, 5], "the premise: three batches committed"
+    assert fixture.commits == 5, "the premise: one commit to start, one per batch, one to end"
+    assert beats == [2, 3, 4]

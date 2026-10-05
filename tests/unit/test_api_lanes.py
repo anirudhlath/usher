@@ -87,7 +87,7 @@ from usher.services.home import SCREEN_STALE_GRACE, HomeService
 from usher.services.ingest import IngestService
 from usher.services.jobs import DEFAULT_LEASE_SECONDS
 from usher.services.matching import MatchService
-from usher.services.reconcile import ReconcileService
+from usher.services.reconcile import AfterSeed, ReconcileService
 from usher.services.rows import ROW_PROVIDERS
 from usher.services.rows.cache import Freshness, RefreshQueue, RowCache
 from usher.services.search import SearchService
@@ -268,7 +268,7 @@ class _RecordingReconcile(ReconcileService):
         *,
         max_items: int = 0,
         plan: bool = True,
-        after_seed: Callable[[], Awaitable[object]] | None = None,
+        after_seed: AfterSeed | None = None,
     ) -> SyncRun:
         self._walks.append((source.name, kind))
         # Recorded as well as counted, for the reason `_CountingQueue`
@@ -315,9 +315,12 @@ class _RecordingWatchSync(WatchStateSyncService):
         *,
         user_id: uuid.UUID,
         since_at_most: datetime | None = None,
+        beat: Callable[[], Awaitable[object]] | None = None,
     ) -> SyncRun:
         self._walks.append(source.name)
-        return await super().sync(source, adapter, user_id=user_id, since_at_most=since_at_most)
+        return await super().sync(
+            source, adapter, user_id=user_id, since_at_most=since_at_most, beat=beat
+        )
 
 
 @dataclass(slots=True)

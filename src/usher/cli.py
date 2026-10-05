@@ -83,7 +83,7 @@ from usher.services.curation_validate import DropReason
 from usher.services.genres import GenreNormalisationService
 from usher.services.home import ComposeReport, HomeService
 from usher.services.jobs import JobWorker, WorkerLoop
-from usher.services.reconcile import RETRACTION_ERROR_CODE, WalkRefused
+from usher.services.reconcile import RETRACTION_ERROR_CODE, AfterSeed, WalkRefused
 from usher.services.restore import RestoreRefused, RestoreReport, RestoreService
 from usher.services.rotation import RotationReport, RotationService
 from usher.services.rows import ROW_PROVIDERS, enabled_row_providers, row_provider_settings
@@ -335,6 +335,9 @@ async def _sync(
                     source, adapter, user_id=user_id, since_at_most=run.started_at
                 )
                 print(_watch_line(source, watch))
+                # This run may have resumed the row the after-seed run failed, and it holds
+                # that row's last word: one row is counted once, and not at all if it completed.
+                failed[:] = [one for one in failed if one.id != watch.id]
                 failed.extend(one for one in (run, watch) if one.status is SyncRunStatus.FAILED)
             except WalkRefused as exc:
                 # Another process is walking this source, and runs its watch lane after.
@@ -396,11 +399,15 @@ def _watch_lane(
     adapter: SourceAdapter,
     user_id: uuid.UUID,
     failed: list[SyncRun],
-) -> Callable[[], Awaitable[None]]:
-    """The watch lane as a walk's `after_seed`, printed and kept like the run after the walk."""
+) -> AfterSeed:
+    """The watch lane as a walk's `after_seed`, printed and kept like the run after the walk.
 
-    async def run() -> None:
-        watched = await watch.sync(source, adapter, user_id=user_id)
+    The walk's beat goes on to `watch.sync`, which awaits it with each batch it commits,
+    so the walk's heartbeat keeps moving while the watch lane runs.
+    """
+
+    async def run(beat: Callable[[], Awaitable[None]]) -> None:
+        watched = await watch.sync(source, adapter, user_id=user_id, beat=beat)
         print(_watch_line(source, watched))
         if watched.status is SyncRunStatus.FAILED:
             failed.append(watched)

@@ -229,7 +229,9 @@ def sync_handler(
     `POST /admin/sources/{id}/sync` lands here as an enqueue rather than as a
     synchronous walk.
 
-    The watch lane also runs as soon as a whole-library walk's seed has committed.
+    The watch lane also runs as soon as a whole-library walk's seed has committed,
+    handed the walk's beat, which it awaits with each batch it commits so the walk
+    is not taken for dead while it waits on the watch lane.
 
     A walk refused because another is alive defers the job, and the queue tries it again.
     """
@@ -262,7 +264,7 @@ def sync_handler(
                 source,
                 lane,
                 adapter,
-                after_seed=lambda: watch.sync(source, adapter, user_id=user_id),
+                after_seed=lambda beat: watch.sync(source, adapter, user_id=user_id, beat=beat),
             )
         except WalkRefused as exc:
             # Not a failure: `JobWorker` defers the job without spending an attempt, so a

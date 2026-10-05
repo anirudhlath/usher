@@ -50,7 +50,7 @@ from usher.services.handlers import (
 )
 from usher.services.jobs import JobDeferred
 from usher.services.matching import MatchService
-from usher.services.reconcile import STALE_AFTER, ReconcileService, WalkRefused
+from usher.services.reconcile import STALE_AFTER, AfterSeed, ReconcileService, WalkRefused
 from usher.services.watch_sync import WatchStateSyncService
 from usher.services.watch_write import WatchWriteService
 
@@ -60,6 +60,10 @@ _USER = uuid.UUID("0197a5b0-0000-7000-8000-0000000000ff")
 
 async def _noop() -> None:
     return None
+
+
+async def _beat() -> None:
+    """The walk's beat, as `_RecordingReconcile` hands it to an after-seed hook."""
 
 
 @pytest.fixture
@@ -574,7 +578,7 @@ class _RecordingReconcile(ReconcileService):
         *,
         max_items: int = 0,
         plan: bool = True,
-        after_seed: Callable[[], Awaitable[object]] | None = None,
+        after_seed: AfterSeed | None = None,
     ) -> SyncRun:
         self.calls.append((source.id, kind))
         self.ceilings.append(max_items)
@@ -582,7 +586,7 @@ class _RecordingReconcile(ReconcileService):
         if self._boom is not None:
             raise self._boom
         if self._seeded and after_seed is not None:
-            await after_seed()
+            await after_seed(_beat)
         run = SyncRun(source_id=source.id, kind=kind, status=SyncRunStatus.COMPLETED)
         self.runs.append(run)
         return run
@@ -594,6 +598,7 @@ class _RecordingWatch(WatchStateSyncService):
     def __init__(self, log: list[str], *, raises: Exception | None = None) -> None:
         self.calls: list[tuple[uuid.UUID, uuid.UUID]] = []
         self.since_at_most: list[datetime | None] = []
+        self.beats: list[Callable[[], Awaitable[object]] | None] = []
         self._log = log
         self._boom = raises
 
@@ -604,8 +609,10 @@ class _RecordingWatch(WatchStateSyncService):
         *,
         user_id: uuid.UUID,
         since_at_most: datetime | None = None,
+        beat: Callable[[], Awaitable[object]] | None = None,
     ) -> SyncRun:
         self.since_at_most.append(since_at_most)
+        self.beats.append(beat)
         self.calls.append((source.id, user_id))
         self._log.append("watch")
         if self._boom is not None:
@@ -761,6 +768,24 @@ async def test_the_sync_handler_runs_the_watch_lane_after_the_seed_and_again_aft
     assert events == ["reconcile", "watch", "watch"]
     [walk] = reconcile.runs
     assert watch.since_at_most == [None, walk.started_at]
+
+
+async def test_the_sync_handlers_hook_hands_the_walks_beat_to_the_watch_lane(
+    source: Source, adapter: FakeSourceAdapter
+) -> None:
+    """So the walk's heartbeat moves with each batch the watch lane commits after the seed."""
+    sources = FakeSourceRepository()
+    await sources.add(source)
+    events: list[str] = []
+    reconcile = _RecordingReconcile(events, seeded=True)
+    watch = _RecordingWatch(events)
+
+    await sync_handler(sources, reconcile, watch, _Opener(adapter), user_id=_USER)(
+        Job(kind=JobKind.SYNC, key=f"{source.id}:full")
+    )
+
+    assert events == ["reconcile", "watch", "watch"], "the premise: the hook ran the watch lane"
+    assert watch.beats == [_beat, None]
 
 
 async def test_a_sync_key_with_no_lane_parks_rather_than_killing_the_worker() -> None:

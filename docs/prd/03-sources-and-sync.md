@@ -187,9 +187,10 @@ add up to `USHER_SYNC_BATCH_SIZE` items, and when the unit ends. No unit of a
 stage is fetched until every unit of the stages before it has committed, so an
 episode always finds its series. A walk's units are kept in `sync_run_units`
 with the position each has committed to, and the run's `heartbeat_at` moves on
-every commit and at least once a minute between commits. A unit that
-fails stops the walk: it is marked `failed` at its committed position, and
-pages fetched but not yet committed are dropped. A delta with a cursor, a
+every commit and at least once a minute between commits, except while the watch
+lane runs after the seed, when it moves with each batch that lane commits. A
+unit that fails stops the walk: it is marked `failed` at its committed position,
+and pages fetched but not yet committed are dropped. A delta with a cursor, a
 bounded walk and the gap-closer keep the single walk.
 
 **An unfinished whole-library walk is resumed in place.** The next

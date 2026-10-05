@@ -48,7 +48,7 @@ from usher.ports.ingest import MediaItemUpsert
 from usher.ports.jobs import JobRequest
 from usher.ports.repository import ScoredNeighbor, TitleEmbeddingUpsert
 from usher.ports.search import SearchFilters, SuggestTier
-from usher.ports.source import DEFAULT_UNIT_KEY, SourceItem, SourceItemKind
+from usher.ports.source import DEFAULT_UNIT_KEY, SourceItem, SourceItemKind, SourceWatchState
 from usher.services.curation_validate import (
     ITEM_IDS_KEY,
     REASON_KEY,
@@ -795,7 +795,11 @@ async def test_usher_sync_runs_the_watch_lane_as_soon_as_the_seed_has_committed(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The watch lane after the seed, the walk, then the watch lane read back to its start."""
+    """The watch lane after the seed, the walk, then the watch lane read back to its start.
+
+    `m0` is watched, and the seed stores it, so the watch lane after the seed merges its
+    state. Its provider ids are what match it, to a stub title `_purge` removes by name.
+    """
     source = Source(
         kind=SourceKind.EMBY,
         name="cli-seeded",
@@ -813,10 +817,12 @@ async def test_usher_sync_runs_the_watch_lane_as_soon_as_the_seed_has_committed(
             name=f"cli-movie {index}",
             kind=SourceItemKind.MOVIE,
             year=2021,
+            provider_ids={"tmdb": str(9_900_000 + index)},
         )
         adapter.seed(item, datetime(2026, 7, 1, tzinfo=UTC))
         adapter.place(item.external_id, library)
     adapter.stage("Watched", WalkStage.SEED)
+    adapter.seed_state(SourceWatchState(external_id="m0", position_seconds=0, played=True))
 
     async def _opened(pipeline: object, chosen: Source) -> FakeSourceAdapter:
         return adapter
@@ -825,12 +831,11 @@ async def test_usher_sync_runs_the_watch_lane_as_soon_as_the_seed_has_committed(
 
     await _sync(cli_settings, source_name="cli-seeded", kind="full", allow_full_retraction=False)
 
-    printed = [
-        line.split(" ")[1]
-        for line in capsys.readouterr().out.splitlines()
-        if line.startswith("cli-seeded: ")
+    lines = [
+        line for line in capsys.readouterr().out.splitlines() if line.startswith("cli-seeded: ")
     ]
-    assert printed == ["watch_state", "full", "watch_state"]
+    assert [line.split(" ")[1] for line in lines] == ["watch_state", "full", "watch_state"]
+    assert "merged=1" in lines[0].split(" ")
     async with _session_for(cli_settings) as session:
         runs = await PostgresSyncRunRepository(session).list_for_source(source.id)
     [walk] = [run for run in runs if run.kind is SyncRunKind.FULL]

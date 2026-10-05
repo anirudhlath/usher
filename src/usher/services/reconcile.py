@@ -31,6 +31,8 @@ from usher.services.ingest import IngestService
 
 _tracer = trace.get_tracer("usher.reconcile")
 _meter = metrics.get_meter("usher.reconcile")
+#: Wall time, so a planned walk's time includes the watch walk its `after_seed` runs,
+#: which blocks it.
 _run_duration = _meter.create_histogram(
     "usher.sync.run.duration", unit="s", description="Wall time per sync run"
 )
@@ -70,6 +72,9 @@ STALE_AFTER = timedelta(minutes=10)
 
 #: What a superseded whole-library walk's row says.
 WALK_SUPERSEDED_ERROR = "superseded: a whole-library walk restarts"
+
+#: `reconcile`'s `after_seed`: handed a beat, which moves the walk's heartbeat and commits it.
+AfterSeed = Callable[[Callable[[], Awaitable[None]]], Awaitable[object]]
 
 
 class WalkRefused(Exception):
@@ -172,7 +177,7 @@ class ReconcileService:
         *,
         max_items: int = 0,
         plan: bool = True,
-        after_seed: Callable[[], Awaitable[object]] | None = None,
+        after_seed: AfterSeed | None = None,
     ) -> SyncRun:
         """Walk `source` and reconcile it.
 
@@ -182,7 +187,9 @@ class ReconcileService:
 
         A whole-library walk resumes its kind's unfinished run in place and raises
         `WalkRefused` while that run is alive; see `_claim`. `after_seed` is awaited
-        once a plan's `SEED` stage has committed.
+        once a plan's `SEED` stage has committed, handed a beat to await between its
+        own commits so this walk stays alive while it runs. It must not raise a
+        `UsherPortError`, which would be recorded as this walk's failure.
 
         Never raises a `UsherPortError`.
         """
@@ -415,7 +422,7 @@ class ReconcileService:
         adapter: SourceAdapter,
         *,
         resumed: bool,
-        after_seed: Callable[[], Awaitable[object]] | None,
+        after_seed: AfterSeed | None,
     ) -> None:
         """Walk the adapter's plan, or a resumed run's stored units, one stage at a time.
 
@@ -430,6 +437,8 @@ class ReconcileService:
 
         `after_seed` is awaited once the `SEED` stage has committed, also when an
         earlier attempt committed it, since that attempt may have died before its hook.
+        It is handed `_beat`, which moves this walk's heartbeat, to await between its own
+        commits. It must not raise a `UsherPortError`: one would end this walk `failed`.
         """
         if resumed:
             units = await self._runs.units_for(progress.run.id)
@@ -470,11 +479,11 @@ class ReconcileService:
                 and after_seed is not None
                 and any(unit.stage is WalkStage.SEED for unit in units)
             ):
-                # Nothing beats while the hook runs, so a watch walk in it that outlasts
-                # `STALE_AFTER` leaves this walk looking dead. That watch walk is a filtered
-                # first walk or a cursored delta: a seed is planned only when both watch
-                # filters narrow the library, so a server ignoring them never gets here.
-                await after_seed()
+                # A first watch walk can outlast `STALE_AFTER`, so the hook is handed the
+                # beat, which the watch lane awaits with each batch it commits. This walk's
+                # heartbeat then moves as the watch run's own does, standing still only
+                # while a page rides out its retries.
+                await after_seed(lambda: self._beat(progress))
 
     async def _walk_stage(
         self,

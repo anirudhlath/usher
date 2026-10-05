@@ -157,13 +157,16 @@ class WatchStateSyncService:
         *,
         user_id: uuid.UUID,
         since_at_most: AwareDatetime | None = None,
+        beat: Callable[[], Awaitable[object]] | None = None,
     ) -> SyncRun:
         """Walk this source's watch state into the catalog.
 
         A fresh delta reads from `since_at_most` when that is earlier than its own
         cursor, so a caller can cover what its item walk stored after this lane's
-        last run began. A run another process is still walking is left to it, and
-        this walk runs beside it in a row of its own. Never raises a `UsherPortError`.
+        last run began. `beat` is awaited after every batch this walk commits, so a
+        caller whose own run waits on this walk can keep that run's heartbeat moving.
+        A run another process is still walking is left to it, and this walk runs
+        beside it in a row of its own. Never raises a `UsherPortError`.
         """
         started = time.perf_counter()
         with _tracer.start_as_current_span("sync.watch_state") as span:
@@ -233,7 +236,9 @@ class WatchStateSyncService:
             await self._commit()
             progress = _Progress(run)
             try:
-                await self._walk(progress, source.id, adapter, cursor, user_id, attempt_started)
+                await self._walk(
+                    progress, source.id, adapter, cursor, user_id, attempt_started, beat
+                )
                 run = progress.run.evolve(
                     status=SyncRunStatus.COMPLETED, finished_at=datetime.now(UTC)
                 )
@@ -349,6 +354,7 @@ class WatchStateSyncService:
         cursor: AwareDatetime | None,
         user_id: uuid.UUID,
         observed_at: AwareDatetime,
+        beat: Callable[[], Awaitable[object]] | None,
     ) -> None:
         """The nightly walk.
 
@@ -362,7 +368,7 @@ class WatchStateSyncService:
             seen += 1
             if len(batch) >= self._batch_size:
                 progress.run = await self._flush(
-                    progress.run, source_id, batch, user_id, observed_at, position=seen
+                    progress.run, source_id, batch, user_id, observed_at, position=seen, beat=beat
                 )
                 batch = []
         if batch:
@@ -371,7 +377,7 @@ class WatchStateSyncService:
             # page of nearly every run -- here, a household's most recent
             # resume positions.
             progress.run = await self._flush(
-                progress.run, source_id, batch, user_id, observed_at, position=seen
+                progress.run, source_id, batch, user_id, observed_at, position=seen, beat=beat
             )
 
     async def apply_states(
@@ -424,6 +430,7 @@ class WatchStateSyncService:
         observed_at: AwareDatetime,
         *,
         position: int,
+        beat: Callable[[], Awaitable[object]] | None,
     ) -> SyncRun:
         outcome = await self.apply_states(
             source_id, batch, user_id=user_id, observed_at=observed_at
@@ -445,6 +452,8 @@ class WatchStateSyncService:
         # One commit per batch, exactly like `ReconcileService`: a crash
         # costs the batch in flight, never the walk.
         await self._commit()
+        if beat is not None:
+            await beat()
         return run
 
     def _merge_for(

@@ -106,9 +106,10 @@ The credentials are encrypted at rest with `USHER_SECRET_KEY`. The first walk
 reads every item, as fast as your media server answers, so a large library can
 take hours. The command prints nothing while it runs, so watch it from another
 terminal with `docker compose exec usher usher sync-status`. If it's
-interrupted, run it again. Both walks start over from the beginning and
-duplicate nothing; the watch-state walk asks only for what was watched, so it is
-the short one.
+interrupted, run it again: the item walk picks up where it stopped, and nothing
+is duplicated. An interrupted walk counts as running until it has been quiet for
+10 minutes, and a second run before then is refused. The watch-state walk asks
+only for what was watched, so it is the short one.
 
 **5. Open the console** at <http://localhost:8100/console>. The API's
 interactive reference is at <http://localhost:8100/docs>.
@@ -120,7 +121,8 @@ walk.
 - **Recently Added** appears first, if anything was added to your media server
   in the last 30 days.
 - **Continue Watching**, **Next Up** and **Because You Watched** follow once the
-  watch-state walk has run. It starts after the item walk.
+  watch-state walk has run. It usually runs as soon as the item walk has stored
+  what your account is watching, long before the walk ends, and again after it.
 - An empty home screen early on is not an error. It means no row has anything to
   show yet.
 
