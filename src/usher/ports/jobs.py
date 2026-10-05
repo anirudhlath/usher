@@ -87,7 +87,8 @@ class JobQueue(ABC):
 
         Back to `pending`, claimable no sooner than `run_after_seconds` from now,
         with `reason` as its `last_error`. Spends no attempt, so a deferral never
-        parks a job however often it repeats. `None` for an id it does not find.
+        parks a job however often it repeats. Moves only a `running` job, as
+        `touch` does, so `None` for any other and for an id it does not find.
         """
 
     @abstractmethod

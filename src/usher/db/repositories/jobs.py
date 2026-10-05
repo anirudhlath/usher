@@ -141,14 +141,15 @@ RETURNING *
 
 # A deferral is not a failure: no attempt is spent, so it never parks however often it
 # repeats. The wait is clamped at zero as `_FAIL` clamps its hint, and not jittered: a
-# key has one row, so there is no herd to spread.
+# key has one row, so there is no herd to spread. `status = 'running'` as in `_TOUCH`: a
+# deferral arriving after the job was recovered or parked must move nothing.
 _DEFER = """
 UPDATE jobs SET
     status = 'pending',
     last_error = :reason,
     run_after = clock_timestamp() + make_interval(secs => GREATEST(:run_after_seconds, 0)),
     updated_at = clock_timestamp()
-WHERE id = :id
+WHERE id = :id AND status = 'running'
 RETURNING *
 """
 

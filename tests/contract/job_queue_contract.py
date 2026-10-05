@@ -438,6 +438,20 @@ class JobQueueContract:
         """A worker whose claim a restart requeued out from under it: `None`, not a raise."""
         assert await queue.defer(uuid.uuid4(), reason="gone", run_after_seconds=600.0) is None
 
+    async def test_deferring_a_parked_job_leaves_it_parked(self, queue: JobQueue) -> None:
+        """A deferral that arrives after another worker parked the job moves nothing.
+
+        `None`, as for an unknown id, and still parked with its own error: un-parking
+        poison is the failure parking exists to end.
+        """
+        await queue.enqueue([JobRequest(kind=JobKind.ENRICH, key="t1", priority=JobPriority.NEW)])
+        claimed = await queue.claim([JobKind.ENRICH])
+        await queue.fail(claimed[0].id, error="TMDb returned a list", retryable=False)
+        assert await queue.defer(claimed[0].id, reason="not yet", run_after_seconds=600.0) is None
+        assert [(job.key, job.last_error) for job in await queue.parked()] == [
+            ("t1", "TMDb returned a list")
+        ]
+
     async def test_a_negative_wait_never_dates_a_deferral_before_now(self, queue: JobQueue) -> None:
         """Clamped at zero, as `fail` clamps its own hint."""
         await queue.enqueue([JobRequest(kind=JobKind.ENRICH, key="t1", priority=JobPriority.NEW)])

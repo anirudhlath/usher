@@ -352,7 +352,7 @@ def _sync_failed(runs: Sequence[SyncRun], refused: Sequence[str] = ()) -> str:
     which for a sweep refusal is the two numbers and the ceiling. This says
     *which* lanes failed and stops the command claiming success, rather than
     repeating what was printed a line earlier. A walk is refused when another
-    process's walk of that source is still alive.
+    process's walk of that source and kind is still alive.
 
     **`--allow-full-retraction` is named only when a sweep refusal is among
     them**, and that is the whole reason `RETRACTION_ERROR_CODE` exists. It is

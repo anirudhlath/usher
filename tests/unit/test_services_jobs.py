@@ -592,6 +592,38 @@ async def test_a_deferral_never_parks_a_job_one_failure_short_of_the_ceiling(
     assert await fixture.queue.parked() == []
 
 
+async def test_a_deferral_after_the_job_was_parked_out_from_under_the_worker_moves_nothing(
+    fixture: _Fixture,
+) -> None:
+    """`defer` answers `None` for a job no longer running, and the log says so.
+
+    The claim lapsed and another worker parked the job: un-parking it would retry
+    poison, and an `INFO` line saying it was deferred would misreport the row.
+    """
+
+    async def _park_then_defer(job: Job) -> None:
+        await fixture.queue.fail(job.id, error="TMDb returned a list", retryable=False)
+        raise JobDeferred("not yet", retry_after=600.0)
+
+    fixture.register(JobKind.ENRICH, _park_then_defer)
+    await fixture.given("t1")
+    records: list[tuple[str, str]] = []
+    handle = logger.add(
+        lambda message: records.append((message.record["level"].name, message.record["message"])),
+        level="DEBUG",
+        filter="usher",
+    )
+    try:
+        assert await fixture.worker.run_once() == 1
+    finally:
+        logger.remove(handle)
+    [outcome] = fixture.queue.jobs_of(JobKind.ENRICH)
+    assert (outcome.status, outcome.last_error) == (JobStatus.PARKED, "TMDb returned a list")
+    [(level, line)] = [(level, line) for level, line in records if "t1" in line]
+    assert level == "WARNING", f"a deferral that moved nothing logged at {level}: {line}"
+    assert "not deferred" in line, line
+
+
 async def test_a_claim_requeued_out_from_under_the_worker_does_not_crash(
     fixture: _Fixture,
 ) -> None:
@@ -705,7 +737,7 @@ async def test_a_crashing_handlers_event_is_not_offered_on_the_next_jobs_commit(
     """The clear between jobs, which no flush-ordering case can see.
 
     A bug that is not a `UsherPortError` propagates out of `_run` by design,
-    so neither `except` arm runs -- and a buffer emptied only by those two
+    so no `except` arm that settles the job runs -- and a buffer emptied only by those
     keeps the crashed job's frame until the *next* successful job flushes it,
     on a worker that is built once per process (`usher work`) and lives for
     days. Two passes, because one cannot tell "dropped" from "not yet

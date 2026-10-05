@@ -151,8 +151,8 @@ async def test_the_enrich_handler_hands_the_service_the_rung_its_job_was_claimed
 async def test_an_enrich_key_that_is_not_a_uuid_parks_rather_than_killing_the_worker() -> None:
     """`uuid.UUID("not-a-uuid")` raises a `ValueError`.
 
-    and `JobWorker` deliberately lets anything that is not a `UsherPortError` propagate
-    -- "a bug in a handler is not an upstream failure".
+    and `JobWorker` deliberately lets anything but a `UsherPortError` or a `JobDeferred`
+    propagate -- "a bug in a handler is not an upstream failure".
 
     So without this translation one corrupted key takes the whole worker process down
     instead of parking its own job.
@@ -240,7 +240,7 @@ async def test_a_curate_key_that_is_not_a_uuid_parks_rather_than_killing_the_wor
     """`_title_id`'s reason, for a key that is not a title id.
 
     `uuid.UUID("not-a-uuid")` raises a `ValueError`, and `JobWorker`
-    deliberately lets anything that is not a `UsherPortError` propagate -- so
+    deliberately lets anything but a `UsherPortError` or a `JobDeferred` propagate -- so
     an unconverted key takes the worker process down instead of parking its
     own job. The conversion is shared with the three title-keyed kinds rather
     than written a fourth time; what differs is the sentence, because "job
@@ -746,7 +746,8 @@ async def test_a_sync_key_whose_source_id_does_not_parse_parks_rather_than_killi
 ):
     """`uuid.UUID("not-a-uuid")` raises a `ValueError`.
 
-    and `JobWorker` deliberately lets anything that is not a `UsherPortError` propagate.
+    and `JobWorker` deliberately lets anything but a `UsherPortError` or a `JobDeferred`
+    propagate.
     """
     with pytest.raises(PortDataMalformed) as raised:
         await sync_handler(

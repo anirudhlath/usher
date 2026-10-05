@@ -150,10 +150,10 @@ groups:
             by kind" on dashboard 3 (Pipeline, uid usher-pipeline), with
             "Enrichment throughput and mean latency" beside it for the other
             half. Read "settled", not "completed": jobs.py records the duration
-            point after the span block, so a completed job, a retryable failure
-            and a park all count, and a handler that raises something which is
-            not a UsherPortError counts as neither -- which is what makes this
-            rule fire on a crash loop.
+            point after the span block, so a completed job, a retryable failure,
+            a park and a deferral all count, and a handler that raises something
+            which is neither a UsherPortError nor a JobDeferred counts as none of
+            them -- which is what makes this rule fire on a crash loop.
 
       - alert: Jobs parking
         # PRD 10: "Parked count increasing." The condition is the derivative

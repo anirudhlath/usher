@@ -344,8 +344,8 @@ class JobWorker:
                     await scope.events.flush()
             finally:
                 # The clear at the end of this job, and it is here rather than on the
-                # two `except` arms because a bug that is not a `UsherPortError`
-                # propagates past both by design.
+                # `except` arms that settle the job because a bug propagates past them by
+                # design.
                 scope.events.discard()
         _job_duration.record(time.perf_counter() - started, {"kind": job.kind.value})
 
@@ -373,10 +373,22 @@ class JobWorker:
         )
 
     async def _defer(self, job: Job, exc: JobDeferred, scope: JobScope) -> None:
-        # `INFO`, not `_fail`'s warning, since nothing failed; `str(exc)` for `_fail`'s
-        # reason, since the column and this line are read alike.
-        await scope.queue.defer(job.id, reason=str(exc), run_after_seconds=exc.retry_after)
+        # `str(exc)` for `_fail`'s reason, since the column and these lines are read alike.
+        deferred = await scope.queue.defer(
+            job.id, reason=str(exc), run_after_seconds=exc.retry_after
+        )
         await scope.commit()
+        if deferred is None:
+            # `_fail`'s `unknown`: the claim lapsed and the job was recovered or parked, so
+            # nothing moved, and saying it was deferred would misreport the row.
+            logger.warning(
+                "{kind} job {key} not deferred, since it is no longer running: {reason}",
+                kind=job.kind.value,
+                key=job.key,
+                reason=str(exc),
+            )
+            return
+        # `INFO`, not `_fail`'s warning, since nothing failed.
         logger.info(
             "{kind} job {key} deferred for {seconds:g} s: {reason}",
             kind=job.kind.value,

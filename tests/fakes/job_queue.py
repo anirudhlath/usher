@@ -123,7 +123,9 @@ class FakeJobQueue(JobQueue):
         self, job_id: uuid.UUID, *, reason: str, run_after_seconds: float
     ) -> Job | None:
         found = self._find(job_id)
-        if found is None:
+        # Only a running row moves, as in `_DEFER`: a deferral arriving after the job was
+        # recovered or parked must not un-park it.
+        if found is None or self._jobs[found].status is not JobStatus.RUNNING:
             return None
         # No attempt spent, so a deferral never parks; clamped at zero and unjittered,
         # as `_DEFER` is.
