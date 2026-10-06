@@ -18,10 +18,13 @@ Versioning is `0.x` while the wire contract may still move —
   what the account is watching, then each library's movies and series, then its
   episodes in chunks of `USHER_SYNC_UNIT_MAX_ITEMS` (default 100,000).
   `USHER_SYNC_WALKERS` units are fetched at once while one writer commits them;
-  each unit's position is kept in `sync_run_units`, and the run's
-  `heartbeat_at` shows the writer is alive.
-- A whole-library walk that fails or is killed resumes where it stopped: the
-  same run, each unit from the position it committed. While one is alive — its
+  each unit's position is kept in `sync_run_units`, and the run is marked as a
+  whole-library walk (`sync_runs.planned`, migration `m10h`). Every item walk,
+  single walks included, moves its run's `heartbeat_at` with every commit and at
+  least once a minute between commits, to show it is alive.
+- A whole-library walk that fails or is killed resumes where it stopped, even
+  once the next full or delta walk has closed it as abandoned: the same run,
+  each unit from the position it committed. While one is alive — its
   heartbeat under 10 minutes old — a second is refused, saying how long until
   one whose process stopped can be resumed: `usher sync` exits non-zero, and a
   worker job is deferred 10 minutes, spending none of its attempts. A walk
@@ -100,6 +103,11 @@ Versioning is `0.x` while the wire contract may still move —
   when the walk is planned, and each reads until it passes the next chunk's
   first item. A chunk planned before this release reads to the end of its
   library.
+- **An item walk whose process died is closed by the next full or delta walk of
+  its source** instead of staying `running`. Each such walk first closes its
+  source's item walks that are `running` with a heartbeat 10 minutes old or
+  none, `failed` with `abandoned: its process stopped before it finished`, and
+  logs a WARNING that counts them.
 - **An embedding model that fails the embedder's norm check now fails every
   batch, not only the first.** The first batch used to park one `index` job and
   let every later vector through unchecked.

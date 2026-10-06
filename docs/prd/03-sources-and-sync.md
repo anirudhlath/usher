@@ -235,11 +235,15 @@ as last committed, so the next walk starts at once and a whole-library walk
 resumes. A process killed outright cannot, and its run counts as live until its
 heartbeat is 10 minutes old; a close that cannot finish within 10 seconds is
 given up with a WARNING, and a second Ctrl-C abandons it.
+Every item walk moves its heartbeat with every commit and at least once a minute
+between commits, and before it starts closes its source's item walks still
+`running` whose heartbeat is 10 minutes old or missing, `failed` with
+`abandoned: its process stopped before it finished`, logging a WARNING that
+counts them; a whole-library walk closed this way is resumed all the same.
 A run whose sweep was refused is not resumed, and neither is one that stopped
-before its units were stored or a full run from before units existed: a fresh
-walk starts, and such a run left `running` is closed `failed` with `superseded:
-a whole-library walk restarts`. A delta's claim reads only planned walks, so the
-gap-closer's walk of a source with no cursor never stands in its way.
+before its units were stored: a fresh walk starts. A walk's claim reads only
+whole-library walks, so a single walk's run — the gap-closer's, say — never
+stands in its way.
 
 **The watch lane runs as soon as the seed has committed.** When a
 whole-library walk's plan starts with what the account is watching, `usher

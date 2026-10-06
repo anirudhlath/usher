@@ -565,10 +565,10 @@ class EmbyAdapter(SourceAdapter):
                 self._listing_limit.succeeded()
                 return body
 
-    def list_items(self, since: AwareDatetime | None = None) -> AsyncIterator[SourceItem]:
+    def list_items(self, since: AwareDatetime | None = None) -> AsyncGenerator[SourceItem]:
         return self._list_items(since)
 
-    async def _list_items(self, since: AwareDatetime | None) -> AsyncIterator[SourceItem]:
+    async def _list_items(self, since: AwareDatetime | None) -> AsyncGenerator[SourceItem]:
         # `start_index=0` always: the item lanes have a working `since`
         # cursor, so a failed walk restarts from it rather than resuming.
         query = _listing_query(LIBRARY_SINCE_PARAM, since)

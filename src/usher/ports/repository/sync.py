@@ -103,11 +103,11 @@ class SyncRunRepository(ABC):
 
     @abstractmethod
     async def latest_planned_run(self, source_id: uuid.UUID, kind: SyncRunKind) -> SyncRun | None:
-        """The newest run of this kind that carries a heartbeat, whatever its status.
+        """The newest planned run of this kind, whatever its status.
 
-        `None` if none does. Newest by `started_at`, then by `id`, as `latest_run`. On
-        the item lanes only a planned walk carries a heartbeat, so a single walk's row
-        is never this read's answer.
+        `None` if none is. Newest by `started_at`, then by `id`, as `latest_run`. Only a
+        whole-library walk is planned, so a single walk's row is never this read's
+        answer, however new.
         """
 
     async def latest_incomplete_run(

@@ -5,7 +5,7 @@ For the things the fakes cannot say: a refused sweep, and the sweep's own SQL.
 
 import asyncio
 import functools
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator
 from datetime import UTC, datetime
 
 import pytest
@@ -30,7 +30,9 @@ from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
 from usher.domain.source import Source
 from usher.domain.sync import (
+    ABANDONED_ERROR,
     CANCELLED_ERROR,
+    SyncRun,
     SyncRunKind,
     SyncRunStatus,
     SyncRunUnitStatus,
@@ -162,11 +164,11 @@ class _Adapter:
         # claim about.
         self.since_calls: list[datetime | None] = []
 
-    def list_items(self, since: datetime | None = None) -> AsyncIterator[SourceItem]:
+    def list_items(self, since: datetime | None = None) -> AsyncGenerator[SourceItem]:
         self.since_calls.append(since)
         return self._walk()
 
-    async def _walk(self) -> AsyncIterator[SourceItem]:
+    async def _walk(self) -> AsyncGenerator[SourceItem]:
         for index, item in enumerate(list(self.items.values())):
             if self.fail_after is not None and index >= self.fail_after:
                 raise PortUnavailable("source went away mid-walk")
@@ -482,8 +484,8 @@ async def test_a_failed_planned_delta_resumes_in_place_after_the_gap_closer_walk
 ) -> None:
     """The gap-closer's single walk of a source with no cursor writes the newest delta row.
 
-    That row has no heartbeat, and the planned delta's claim passes over it through the
-    real statement, to the failed walk it resumes.
+    That row beats as every walk does but is not planned, and the planned delta's claim
+    passes over it through the real statement, to the failed walk it resumes.
     """
     for index in range(5):
         adapter.items[f"m{index}"] = _item(f"m{index}")
@@ -496,16 +498,20 @@ async def test_a_failed_planned_delta_resumes_in_place_after_the_gap_closer_walk
         2,
     ), "the premise: a planned delta committed one page, then failed"
     adapter.fail_after = None
-    gap = await service.reconcile(
-        source,
-        SyncRunKind.DELTA,
-        adapter,  # type: ignore[arg-type]
-        max_items=1,
-        plan=False,
+    gap = await asyncio.wait_for(
+        service.reconcile(
+            source,
+            SyncRunKind.DELTA,
+            adapter,  # type: ignore[arg-type]
+            max_items=1,
+            plan=False,
+        ),
+        5.0,
     )
-    assert (gap.status, gap.heartbeat_at) == (SyncRunStatus.FAILED, None), (
+    assert (gap.status, gap.planned) == (SyncRunStatus.FAILED, False), (
         "the premise: the gap-closer left an unfinished single walk's row"
     )
+    assert gap.heartbeat_at is not None, "the premise: only `planned` keeps the row out"
     assert gap.started_at > first.started_at, "the premise: the gap-closer's row is the newer"
 
     second = await service.reconcile(source, SyncRunKind.DELTA, adapter)  # type: ignore[arg-type]
@@ -516,6 +522,43 @@ async def test_a_failed_planned_delta_resumes_in_place_after_the_gap_closer_walk
     assert (stored.status, stored.items_seen) == (SyncRunStatus.COMPLETED, 5)
     [unit] = await runs.units_for(first.id)
     assert (unit.status, unit.position) == (SyncRunUnitStatus.COMPLETED, 5)
+
+
+async def test_a_full_walk_an_older_release_left_running_is_closed_against_real_sql(
+    service: ReconcileService,
+    runs: PostgresSyncRunRepository,
+    source: Source,
+    adapter: _Adapter,
+) -> None:
+    """`running`, with no heartbeat and not planned, as `m10h` reads a walk from before both.
+
+    The next walk of its source closes it `failed` through the real statement, and walks
+    afresh, since it has no plan to resume.
+    """
+    adapter.items["m0"] = _item("m0")
+    legacy = SyncRun(source_id=source.id, kind=SyncRunKind.FULL, started_at=T0)
+    await runs.add(legacy)
+    stored = await runs.latest_run(source.id, SyncRunKind.FULL)
+    assert stored is not None
+    assert (stored.id, stored.status, stored.heartbeat_at, stored.planned) == (
+        legacy.id,
+        SyncRunStatus.RUNNING,
+        None,
+        False,
+    ), "the premise: the row an older release left"
+
+    run = await service.reconcile(source, SyncRunKind.FULL, adapter)  # type: ignore[arg-type]
+
+    assert run.id != legacy.id
+    assert run.status is SyncRunStatus.COMPLETED
+    closed = await runs.get(legacy.id)
+    assert closed is not None
+    assert (closed.status, closed.error, closed.error_code) == (
+        SyncRunStatus.FAILED,
+        ABANDONED_ERROR,
+        None,
+    )
+    assert closed.finished_at is not None
 
 
 async def test_a_run_that_failed_does_not_move_the_delta_cursor(
@@ -560,11 +603,14 @@ async def test_a_delta_that_hits_its_ceiling_records_failed_so_the_next_delta_do
     for index in range(PAST_THE_CEILING):
         adapter.items[f"m{index}"] = _item(f"m{index}")
 
-    truncated = await service.reconcile(
-        source,
-        SyncRunKind.DELTA,
-        adapter,  # type: ignore[arg-type]
-        max_items=CEILING,
+    truncated = await asyncio.wait_for(
+        service.reconcile(
+            source,
+            SyncRunKind.DELTA,
+            adapter,  # type: ignore[arg-type]
+            max_items=CEILING,
+        ),
+        5.0,
     )
 
     # -- arm 1: the walk stopped where it said, and kept what it saw -------
@@ -597,11 +643,14 @@ async def test_a_delta_that_hits_its_ceiling_records_failed_so_the_next_delta_do
         "answers this case can tell apart"
     )
     adapter.since_calls.clear()
-    second = await service.reconcile(
-        source,
-        SyncRunKind.DELTA,
-        adapter,  # type: ignore[arg-type]
-        max_items=CEILING,
+    second = await asyncio.wait_for(
+        service.reconcile(
+            source,
+            SyncRunKind.DELTA,
+            adapter,  # type: ignore[arg-type]
+            max_items=CEILING,
+        ),
+        5.0,
     )
     assert second.cursor_at == completed.started_at, (
         "the truncated delta advanced the cursor to its own start instant, so everything "

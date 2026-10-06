@@ -1294,8 +1294,8 @@ async def test_the_gap_closer_walks_one_stream_even_unbounded_and_uncursored(
 ) -> None:
     """The gap-closer never walks a plan, whatever it is configured to do.
 
-    A planned walk stores its units and a heartbeat before it reads a page, so the
-    gap-closer's delta having neither is the whole claim.
+    A planned walk is stored `planned` and stores its units before it reads a page, so
+    the gap-closer's delta having neither is the whole claim.
     """
     source = _source("A")
     await _seed(fakes, source)
@@ -1312,7 +1312,7 @@ async def test_the_gap_closer_walks_one_stream_even_unbounded_and_uncursored(
     [delta] = [
         run for run in await fakes.runs.list_for_source(source.id) if run.kind is SyncRunKind.DELTA
     ]
-    assert delta.heartbeat_at is None
+    assert delta.planned is False
     assert await fakes.runs.units_for(delta.id) == []
 
 

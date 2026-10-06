@@ -49,10 +49,10 @@ class _Adapter:
     def __init__(self, items: list[SourceItem]) -> None:
         self._items = items
 
-    def list_items(self, since: datetime | None = None) -> AsyncIterator[SourceItem]:
+    def list_items(self, since: datetime | None = None) -> AsyncGenerator[SourceItem]:
         return self._walk()
 
-    async def _walk(self) -> AsyncIterator[SourceItem]:
+    async def _walk(self) -> AsyncGenerator[SourceItem]:
         for item in self._items:
             yield item
 

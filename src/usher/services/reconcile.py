@@ -15,6 +15,7 @@ from pydantic import AwareDatetime
 
 from usher.domain.source import Source
 from usher.domain.sync import (
+    ABANDONED_ERROR,
     STAGE_ORDER,
     STALE_AFTER,
     SyncRun,
@@ -80,9 +81,6 @@ CEILING_ERROR_CODE = "gap_delta_ceiling"
 # The same device for the *other* failure an operator has a command for.
 RETRACTION_ERROR_CODE = "availability_ceiling"
 
-#: What a superseded whole-library walk's row says.
-WALK_SUPERSEDED_ERROR = "superseded: a whole-library walk restarts"
-
 #: `reconcile`'s `after_seed`: handed a beat, which moves the walk's heartbeat and commits it.
 AfterSeed = Callable[[Callable[[], Awaitable[None]]], Awaitable[object]]
 
@@ -139,6 +137,14 @@ class _Fetched:
 
     unit_key: str
     page: UnitPage | None = None
+    error: Exception | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _Listed:
+    """What a single walk's reader hands the writer: an item, the listing's end, or its error."""
+
+    item: SourceItem | None = None
     error: Exception | None = None
 
 
@@ -206,9 +212,9 @@ class ReconcileService:
         self._walkers = walkers
         self._heartbeat_seconds = heartbeat_seconds
         self._clock = clock
-        # A unit's duration is two readings of this, never of `clock`: a wall clock
-        # stepped back mid-unit loses the point, which the histogram drops as negative,
-        # and one stepped forward inflates it.
+        # A unit's duration and the deadline of a beat between commits are readings of
+        # this, never of `clock`: a wall clock stepped back mid-unit would lose the
+        # point, which the histogram drops as negative, and hold the next beat off.
         self._timer = timer
 
     async def reconcile(
@@ -227,11 +233,14 @@ class ReconcileService:
         adapter's plan, unless `max_items` bounds it or `plan` is false; every other
         walk is one stream.
 
-        A whole-library walk resumes its kind's unfinished run in place and raises
-        `WalkRefused` while that run is alive; see `_claim`. `after_seed` is awaited
-        once a plan's `SEED` stage has committed, handed a beat to await between its
-        own commits so this walk stays alive while it runs. It must not raise a
-        `UsherPortError`, which would be recorded as this walk's failure.
+        Every walk first closes its source's item walks that are `running` and not
+        live, `failed` with `ABANDONED_ERROR`; any it closed are counted in a WARNING
+        and committed at once. A whole-library walk then resumes its kind's unfinished
+        run in place, and raises `WalkRefused` while that run is alive; see `_claim`.
+
+        `after_seed` is awaited once a plan's `SEED` stage has committed, handed a beat
+        to await between its own commits so this walk stays alive while it runs. It must
+        not raise a `UsherPortError`, which would be recorded as this walk's failure.
 
         Cancelled once its run has committed, the walk closes that run with
         `close_cancelled` before the cancellation propagates.
@@ -244,8 +253,20 @@ class ReconcileService:
             span.set_attribute("usher.sync.kind", kind.value)
             cursor = await self.cursor_for(source, kind)
             planned = plan and not max_items and (kind is SyncRunKind.FULL or cursor is None)
+            now = self._clock()
+            closed = await self._runs.close_abandoned(
+                source.id, _ITEM_LANES, now=now, error=ABANDONED_ERROR
+            )
+            if closed:
+                logger.warning(
+                    "closed {count} item walk(s) of {source} whose process had stopped",
+                    count=closed,
+                    source=source.name,
+                )
+                # Committed at once, so a walk refused below still leaves them closed.
+                await self._commit()
             try:
-                claimed = await self._claim(source, kind) if planned else None
+                claimed = await self._claim(source, kind, now) if planned else None
             except WalkRefused:
                 # Beside `usher.sync.truncated`: Usher declined, and nothing upstream failed.
                 span.set_attribute("usher.sync.refused", True)
@@ -255,9 +276,10 @@ class ReconcileService:
                     source_id=source.id,
                     kind=kind,
                     cursor_at=cursor,
-                    # A planned walk's first heartbeat rides the insert, so one that dies
-                    # while planning still leaves a row saying when it was last alive.
-                    heartbeat_at=self._clock() if planned else None,
+                    # The first heartbeat rides the insert, so a walk that dies before its
+                    # first commit still leaves a row saying when it was last alive.
+                    heartbeat_at=now,
+                    planned=planned,
                 )
                 # Inserted and committed before the walk begins, `RUNNING`: an
                 # operator watching a six-hour sync needs a row to watch, and a
@@ -271,7 +293,7 @@ class ReconcileService:
                     error=None,
                     error_code=None,
                     finished_at=None,
-                    heartbeat_at=self._clock(),
+                    heartbeat_at=now,
                 )
                 await self._runs.save(run)
             run_id = run.id
@@ -407,44 +429,30 @@ class ReconcileService:
         ]
         return max(cursors) if cursors else None
 
-    async def _claim(self, source: Source, kind: SyncRunKind) -> SyncRun | None:
+    async def _claim(self, source: Source, kind: SyncRunKind, now: datetime) -> SyncRun | None:
         """The unfinished whole-library walk this one resumes, or `None` for a fresh one.
 
-        A delta reads only planned walks, so a single walk's row -- the gap-closer's,
-        which walks a source with no cursor as one stream -- never stands in its way,
-        however new. A full walk reads its kind's newest row: no caller walks a full
-        walk as one stream, so that row is a planned walk's or one from before units.
+        It reads only planned walks, so a single walk's row -- the gap-closer's, which
+        walks a source with no cursor as one stream, or a bounded walk's -- never stands
+        in its way, however new.
 
-        A `running` row whose heartbeat is under `STALE_AFTER` old is a live walk, and
-        raises `WalkRefused`. A row with units resumes, unless its sweep was refused:
-        its walk is what that refusal doubts, so the library is read again. Every
-        other unfinished row read here -- one that died before its plan was stored,
-        or a full walk from before units existed -- is superseded.
+        A dead run was closed before the claim, at the same `now`, so a row read here is
+        one of three. A `running` row is a live walk, and raises `WalkRefused`. A row
+        with units resumes, unless its sweep was refused: its walk is what that refusal
+        doubts, so the library is read again. Any other -- one that stopped before its
+        plan was stored -- is finished, and left as it is.
 
         Not atomic: the check is a read and the claim a later write, with nothing
         locking between them, so two walks that start together can both proceed.
         """
-        newest = await self._runs.latest_incomplete_run(
-            source.id, kind, planned=kind is SyncRunKind.DELTA
-        )
+        newest = await self._runs.latest_incomplete_run(source.id, kind, planned=True)
         if newest is None:
             return None
-        now = self._clock()
         if newest.heartbeat_at is not None and is_live(newest, now):
             raise WalkRefused(_refusal(source, now - newest.heartbeat_at))
-        has_units = bool(await self._runs.units_for(newest.id))
-        if has_units and newest.error_code != RETRACTION_ERROR_CODE:
+        if await self._runs.units_for(newest.id) and newest.error_code != RETRACTION_ERROR_CODE:
             return newest
-        await self._supersede(newest)
         return None
-
-    async def _supersede(self, run: SyncRun) -> None:
-        """Close an unfinished walk the next one will not resume, in the fresh run's commit.
-
-        One already `failed` is closed already, and keeps its own error.
-        """
-        if run.status is SyncRunStatus.RUNNING:
-            await self._runs.save(self._failed(run, WALK_SUPERSEDED_ERROR, code=None))
 
     async def _walk(
         self,
@@ -454,27 +462,75 @@ class ReconcileService:
         cursor: AwareDatetime | None,
         max_items: int,
     ) -> bool:
-        """Walk the source into the catalog.
+        """Walk the source into the catalog: a reader lists while this task writes.
 
-        `True` when it stopped at `max_items` with the source still holding more.
+        `True` when it stopped at `max_items` with the source still holding more. Every
+        batch commits with a new heartbeat, and a beat of the heartbeat alone falls due
+        `heartbeat_seconds` after the last commit or beat. The reader's error is raised
+        after every item it read ahead of it, the partial batch uncommitted. However
+        the walk ends, the reader is cancelled and awaited first.
         """
-        batch: list[SourceItem] = []
-        pulled = 0
-        truncated = False
-        async for item in adapter.list_items(since=cursor):
-            pulled += 1
-            # `>`, not `>=`, and the difference is a whole cursor.
-            if max_items and pulled > max_items:
-                truncated = True
-                break
-            batch.append(item)
-            if len(batch) >= self._batch_size:
-                progress.run = await self._flush(source, progress.run, batch)
-                batch = []
-        if batch:
-            # The trailing partial batch, on both exits.
-            progress.run = await self._flush(source, progress.run, batch)
-        return truncated
+        queue: asyncio.Queue[_Listed] = asyncio.Queue(maxsize=self._batch_size)
+        reader = asyncio.create_task(self._list(adapter, cursor, queue))
+        try:
+            batch: list[SourceItem] = []
+            pulled = 0
+            truncated = False
+            due = self._timer() + self._heartbeat_seconds
+            while True:
+                if self._timer() >= due:
+                    await self._beat(progress)
+                    due = self._timer() + self._heartbeat_seconds
+                    continue
+                try:
+                    listed = await asyncio.wait_for(queue.get(), max(0.0, due - self._timer()))
+                except TimeoutError:
+                    continue
+                if listed.error is not None:
+                    raise listed.error
+                if listed.item is None:
+                    break
+                pulled += 1
+                # `>`, not `>=`, and the difference is a whole cursor.
+                if max_items and pulled > max_items:
+                    truncated = True
+                    break
+                batch.append(listed.item)
+                if len(batch) >= self._batch_size:
+                    progress.run = await self._flush(
+                        source, progress.run.evolve(heartbeat_at=self._clock()), batch
+                    )
+                    batch = []
+                    due = self._timer() + self._heartbeat_seconds
+            if batch:
+                # The trailing partial batch, on both exits.
+                progress.run = await self._flush(
+                    source, progress.run.evolve(heartbeat_at=self._clock()), batch
+                )
+            return truncated
+        finally:
+            reader.cancel()
+            await asyncio.gather(reader, return_exceptions=True)
+
+    @staticmethod
+    async def _list(
+        adapter: SourceAdapter, cursor: AwareDatetime | None, queue: asyncio.Queue[_Listed]
+    ) -> None:
+        """The reader: put each item the listing yields on `queue`, then its end.
+
+        It never touches the database. An error the listing raises goes on the queue in
+        place of the end, and the reader stops. However it stops, cancelled included,
+        it closes the listing, so whatever the listing reads ahead stops with it.
+        """
+        try:
+            items = adapter.list_items(since=cursor)
+            async with aclosing(items):
+                async for item in items:
+                    await queue.put(_Listed(item))
+        except Exception as exc:
+            await queue.put(_Listed(error=exc))
+            return
+        await queue.put(_Listed())
 
     async def _walk_plan(
         self,
@@ -630,14 +686,14 @@ class ReconcileService:
         open_units = len(units)
         # A deadline, not a silence: pages that keep arriving below a batch would
         # otherwise hold every beat off.
-        due = time.monotonic() + self._heartbeat_seconds
+        due = self._timer() + self._heartbeat_seconds
         while open_units:
-            if time.monotonic() >= due:
+            if self._timer() >= due:
                 await self._beat(progress)
-                due = time.monotonic() + self._heartbeat_seconds
+                due = self._timer() + self._heartbeat_seconds
                 continue
             try:
-                fetched = await asyncio.wait_for(queue.get(), max(0.0, due - time.monotonic()))
+                fetched = await asyncio.wait_for(queue.get(), max(0.0, due - self._timer()))
             except TimeoutError:
                 continue
             unit = current[fetched.unit_key]
@@ -653,7 +709,7 @@ class ReconcileService:
             current[unit.unit_key] = await self._commit_unit(
                 source, progress, unit, pages, done=done
             )
-            due = time.monotonic() + self._heartbeat_seconds
+            due = self._timer() + self._heartbeat_seconds
             held[unit.unit_key] = []
             if done:
                 open_units -= 1

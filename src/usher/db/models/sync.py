@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -72,9 +73,11 @@ class SyncRunRow(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # Nullable with no server default: a run written before a writer heartbeat
-    # existed has none, and that absence is what marks it a walk without a plan.
+    # Nullable with no server default: every walk moves it, and a run written
+    # before heartbeats existed has none.
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # A whole-library walk's flag: the rows a walk's claim and `live_walk` read.
+    planned: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
 
     __table_args__ = (
         # "The cursor for the next delta walk" is a single-row lookup: the newest

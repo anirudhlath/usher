@@ -515,6 +515,7 @@ async def test_status_prefers_a_live_whole_library_walk_to_a_newer_delta(
         kind=kind,
         started_at=now - timedelta(hours=3),
         heartbeat_at=now if live else now - STALE_AFTER - timedelta(minutes=1),
+        planned=True,
     )
     delta = SyncRun(
         source_id=source_id,

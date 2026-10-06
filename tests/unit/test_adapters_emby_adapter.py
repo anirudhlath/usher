@@ -8,11 +8,11 @@ import itertools
 import json
 import time
 import weakref
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, Sequence
+from collections.abc import AsyncGenerator, Callable, Coroutine, Sequence
 from contextlib import aclosing
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Any
 from urllib.parse import quote
 
 import httpx
@@ -1260,7 +1260,7 @@ async def test_the_next_page_is_requested_while_the_current_one_is_handled() -> 
     ],
 )
 async def test_stopping_the_walk_cancels_the_request_it_read_ahead(
-    walk: Callable[[EmbyAdapter], AsyncIterator[SourceItem | SourceWatchState]],
+    walk: Callable[[EmbyAdapter], AsyncGenerator[SourceItem | SourceWatchState]],
 ) -> None:
     server = FakeEmbyServer()
     for index in range(4):
@@ -1271,7 +1271,7 @@ async def test_stopping_the_walk_cancels_the_request_it_read_ahead(
     previous = loop.get_exception_handler()
     loop.set_exception_handler(lambda _loop, context: reported.append(context))
     adapter = _on(_parking_second_listing(server, parked, cancelled), page_size=2)
-    items = cast(AsyncGenerator[SourceItem | SourceWatchState], walk(adapter))
+    items = walk(adapter)
     try:
         first = await asyncio.wait_for(anext(items), timeout=2.0)
         await asyncio.wait_for(parked.wait(), timeout=2.0)
@@ -1368,7 +1368,7 @@ async def test_a_read_ahead_that_failed_is_retrieved_when_the_walk_stops() -> No
     loop.set_exception_handler(_recording(lost))
     adapter = _on(handle, page_size=2)
     try:
-        items = cast(AsyncGenerator[SourceItem], adapter.list_items())
+        items = adapter.list_items()
         await asyncio.wait_for(anext(items), timeout=2.0)
         ahead = _the_read_ahead()
         await asyncio.wait_for(refused.wait(), timeout=2.0)
@@ -1423,7 +1423,7 @@ async def test_a_read_ahead_that_fails_once_cancelled_is_retrieved_too() -> None
     loop.set_exception_handler(_recording(lost))
     adapter = _on(handle, page_size=2)
     try:
-        items = cast(AsyncGenerator[SourceItem], adapter.list_items())
+        items = adapter.list_items()
         await asyncio.wait_for(anext(items), timeout=2.0)
         ahead = _the_read_ahead()
         await asyncio.wait_for(parked.wait(), timeout=2.0)
@@ -1494,7 +1494,7 @@ async def test_a_read_ahead_that_fails_after_its_walk_was_cancelled_is_retrieved
     previous = loop.get_exception_handler()
     loop.set_exception_handler(_recording(lost))
     adapter = _on(handle, page_size=2)
-    items = cast(AsyncGenerator[SourceItem], adapter.list_items())
+    items = adapter.list_items()
 
     async def stop(walk: AsyncGenerator[SourceItem]) -> None:
         await walk.aclose()

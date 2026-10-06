@@ -629,6 +629,25 @@ class SyncRunRepositoryContract:
             LATER,
         )
 
+    async def test_planned_survives_every_read(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        """`get`, both newest reads and `list_for_source` each carry it, after a save.
+
+        The last three read the row through a `SELECT *` of their own, as the heartbeat's
+        case says, and `latest_planned_run` finds the run by it.
+        """
+        one = run(source_id, kind=SyncRunKind.FULL, heartbeat_at=EARLIER, planned=True)
+        await repository.add(one)
+        await repository.save(one.evolve(heartbeat_at=LATER, items_seen=10))
+
+        stored = await repository.get(one.id)
+        newest = await repository.latest_run(source_id, SyncRunKind.FULL)
+        planned = await repository.latest_planned_run(source_id, SyncRunKind.FULL)
+        [listed] = await repository.list_for_source(source_id)
+        assert stored is not None and newest is not None and planned is not None
+        assert [each.planned for each in (stored, newest, planned, listed)] == [True] * 4
+
     # --- the newest run of a kind, whatever its status ----------------------
 
     async def test_the_latest_run_is_the_newest_of_its_kind_whatever_its_status(

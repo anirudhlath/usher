@@ -72,10 +72,10 @@ ORDER BY started_at DESC, id DESC
 LIMIT 1
 """
 
-# `_NEWEST` among the runs that carry a heartbeat: on the item lanes, the planned walks.
+# `_NEWEST` among the planned runs, the whole-library walks.
 _NEWEST_PLANNED = """
 SELECT * FROM sync_runs
-WHERE source_id = :source_id AND kind = :kind AND heartbeat_at IS NOT NULL
+WHERE source_id = :source_id AND kind = :kind AND planned
 ORDER BY started_at DESC, id DESC
 LIMIT 1
 """

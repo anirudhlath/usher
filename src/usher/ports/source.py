@@ -368,7 +368,7 @@ class SourceAdapter(ABC):
         """
 
     @abstractmethod
-    def list_items(self, since: AwareDatetime | None = None) -> AsyncIterator[SourceItem]:
+    def list_items(self, since: AwareDatetime | None = None) -> AsyncGenerator[SourceItem]:
         """Walk the library, or only items changed since a cursor."""
 
     @abstractmethod

@@ -295,10 +295,10 @@ class FakeSourceAdapter(SourceAdapter):
             return SourceStatus(reachable=True, authenticated=False, detail=str(exc))
         return SourceStatus(reachable=True, authenticated=True, server_version="fake-1.0")
 
-    def list_items(self, since: AwareDatetime | None = None) -> AsyncIterator[SourceItem]:
+    def list_items(self, since: AwareDatetime | None = None) -> AsyncGenerator[SourceItem]:
         return self._walk_items(since)
 
-    async def _walk_items(self, since: AwareDatetime | None) -> AsyncIterator[SourceItem]:
+    async def _walk_items(self, since: AwareDatetime | None) -> AsyncGenerator[SourceItem]:
         await self._ready()
         yielded = 0
         for external_id, item in list(self._items.items()):

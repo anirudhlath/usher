@@ -111,13 +111,11 @@ class FakeSyncRunRepository(SyncRunRepository):
 
     def _newest(self, source_id: uuid.UUID, kind: SyncRunKind, *, planned: bool) -> SyncRun | None:
         # Newest by `(started_at, id)`, the Postgres arm's `ORDER BY`; `planned` is its
-        # `heartbeat_at IS NOT NULL`.
+        # `AND planned`.
         found = [
             one
             for one in self._runs.values()
-            if one.source_id == source_id
-            and one.kind is kind
-            and (one.heartbeat_at is not None or not planned)
+            if one.source_id == source_id and one.kind is kind and (one.planned or not planned)
         ]
         return max(found, key=lambda one: (one.started_at, one.id)) if found else None
 

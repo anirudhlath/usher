@@ -463,6 +463,66 @@ async def test_m10b_gives_an_existing_sync_run_a_zero_position(postgres_url: str
         await drop_database(admin, scratch)
 
 
+async def test_m10h_marks_the_item_walks_that_carry_a_heartbeat_planned(postgres_url: str) -> None:
+    """Below `m10h` an item lane's heartbeat meant a whole-library walk; above, `planned` does.
+
+    Whatever the run's status: a deploy meets `running` rows, the walk it stopped among them.
+    """
+    admin, scratch, url = await scratch_database(postgres_url, "planned")
+    source_id = new_id()
+    rows = {
+        new_id(): ("full", "failed", True, True),
+        new_id(): ("delta", "completed", True, True),
+        new_id(): ("full", "running", True, True),
+        new_id(): ("full", "running", False, False),
+        new_id(): ("full", "completed", False, False),
+        new_id(): ("delta", "failed", False, False),
+        new_id(): ("watch_state", "running", True, False),
+    }
+    try:
+        await asyncio.to_thread(functools.partial(run_alembic, url, "m10g", direction="up"))
+        scratch_engine = build_engine(url)
+        try:
+            async with scratch_engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        "INSERT INTO sources "
+                        "(id, kind, name, base_url, credentials_ref, device_id) "
+                        "VALUES (:id, 'emby', 'Planned Backfill', 'http://example.invalid', "
+                        "'unused', 'unused')"
+                    ),
+                    {"id": source_id},
+                )
+                for run_id, (kind, status, beating, _) in rows.items():
+                    await conn.execute(
+                        text(
+                            "INSERT INTO sync_runs (id, source_id, kind, status, heartbeat_at) "
+                            "VALUES (:id, :source_id, :kind, :status, "
+                            "CASE WHEN :beating THEN now() END)"
+                        ),
+                        {
+                            "id": run_id,
+                            "source_id": source_id,
+                            "kind": kind,
+                            "status": status,
+                            "beating": beating,
+                        },
+                    )
+                assert "planned" not in await column_set(url, "sync_runs"), (
+                    "the premise: what reads back below was written by `m10h.upgrade()`"
+                )
+            await asyncio.to_thread(run_alembic, url, "head")
+            async with scratch_engine.connect() as conn:
+                stored = dict(
+                    (await conn.execute(text("SELECT id, planned FROM sync_runs"))).tuples().all()
+                )
+            assert stored == {run_id: planned for run_id, (_, _, _, planned) in rows.items()}
+        finally:
+            await scratch_engine.dispose()
+    finally:
+        await drop_database(admin, scratch)
+
+
 async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) -> None:
     """`downgrade base` then `upgrade head`, on a throwaway database.
 
@@ -486,6 +546,9 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # column set satisfies the absence above, so without this the block
         # would pass at any depth at which `sync_run_units` had ceased to exist.
         assert at_m10g_unit_columns, "the premise: `sync_run_units` still exists at `m10g`"
+        at_m10g_run_columns = await column_set(url, "sync_runs")
+        assert "planned" not in at_m10g_run_columns, "planned should not exist below m10h"
+        assert "heartbeat_at" in at_m10g_run_columns, "the premise: `sync_runs` stands at `m10g`"
 
         # **A named stop at `m10f`, holding `m10g`'s.**
         await asyncio.to_thread(functools.partial(run_alembic, url, "m10f", direction="down"))
