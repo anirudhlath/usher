@@ -3,7 +3,7 @@
 import asyncio
 import contextlib
 import uuid
-from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from itertools import groupby, pairwise
 
@@ -16,7 +16,7 @@ from opentelemetry.sdk.metrics.export import HistogramDataPoint, InMemoryMetricR
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-from pydantic import SecretStr
+from pydantic import AwareDatetime, SecretStr
 
 from tests.fakes.episode_repository import FakeEpisodeRepository
 from tests.fakes.event_publisher import FakeEventPublisher
@@ -31,6 +31,7 @@ from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
 from usher.domain.source import Source
 from usher.domain.sync import (
+    CANCELLED_ERROR,
     STALE_AFTER,
     SyncRun,
     SyncRunKind,
@@ -120,6 +121,7 @@ class _Fixture:
         self.runs = FakeSyncRunRepository()
         self.events = FakeEventPublisher()
         self.commits = 0
+        self.rollbacks = 0
         # The adapter's own list, so its `fetched` entries and the `completed`
         # entries `_commit` adds are ordered against each other.
         self.journal = self.adapter.journal
@@ -141,6 +143,7 @@ class _Fixture:
             runs=self.runs,
             events=self.events,
             commit=self._commit,
+            rollback=self._rollback,
             batch_size=batch_size,
             max_retract_fraction=max_retract_fraction,
             walkers=walkers,
@@ -163,6 +166,9 @@ class _Fixture:
             if unit.status is SyncRunUnitStatus.COMPLETED and key not in self._completed:
                 self._completed.add(key)
                 self.journal.append(("completed", unit.unit_key))
+
+    async def _rollback(self) -> None:
+        self.rollbacks += 1
 
 
 @pytest.fixture
@@ -2221,3 +2227,93 @@ async def test_a_unit_that_fails_records_no_duration(meter_reader: InMemoryMetri
         "the premise: Shorts was claimed, after Films"
     )
     assert _unit_durations(meter_reader) == {(fixture.source.name, "titles"): (1, 90.0)}
+
+
+# -- a cancelled walk --------------------------------------------------------
+
+
+async def _until(condition: Callable[[], bool]) -> None:
+    """Yield to the loop until `condition` holds, failing rather than hanging."""
+    for _ in range(10_000):
+        if condition():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("the condition never held")
+
+
+async def test_a_cancelled_single_walk_closes_its_run_and_stays_cancelled(
+    fixture: _Fixture,
+) -> None:
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter, plan=False)
+    listing = asyncio.Event()
+
+    async def stalled(since: AwareDatetime | None = None) -> AsyncIterator[SourceItem]:
+        listing.set()
+        await asyncio.Event().wait()
+        yield _item("m1")
+
+    fixture.adapter.list_items = stalled  # type: ignore[method-assign]
+    task = asyncio.create_task(
+        fixture.service.reconcile(fixture.source, SyncRunKind.DELTA, fixture.adapter)
+    )
+    async with asyncio.timeout(5):
+        await listing.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        async with asyncio.timeout(5):
+            await task
+
+    stored = await fixture.runs.latest_run(fixture.source.id, SyncRunKind.DELTA)
+    assert stored is not None
+    assert (stored.status, stored.error) == (SyncRunStatus.FAILED, CANCELLED_ERROR)
+    assert fixture.rollbacks == 1
+
+
+async def test_a_cancelled_planned_walk_is_resumed_at_once(fixture: _Fixture) -> None:
+    _shelve(fixture, "Films", range(3))
+    release = fixture.adapter.hold("Films")
+    task = asyncio.create_task(
+        fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    )
+    await _until(lambda: bool(fixture.adapter.unit_starts))
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        async with asyncio.timeout(5):
+            await task
+    cancelled = await fixture.runs.latest_run(fixture.source.id, SyncRunKind.FULL)
+    assert cancelled is not None
+    assert (cancelled.status, cancelled.error) == (SyncRunStatus.FAILED, CANCELLED_ERROR)
+
+    release.set()
+    resumed = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+
+    assert (resumed.id, resumed.status) == (cancelled.id, SyncRunStatus.COMPLETED)
+
+
+async def test_a_walk_whose_close_fails_still_ends_cancelled(fixture: _Fixture) -> None:
+    async def reset() -> None:
+        raise RuntimeError("connection reset")
+
+    fixture.service._rollback = reset  # the close's own failure, not the walk's
+    _shelve(fixture, "Films", range(3))
+    fixture.adapter.hold("Films")
+    task = asyncio.create_task(
+        fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    )
+    await _until(lambda: bool(fixture.adapter.unit_starts))
+    lines: list[str] = []
+    sink = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            async with asyncio.timeout(5):
+                await task
+    finally:
+        logger.remove(sink)
+    stored = await fixture.runs.latest_run(fixture.source.id, SyncRunKind.FULL)
+    assert stored is not None
+    assert stored.status is SyncRunStatus.RUNNING, "the premise: nothing closed it"
+    assert [line.rstrip("\n") for line in lines] == [
+        f"a cancelled sync of {fixture.source.name} could not close its run {stored.id} "
+        "(connection reset); it counts as live until its heartbeat is 10 minutes old"
+    ]

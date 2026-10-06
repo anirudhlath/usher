@@ -119,6 +119,7 @@ def service(
         # each test isolated. What is under test is the ordering of the
         # writes and the SQL they produce, not their durability.
         commit=session.flush,
+        rollback=session.rollback,
         batch_size=1_000,
     )
 

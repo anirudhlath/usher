@@ -74,6 +74,12 @@ Versioning is `0.x` while the wire contract may still move —
 
 ### Fixed
 
+- **A sync stopped with Ctrl-C no longer blocks the next one for 10 minutes.**
+  The cancelled walk closes its run `failed` with
+  `cancelled: the walk was stopped before it finished`, as last committed, so
+  the next `usher sync` starts at once and a whole-library walk resumes. A
+  process killed outright still leaves its run live until its heartbeat is 10
+  minutes old.
 - **Items deleted from the source mid-walk no longer hide others from the
   walk**, unless more of them vanish between two pages than a page re-reads.
   Each page re-reads the end of the page before, so a full walk no longer marks

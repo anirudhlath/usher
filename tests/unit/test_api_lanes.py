@@ -253,9 +253,15 @@ class _RecordingReconcile(ReconcileService):
         runs: SyncRunRepository,
         events: EventPublisher,
         commit: Callable[[], Awaitable[None]],
+        rollback: Callable[[], Awaitable[None]],
     ) -> None:
         super().__init__(
-            ingest=ingest, media_items=media_items, runs=runs, events=events, commit=commit
+            ingest=ingest,
+            media_items=media_items,
+            runs=runs,
+            events=events,
+            commit=commit,
+            rollback=rollback,
         )
         self._walks = walks
         self._ceilings = ceilings
@@ -298,6 +304,7 @@ class _RecordingWatchSync(WatchStateSyncService):
         runs: SyncRunRepository,
         queue: JobQueue,
         commit: Callable[[], Awaitable[None]],
+        rollback: Callable[[], Awaitable[None]],
     ) -> None:
         super().__init__(
             media_items=media_items,
@@ -305,6 +312,7 @@ class _RecordingWatchSync(WatchStateSyncService):
             runs=runs,
             queue=queue,
             commit=commit,
+            rollback=rollback,
         )
         self._walks = walks
 
@@ -387,6 +395,9 @@ def _pipeline(
     async def commit() -> None:
         fakes.commits.append(time.perf_counter())
 
+    async def rollback() -> None:
+        return None
+
     # Real fakes rather than `None`: `build_worker` constructs
     # `DeriveService` eagerly whenever a provider is present, so an unused
     # slot here would fail at construction instead of at the lane behaviour
@@ -437,6 +448,7 @@ def _pipeline(
             runs=runs,
             events=fakes.events,
             commit=commit,
+            rollback=rollback,
         ),
         watch=_RecordingWatchSync(
             fakes.watch_synced,
@@ -445,6 +457,7 @@ def _pipeline(
             runs=runs,
             queue=queue,
             commit=commit,
+            rollback=rollback,
         ),
         # Over the port doubles rather than `cast(Any, None)`: no lane reads
         # it, but a field left unset here is one a lane could start reading

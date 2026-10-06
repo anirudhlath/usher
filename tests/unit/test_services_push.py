@@ -119,6 +119,7 @@ class _Fixture:
             # commit that leaked back into `apply_states` would otherwise be
             # invisible to `test_applying_an_event_commits_once`.
             commit=self._commit,
+            rollback=self._rollback,
         )
         # A real `RowCache` rather than a spy: the property under test is
         # that a *cached screen goes away*, and a spy would assert that a
@@ -137,6 +138,9 @@ class _Fixture:
 
     async def _commit(self) -> None:
         self.commits += 1
+
+    async def _rollback(self) -> None:
+        return None
 
     async def given_matched(self, external_id: str, *, changed_at: AwareDatetime = T0) -> uuid.UUID:
         title_id = new_id()

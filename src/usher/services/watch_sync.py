@@ -20,6 +20,7 @@ from usher.ports.ingest import MediaItemTarget, WatchStateMerge
 from usher.ports.jobs import JobQueue, JobRequest
 from usher.ports.repository import MediaItemRepository, SyncRunRepository, WatchStateRepository
 from usher.ports.source import SourceAdapter, SourceWatchState
+from usher.services.run_closing import close_cancelled
 from usher.telemetry import current_traceparent
 
 _tracer = trace.get_tracer("usher.watch_sync")
@@ -165,6 +166,7 @@ class WatchStateSyncService:
         runs: SyncRunRepository,
         queue: JobQueue,
         commit: Callable[[], Awaitable[None]],
+        rollback: Callable[[], Awaitable[None]],
         *,
         batch_size: int = 1_000,
         heartbeat_seconds: float = 60.0,
@@ -180,6 +182,7 @@ class WatchStateSyncService:
         self._runs = runs
         self._queue = queue
         self._commit = commit
+        self._rollback = rollback
         self._batch_size = batch_size
         self._heartbeat_seconds = heartbeat_seconds
         self._clock = clock
@@ -204,7 +207,9 @@ class WatchStateSyncService:
         a page under retry included.
         `beat` must not raise a `UsherPortError`, which would be recorded as this
         walk's failure. A run another process is still walking is left to it, and
-        this walk runs beside it in a row of its own. Never raises a `UsherPortError`.
+        this walk runs beside it in a row of its own. Cancelled once its run has
+        committed, the walk closes that run with `close_cancelled` before the
+        cancellation propagates. Never raises a `UsherPortError`.
         """
         started = time.perf_counter()
         with _tracer.start_as_current_span("sync.watch_state") as span:
@@ -266,41 +271,53 @@ class WatchStateSyncService:
             # one that moves.
             inherited, resumed_from = run.items_seen, run.position
             span.set_attribute("usher.resumed_from", resumed_from)
-            await self._commit()
-            progress = _Progress(run)
+            run_id = run.id
             try:
-                await self._walk(
-                    progress, source.id, adapter, cursor, user_id, attempt_started, beat
-                )
-                run = progress.run.evolve(
-                    status=SyncRunStatus.COMPLETED, finished_at=datetime.now(UTC)
-                )
-            except UsherPortError as exc:
-                # `progress.run`, never the pre-walk `run` -- see `_Progress`.
-                run = progress.run.evolve(
-                    status=SyncRunStatus.FAILED,
-                    # str(exc), never the exception or a payload: PRD 08's
-                    # credentials-are-never-logged rule applies to a Text
-                    # column an operator reads.
-                    error=str(exc),
-                    finished_at=datetime.now(UTC),
-                )
-                span.set_attribute("usher.failed", True)
-                # Both counts, because the run's is cumulative and reading it as
-                # this attempt's is how a stalled resume looks healthy: an operator
-                # watching one number climb across attempts cannot tell a walk that
-                # is converging from one re-walking the same page forever.
-                logger.error(
-                    "watch-state sync of {source} failed after {attempt} states this attempt "
-                    "({total} for the run, resumed from {resumed_from}): {error}",
+                await self._commit()
+                progress = _Progress(run)
+                try:
+                    await self._walk(
+                        progress, source.id, adapter, cursor, user_id, attempt_started, beat
+                    )
+                    run = progress.run.evolve(
+                        status=SyncRunStatus.COMPLETED, finished_at=datetime.now(UTC)
+                    )
+                except UsherPortError as exc:
+                    # `progress.run`, never the pre-walk `run` -- see `_Progress`.
+                    run = progress.run.evolve(
+                        status=SyncRunStatus.FAILED,
+                        # str(exc), never the exception or a payload: PRD 08's
+                        # credentials-are-never-logged rule applies to a Text
+                        # column an operator reads.
+                        error=str(exc),
+                        finished_at=datetime.now(UTC),
+                    )
+                    span.set_attribute("usher.failed", True)
+                    # Both counts, because the run's is cumulative and reading it as
+                    # this attempt's is how a stalled resume looks healthy: an operator
+                    # watching one number climb across attempts cannot tell a walk that
+                    # is converging from one re-walking the same page forever.
+                    logger.error(
+                        "watch-state sync of {source} failed after {attempt} states this attempt "
+                        "({total} for the run, resumed from {resumed_from}): {error}",
+                        source=source.name,
+                        attempt=run.items_seen - inherited,
+                        total=run.items_seen,
+                        resumed_from=resumed_from,
+                        error=str(exc),
+                    )
+                await self._runs.save(run)
+                await self._commit()
+            except asyncio.CancelledError:
+                # Closed as last committed, so the next walk does not take it for a live one.
+                await close_cancelled(
+                    self._runs,
+                    run_id,
+                    rollback=self._rollback,
+                    commit=self._commit,
                     source=source.name,
-                    attempt=run.items_seen - inherited,
-                    total=run.items_seen,
-                    resumed_from=resumed_from,
-                    error=str(exc),
                 )
-            await self._runs.save(run)
-            await self._commit()
+                raise
             span.set_attribute("usher.items_seen", run.items_seen)
             span.set_attribute("usher.items_unmatched", run.items_unmatched)
         _run_duration.record(

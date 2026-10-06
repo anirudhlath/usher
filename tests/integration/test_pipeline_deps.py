@@ -50,7 +50,9 @@ from usher.config import Settings
 from usher.db.base import build_engine, build_session_factory
 from usher.db.users import DEFAULT_USER_NAME
 from usher.ports.search import SuggestTier
+from usher.services.reconcile import ReconcileService
 from usher.services.search import SearchService
+from usher.services.watch_sync import WatchStateSyncService
 
 _PROVIDERS = {
     "titles": get_title_repository,
@@ -361,3 +363,37 @@ async def test_the_search_service_the_graph_resolves_writes_search_queries_over_
 
     assert response.status_code == 200, response.text
     assert seen == {"wired": True, "this session": True, "commits nothing of its own": True}
+
+
+async def test_both_sync_lanes_the_graph_resolves_commit_and_roll_back_this_session(
+    postgres_url: str,
+) -> None:
+    """A cancelled walk's close rolls back the request's own session, not another."""
+    app = create_app(
+        Settings(
+            database_url=postgres_url,
+            secret_key="0" * 32,
+            push_enabled=False,
+            worker_enabled=False,
+        )
+    )
+    seen: dict[str, bool] = {}
+
+    def route(
+        reconcile: Annotated[ReconcileService, Depends(get_reconcile_service)],
+        watch: Annotated[WatchStateSyncService, Depends(get_watch_state_sync_service)],
+        session: Annotated[AsyncSession, Depends(get_session)],
+    ) -> dict[str, bool]:
+        wired = (session.commit, session.rollback)
+        seen["reconcile"] = (reconcile._commit, reconcile._rollback) == wired
+        seen["watch"] = (watch._commit, watch._rollback) == wired
+        return seen
+
+    app.get("/_probe/sync_lanes")(route)
+    async with LifespanManager(app) as manager:
+        transport = ASGITransport(app=manager.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/_probe/sync_lanes")
+
+    assert response.status_code == 200, response.text
+    assert seen == {"reconcile": True, "watch": True}

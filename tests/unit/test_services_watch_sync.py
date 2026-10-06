@@ -28,7 +28,7 @@ from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
 from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.source import Source
-from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus
+from usher.domain.sync import CANCELLED_ERROR, SyncRun, SyncRunKind, SyncRunStatus
 from usher.ports.errors import PortUnavailable, UsherPortError
 from usher.ports.events import ClientEventKind
 from usher.ports.ingest import MediaItemTarget, MediaItemUpsert, WatchStateMerge
@@ -115,6 +115,7 @@ class _Fixture:
         self.runs = FakeSyncRunRepository()
         self.queue = FakeJobQueue()
         self.commits = 0
+        self.rollbacks = 0
         self.positions: list[int] = []
         self.saved: list[SyncRun] = []
 
@@ -140,6 +141,7 @@ class _Fixture:
             runs=self.runs,
             queue=self.queue,
             commit=self._commit,
+            rollback=self._rollback,
             batch_size=batch_size,
             heartbeat_seconds=heartbeat_seconds,
             clock=self.clock,
@@ -149,6 +151,9 @@ class _Fixture:
 
     async def _commit(self) -> None:
         self.commits += 1
+
+    async def _rollback(self) -> None:
+        self.rollbacks += 1
 
     async def given_matched(
         self, external_id: str, *, episode: bool = False, changed_at: AwareDatetime = T0
@@ -2021,3 +2026,23 @@ async def test_a_walk_that_fails_on_its_own_side_closes_the_listing_its_reader_h
     assert not adapter.stalled.is_set(), "the premise: the listing never stalled"
     assert adapter.closed.is_set(), "the walk ended with its listing still open"
     assert asyncio.all_tasks() - {asyncio.current_task()} == set(), "a task outlived the walk"
+
+
+async def test_a_cancelled_watch_walk_closes_its_run_and_stays_cancelled() -> None:
+    fixture = _Fixture()
+    adapter = fixture.adapter = _StallingSourceAdapter(fixture.source, stall_after=0)
+    await fixture.given_completed_walk()
+    await fixture.given_matched("movie-0")
+    task = asyncio.create_task(
+        fixture.service.sync(fixture.source, adapter, user_id=fixture.user_id)
+    )
+    async with asyncio.timeout(5):
+        await adapter.stalled.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        async with asyncio.timeout(5):
+            await task
+    stored = await fixture.runs.latest_run(fixture.source.id, SyncRunKind.WATCH_STATE)
+    assert stored is not None
+    assert (stored.status, stored.error) == (SyncRunStatus.FAILED, CANCELLED_ERROR)
+    assert fixture.rollbacks == 1

@@ -108,6 +108,7 @@ def applier(
             runs=PostgresSyncRunRepository(session),
             queue=queue,
             commit=session.flush,
+            rollback=session.rollback,
         ),
         events,
         # `session.flush`, not `session.commit`: the integration fixture owns

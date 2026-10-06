@@ -127,9 +127,10 @@ usher sync-status                       # recent walks and their plans, queue de
   so your own shelves fill long before the rest of the library has been read.
 - **`usher sync` exits non-zero if any walk failed or was refused**, after it
   has tried every source, so cron can notice. A walk of a whole library is
-  refused while another of the same kind is still running for that source. An
-  interrupted one counts as running until it has been quiet for 10 minutes, and
-  the refusal says how long is left to wait.
+  refused while another of the same kind is still running for that source. One
+  stopped with Ctrl-C closes itself and can be run again at once; one whose
+  process was killed outright counts as running until it has been quiet for 10
+  minutes, and the refusal says how long is left to wait.
 - **`usher sync-status` shows how far a large walk has got.** Under a walk of a
   whole library it prints the stage being read, the pieces done of the pieces
   planned, and how many items the plan expected.

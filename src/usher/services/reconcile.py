@@ -33,6 +33,7 @@ from usher.ports.ingest import AvailabilitySweepRefused
 from usher.ports.repository import MediaItemRepository, SyncRunRepository
 from usher.ports.source import SourceAdapter, SourceItem, UnitPage
 from usher.services.ingest import IngestService
+from usher.services.run_closing import close_cancelled
 
 _tracer = trace.get_tracer("usher.reconcile")
 _meter = metrics.get_meter("usher.reconcile")
@@ -174,6 +175,7 @@ class ReconcileService:
         runs: SyncRunRepository,
         events: EventPublisher,
         commit: Callable[[], Awaitable[None]],
+        rollback: Callable[[], Awaitable[None]],
         *,
         batch_size: int = 1_000,
         max_retract_fraction: float = 0.25,
@@ -198,6 +200,7 @@ class ReconcileService:
         # composition roots supply one where they mean it.
         self._events = events
         self._commit = commit
+        self._rollback = rollback
         self._batch_size = batch_size
         self._max_retract_fraction = max_retract_fraction
         self._walkers = walkers
@@ -229,6 +232,9 @@ class ReconcileService:
         once a plan's `SEED` stage has committed, handed a beat to await between its
         own commits so this walk stays alive while it runs. It must not raise a
         `UsherPortError`, which would be recorded as this walk's failure.
+
+        Cancelled once its run has committed, the walk closes that run with
+        `close_cancelled` before the cancellation propagates.
 
         Never raises a `UsherPortError`.
         """
@@ -268,68 +274,82 @@ class ReconcileService:
                     heartbeat_at=self._clock(),
                 )
                 await self._runs.save(run)
-            await self._commit()
-            progress = _Progress(run)
+            run_id = run.id
             try:
-                truncated = False
-                if planned:
-                    await self._walk_plan(
-                        source,
-                        progress,
-                        adapter,
-                        resumed=claimed is not None,
-                        after_seed=after_seed,
-                    )
-                else:
-                    truncated = await self._walk(source, progress, adapter, cursor, max_items)
-                if truncated:
-                    # Deliberately **not** `usher.failed`: the run is recorded `FAILED`
-                    # because that is what stops the cursor, and a trace view that could
-                    # not tell "the source broke" from "Usher stopped on purpose" would
-                    # send an operator looking for an outage that did not happen.
-                    span.set_attribute("usher.sync.truncated", True)
-                    run = self._failed(
-                        progress.run,
-                        self._ceiling_error(progress.run),
-                        code=CEILING_ERROR_CODE,
-                    )
-                    logger.warning(
-                        "{kind} sync of {source} stopped after {seen} items, its "
-                        "USHER_PUSH_GAP_MAX_ITEMS ceiling. The run is recorded FAILED so it "
-                        "advances no cursor and the next delta re-requests what it never "
-                        "reached; run `usher sync --kind full` for it to close the rest",
+                await self._commit()
+                progress = _Progress(run)
+                try:
+                    truncated = False
+                    if planned:
+                        await self._walk_plan(
+                            source,
+                            progress,
+                            adapter,
+                            resumed=claimed is not None,
+                            after_seed=after_seed,
+                        )
+                    else:
+                        truncated = await self._walk(source, progress, adapter, cursor, max_items)
+                    if truncated:
+                        # Deliberately **not** `usher.failed`: the run is recorded `FAILED`
+                        # because that is what stops the cursor, and a trace view that could
+                        # not tell "the source broke" from "Usher stopped on purpose" would
+                        # send an operator looking for an outage that did not happen.
+                        span.set_attribute("usher.sync.truncated", True)
+                        run = self._failed(
+                            progress.run,
+                            self._ceiling_error(progress.run),
+                            code=CEILING_ERROR_CODE,
+                        )
+                        logger.warning(
+                            "{kind} sync of {source} stopped after {seen} items, its "
+                            "USHER_PUSH_GAP_MAX_ITEMS ceiling. The run is recorded FAILED so it "
+                            "advances no cursor and the next delta re-requests what it never "
+                            "reached; run `usher sync --kind full` for it to close the rest",
+                            kind=kind.value,
+                            # The source's **name**, never its base URL and
+                            # never anything from its credential row -- PRD 08's
+                            # credentials-are-never-logged rule, and the failure
+                            # line below is the local precedent.
+                            source=source.name,
+                            seen=run.items_seen,
+                        )
+                    else:
+                        # Reached only when the walk returned normally *and*
+                        # returned everything. The whole safety argument is one
+                        # `try` boundary wide, and the ceiling is inside it: a
+                        # bounded walk has items it never looked at, so a sweep
+                        # after one would retract every one of them.
+                        run = await self._sweep(progress.run, kind, source.name)
+                        run = run.evolve(
+                            status=SyncRunStatus.COMPLETED, finished_at=datetime.now(UTC)
+                        )
+                except UsherPortError as exc:
+                    # `progress.run`, never the pre-walk `run`: the batches this walk
+                    # already committed are real, and recording the failure over a stale
+                    # copy would erase their checkpoint.
+                    error, code = _recorded_failure(exc)
+                    run = self._failed(progress.run, error, code=code)
+                    span.set_attribute("usher.failed", True)
+                    logger.error(
+                        "{kind} sync of {source} failed after {seen} items: {error}",
                         kind=kind.value,
-                        # The source's **name**, never its base URL and
-                        # never anything from its credential row -- PRD 08's
-                        # credentials-are-never-logged rule, and the failure
-                        # line below is the local precedent.
                         source=source.name,
                         seen=run.items_seen,
+                        error=str(exc),
                     )
-                else:
-                    # Reached only when the walk returned normally *and*
-                    # returned everything. The whole safety argument is one
-                    # `try` boundary wide, and the ceiling is inside it: a
-                    # bounded walk has items it never looked at, so a sweep
-                    # after one would retract every one of them.
-                    run = await self._sweep(progress.run, kind, source.name)
-                    run = run.evolve(status=SyncRunStatus.COMPLETED, finished_at=datetime.now(UTC))
-            except UsherPortError as exc:
-                # `progress.run`, never the pre-walk `run`: the batches this walk
-                # already committed are real, and recording the failure over a stale
-                # copy would erase their checkpoint.
-                error, code = _recorded_failure(exc)
-                run = self._failed(progress.run, error, code=code)
-                span.set_attribute("usher.failed", True)
-                logger.error(
-                    "{kind} sync of {source} failed after {seen} items: {error}",
-                    kind=kind.value,
+                await self._runs.save(run)
+                await self._commit()
+            except asyncio.CancelledError:
+                # Closed as last committed, so a re-run need not wait out `STALE_AFTER`.
+                await close_cancelled(
+                    self._runs,
+                    run_id,
+                    rollback=self._rollback,
+                    commit=self._commit,
                     source=source.name,
-                    seen=run.items_seen,
-                    error=str(exc),
                 )
-            await self._runs.save(run)
-            await self._commit()
+                raise
             span.set_attribute("usher.items_seen", run.items_seen)
             span.set_attribute("usher.items_retracted", run.items_retracted)
         _run_duration.record(

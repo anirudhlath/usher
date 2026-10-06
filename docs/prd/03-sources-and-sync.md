@@ -213,6 +213,12 @@ until a walk whose process stopped can be resumed. `usher sync` exits non-zero,
 and a worker job is deferred: it spends none of its attempts, so it never parks,
 and tries again no sooner than 10 minutes later, when a walk whose process died
 has gone stale and is resumed.
+A walk whose task is cancelled — `usher sync` stopped with Ctrl-C, say — first
+closes its run `failed` with `cancelled: the walk was stopped before it finished`,
+as last committed, so the next walk starts at once and a whole-library walk
+resumes. A process killed outright cannot, and its run counts as live until its
+heartbeat is 10 minutes old; a close that cannot finish within 10 seconds is
+given up with a WARNING, and a second Ctrl-C abandons it.
 A run whose sweep was refused is not resumed, and neither is one that stopped
 before its units were stored or a full run from before units existed: a fresh
 walk starts, and such a run left `running` is closed `failed` with `superseded:
