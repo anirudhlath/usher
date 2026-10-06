@@ -105,10 +105,10 @@ when the walk stops:
   re-reads nothing. A listing that is not in creation order is judged by its
   items alone, after one WARNING; an item whose creation time moves behind the
   walk is read by the next full walk. A resumed unit of a whole-library walk
-  re-reads only that overlap before where it stopped, and logs nothing: if more
-  items vanish ahead of it between attempts, it misses them, a full walk's sweep
-  retracts them, and the next full walk reads them again. Duplicates are
-  permitted; silent truncation is not, except across such a resume.
+  judges its first page the same way, against the creation time of the last
+  item it committed, so items that left its library between attempts are not
+  skipped either; a unit committed before that time was recorded is read again
+  from its start. Duplicates are permitted; silent truncation is not.
 - **A walk fails on a listing that 10,000 pages do not finish**, and each unit
   of a whole-library walk is a listing of its own: at the default page size,
   while its listing holds still, that is one of 9,500,050 items or more, and

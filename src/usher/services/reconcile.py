@@ -595,7 +595,9 @@ class ReconcileService:
         """
         while (unit := claim()) is not None:
             try:
-                pages = adapter.list_unit(unit.unit_key, start_index=unit.position)
+                pages = adapter.list_unit(
+                    unit.unit_key, start_index=unit.position, checkpoint=unit.checkpoint
+                )
                 async with aclosing(pages):
                     async for page in pages:
                         await queue.put(_Fetched(unit.unit_key, page))
@@ -671,12 +673,14 @@ class ReconcileService:
     ) -> SyncRunUnit:
         """Ingest `pages` and commit them with the unit's position and a new heartbeat.
 
-        Returns the unit as saved: `completed` once its walk has ended, which an
-        empty `pages` can carry on its own.
+        The position and checkpoint are the last page's, so the two always name one
+        place. Returns the unit as saved: `completed` once its walk has ended, which
+        an empty `pages` can carry on its own.
         """
         items = [item for page in pages for item in page.items]
         unit = unit.evolve(
             position=pages[-1].resume_at if pages else unit.position,
+            checkpoint=pages[-1].checkpoint if pages else unit.checkpoint,
             items_seen=unit.items_seen + len(items),
             status=SyncRunUnitStatus.COMPLETED if done else SyncRunUnitStatus.RUNNING,
         )

@@ -1,6 +1,7 @@
 """`EmbyAdapter` -- the `SourceAdapter` implementation for Emby."""
 
 import asyncio
+import re
 import time
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -183,6 +184,37 @@ def _listing_query(
     if filters is not None:
         query["Filters"] = filters
     return query
+
+
+_CHECKPOINT = re.compile(r"-?[0-9]+")
+
+
+def _checkpoint_key(checkpoint: str | None) -> int | None:
+    """The `DateCreated` key a checkpoint names, or `None` for none or a malformed one."""
+    if checkpoint is None or not _CHECKPOINT.fullmatch(checkpoint):
+        return None
+    return int(checkpoint)
+
+
+def _resume(
+    start_index: int, checkpoint: str | None, floor: int, lower_key: int | None = None
+) -> tuple[int, int | None]:
+    """Where a unit's walk starts, and the anchor its first page is judged by.
+
+    A unit past its floor with a usable checkpoint resumes there; any other starts again
+    at its floor, judged by `lower_key`.
+    """
+    after = _checkpoint_key(checkpoint) if start_index > floor else None
+    return (start_index, after) if after is not None else (floor, lower_key)
+
+
+def _unit_query(unit: LibraryUnit) -> dict[str, str]:
+    """The listing a library unit walks."""
+    return {
+        **_listing_query(LIBRARY_SINCE_PARAM, None),
+        "ParentId": unit.view_id,
+        "IncludeItemTypes": unit.item_types,
+    }
 
 
 class EmbyAdapter(SourceAdapter):
@@ -450,14 +482,23 @@ class EmbyAdapter(SourceAdapter):
         return f"/Users/{_segment(await self._session.user_id())}/Items"
 
     async def _unit_pages(
-        self, query: Mapping[str, str], *, start_index: int, stop: int | None = None
+        self,
+        query: Mapping[str, str],
+        *,
+        start_index: int,
+        stop: int | None = None,
+        after: int | None = None,
     ) -> AsyncGenerator[UnitPage]:
-        """`_pages` as the port's pages; one holding no item Usher models is not yielded."""
-        async with aclosing(self._pages(query, start_index=start_index, stop=stop)) as pages:
-            async for entries, resume_at, _ in pages:
+        """`_pages` as the port's pages; one holding no item Usher models is not yielded.
+
+        Each page's checkpoint is the window's anchor after it, in decimal.
+        """
+        listing = self._pages(query, start_index=start_index, stop=stop, after=after)
+        async with aclosing(listing) as pages:
+            async for entries, resume_at, anchor in pages:
                 items = tuple(item for item in map(to_source_item, entries) if item is not None)
                 if items:
-                    yield UnitPage(items, resume_at)
+                    yield UnitPage(items, resume_at, None if anchor is None else str(anchor))
 
     async def _page(
         self, path: str, params: Mapping[str, str], start: int, *, op: str = "list"
@@ -586,20 +627,29 @@ class EmbyAdapter(SourceAdapter):
                 units.append(WalkUnit(chunk.key, WalkStage.EPISODES, chunk.label(name)))
         return WalkPlan(tuple(units), expected_total=total)
 
-    def list_unit(self, key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage]:
+    def list_unit(
+        self, key: str, *, start_index: int = 0, checkpoint: str | None = None
+    ) -> AsyncGenerator[UnitPage]:
+        """One unit, its first page judged by `checkpoint` when it resumes past its floor.
+
+        A unit resumed without a usable checkpoint starts again at its floor.
+        """
         if key == SEED_KEY:
             # Every seed page resumes at 0, so `start_index` is always 0 here or
-            # stale; see `_seed`.
+            # stale, and it carries no checkpoint; see `_seed`.
             return self._seed()
         if key == DEFAULT_UNIT_KEY:
             query = _listing_query(LIBRARY_SINCE_PARAM, None)
-            return self._unit_pages(query, start_index=start_index)
+            start, after = _resume(start_index, checkpoint, 0)
+            return self._unit_pages(query, start_index=start, after=after)
         unit = parse_unit_key(key)
         if unit is None:
             raise PortDataMalformed(f"no plan of this adapter's could name walk unit {key!r}")
-        return self._library_unit(unit, start_index)
+        return self._library_unit(unit, start_index, checkpoint)
 
-    async def _library_unit(self, unit: LibraryUnit, start_index: int) -> AsyncGenerator[UnitPage]:
+    async def _library_unit(
+        self, unit: LibraryUnit, start_index: int, checkpoint: str | None
+    ) -> AsyncGenerator[UnitPage]:
         # A library gone before this adapter first read the views has nothing left to
         # walk, and its id is not sent: a server can answer a `ParentId` it does not
         # know with the whole library. A unit never reads the views again, so one
@@ -612,15 +662,11 @@ class EmbyAdapter(SourceAdapter):
                 key=unit.key,
             )
             return
-        query = {
-            **_listing_query(LIBRARY_SINCE_PARAM, None),
-            "ParentId": unit.view_id,
-            "IncludeItemTypes": unit.item_types,
-        }
         # A bounded chunk reads `PAGE_OVERLAP` items past its end, so a shift at the
         # boundary with the next chunk is covered the way one between pages is.
         stop = None if unit.upper is None else unit.upper + PAGE_OVERLAP
-        pages = self._unit_pages(query, start_index=max(start_index, unit.lower), stop=stop)
+        start, after = _resume(start_index, checkpoint, unit.lower)
+        pages = self._unit_pages(_unit_query(unit), start_index=start, stop=stop, after=after)
         async with aclosing(pages) as unit_pages:
             async for page in unit_pages:
                 yield page

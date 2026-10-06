@@ -85,6 +85,8 @@ class FakeSourceAdapter(SourceAdapter):
         self.journal: list[tuple[str, str]] = []
         #: `(key, start_index)` for every unit walk the port was asked for, in order.
         self.unit_starts: list[tuple[str, int]] = []
+        #: The `checkpoint` each of those walks was handed, beside `unit_starts`.
+        self.unit_checkpoints: list[str | None] = []
         # Libraries whose unit the fake plans with no expected count.
         self._uncounted: set[str] = set()
         # The session model. `_server_token` is what the source currently
@@ -327,10 +329,13 @@ class FakeSourceAdapter(SourceAdapter):
         )
         return WalkPlan(units, expected_total=len(self._items))
 
-    def list_unit(self, key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage]:
+    def list_unit(
+        self, key: str, *, start_index: int = 0, checkpoint: str | None = None
+    ) -> AsyncGenerator[UnitPage]:
         # Recorded here rather than in `_walk_library`, so that it is what the port
-        # was asked for.
+        # was asked for. The checkpoint is recorded and otherwise ignored.
         self.unit_starts.append((key, start_index))
+        self.unit_checkpoints.append(checkpoint)
         if key == DEFAULT_UNIT_KEY:
             return pages_of(self._walk_items(None), start_index=start_index, size=self.page_size)
         name = key.removeprefix("library:")

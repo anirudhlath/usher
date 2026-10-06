@@ -59,7 +59,9 @@ class _Adapter:
     async def plan_walk(self) -> WalkPlan:
         return WHOLE_LIBRARY
 
-    def list_unit(self, key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage]:
+    def list_unit(
+        self, key: str, *, start_index: int = 0, checkpoint: str | None = None
+    ) -> AsyncGenerator[UnitPage]:
         return pages_of(self._walk(), start_index=start_index)
 
 

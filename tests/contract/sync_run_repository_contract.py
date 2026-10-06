@@ -563,6 +563,41 @@ class SyncRunRepositoryContract:
             7,
         )
 
+    async def test_a_unit_checkpoint_is_written_with_a_position_at_least_as_far(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        parent = run(source_id)
+        await repository.add(parent)
+        await repository.add_units([unit(parent.id, "titles:3")])
+        stored = (await repository.units_for(parent.id))[0]
+
+        await repository.save_unit(stored.evolve(position=10, checkpoint="100"))
+        await repository.save_unit(stored.evolve(position=10, checkpoint="110"))
+        await repository.save_unit(stored.evolve(position=4, checkpoint="40"))
+
+        (after,) = await repository.units_for(parent.id)
+        assert (after.position, after.checkpoint) == (10, "110")
+
+    async def test_a_completed_unit_keeps_its_checkpoint(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        parent = run(source_id)
+        await repository.add(parent)
+        await repository.add_units([unit(parent.id, "titles:3")])
+        stored = (await repository.units_for(parent.id))[0]
+        await repository.save_unit(
+            stored.evolve(position=10, checkpoint="100", status=SyncRunUnitStatus.COMPLETED)
+        )
+
+        await repository.save_unit(stored.evolve(position=20, checkpoint="200"))
+
+        (after,) = await repository.units_for(parent.id)
+        assert (after.position, after.checkpoint, after.status) == (
+            10,
+            "100",
+            SyncRunUnitStatus.COMPLETED,
+        )
+
     async def test_saving_a_unit_that_was_never_added_is_not_found(
         self, repository: SyncRunRepository, source_id: uuid.UUID
     ) -> None:

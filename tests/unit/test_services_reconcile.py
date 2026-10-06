@@ -18,6 +18,8 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from pydantic import AwareDatetime, SecretStr
 
+from tests.fakes.emby_harness import instant_sleep
+from tests.fakes.emby_server import FakeEmbyServer
 from tests.fakes.episode_repository import FakeEpisodeRepository
 from tests.fakes.event_publisher import FakeEventPublisher
 from tests.fakes.job_queue import FakeJobQueue
@@ -1181,6 +1183,51 @@ async def test_a_failing_unit_fails_the_run_and_keeps_every_units_committed_posi
     assert await fixture.media_items.get_by_external_id(fixture.source.id, shows[2]) is None
 
 
+async def test_a_unit_commits_its_last_held_pages_checkpoint() -> None:
+    fixture = _Fixture(batch_size=2)
+    _shelve(fixture, "Films", range(3))
+
+    async def noted(
+        key: str, *, start_index: int = 0, checkpoint: str | None = None
+    ) -> AsyncGenerator[UnitPage]:
+        for index in range(2):
+            yield UnitPage((_item(f"m{index}"),), resume_at=index + 1, checkpoint=f"note-{index}")
+        raise PortUnavailable("the page after them failed")
+
+    fixture.adapter.list_unit = noted  # type: ignore[method-assign]
+    run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+
+    (films,) = [u for u in await fixture.runs.units_for(run.id) if u.unit_key == "library:Films"]
+    assert (films.position, films.checkpoint, films.status) == (
+        2,
+        "note-1",
+        SyncRunUnitStatus.FAILED,
+    )
+
+
+async def test_a_unit_that_ends_on_a_batch_boundary_keeps_its_last_pages_checkpoint() -> None:
+    """Its end commits no page, and that commit must not wipe the note the batch left."""
+    fixture = _Fixture(batch_size=2)
+    _shelve(fixture, "Films", range(2))
+
+    async def noted(
+        key: str, *, start_index: int = 0, checkpoint: str | None = None
+    ) -> AsyncGenerator[UnitPage]:
+        for index in range(2):
+            yield UnitPage((_item(f"m{index}"),), resume_at=index + 1, checkpoint=f"note-{index}")
+
+    fixture.adapter.list_unit = noted  # type: ignore[method-assign]
+    run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+
+    assert _progress(fixture) == [2, 2], "the premise: the end rode a commit of its own"
+    [films] = await fixture.runs.units_for(run.id)
+    assert (films.position, films.checkpoint, films.status) == (
+        2,
+        "note-1",
+        SyncRunUnitStatus.COMPLETED,
+    )
+
+
 async def test_the_run_and_its_first_heartbeat_are_committed_before_the_plan_is_made() -> None:
     """A walk that dies while planning still leaves a row saying when it was last alive."""
     fixture = _Fixture()
@@ -1312,7 +1359,9 @@ async def test_pages_that_keep_arriving_below_a_batch_still_let_the_heartbeat_mo
     fixture = _Fixture(heartbeat_seconds=0.1)
     _shelve(fixture, "Films", range(1))
 
-    async def _trickle(key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage]:
+    async def _trickle(
+        key: str, *, start_index: int = 0, checkpoint: str | None = None
+    ) -> AsyncGenerator[UnitPage]:
         for index in range(40):
             await asyncio.sleep(0.01)
             yield UnitPage((_item(f"t{index}"),), resume_at=index + 1)
@@ -1449,7 +1498,9 @@ async def test_a_bug_in_a_walker_is_raised_not_recorded() -> None:
     fixture = _Fixture()
     _shelve(fixture, "Films", range(2))
 
-    def _broken(key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage]:
+    def _broken(
+        key: str, *, start_index: int = 0, checkpoint: str | None = None
+    ) -> AsyncGenerator[UnitPage]:
         raise ZeroDivisionError("a bug, not an outage")
 
     fixture.adapter.list_unit = _broken  # type: ignore[method-assign]
@@ -1902,8 +1953,94 @@ async def test_a_resumed_unit_that_yields_nothing_completes() -> None:
     run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
     assert (run.id, run.status, run.items_seen) == (failed.id, SyncRunStatus.COMPLETED, 0)
     assert fixture.adapter.unit_starts == [("library:Films", 3)]
+    assert fixture.adapter.unit_checkpoints == [None], "it was stored with no checkpoint"
     [unit] = await fixture.runs.units_for(run.id)
     assert (unit.status, unit.position) == (SyncRunUnitStatus.COMPLETED, 3)
+
+
+async def test_a_resumed_unit_is_handed_its_committed_checkpoint() -> None:
+    fixture = _Fixture()
+    run = await _given_walk(
+        fixture,
+        heartbeat_at=None,
+        status=SyncRunStatus.FAILED,
+        units=[("Films", SyncRunUnitStatus.FAILED, 2)],
+        finished_at=T0,
+    )
+    (films,) = await fixture.runs.units_for(run.id)
+    await fixture.runs.save_unit(films.evolve(checkpoint="note-1"))
+    handed: list[tuple[int, str | None]] = []
+
+    async def noting(
+        key: str, *, start_index: int = 0, checkpoint: str | None = None
+    ) -> AsyncGenerator[UnitPage]:
+        handed.append((start_index, checkpoint))
+        return
+        yield
+
+    fixture.adapter.list_unit = noting  # type: ignore[method-assign]
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+
+    assert handed == [(2, "note-1")]
+
+
+async def test_an_emby_unit_resumes_judged_by_the_checkpoint_its_walk_stored() -> None:
+    """The real adapter's note, through the writer and the store, judges the resume.
+
+    Three hundred films a second apart, in pages of 100. The first attempt commits
+    Films at `StartIndex=150` with `m199`'s creation time, then fails asking at 200.
+    Eighty films then leave the library: resumed at 150 unjudged, the walk would read
+    `m230` on and never `m200` to `m229`.
+    """
+    fixture = _Fixture(batch_size=100, walkers=1)
+    server = FakeEmbyServer()
+    server.add_view("films", "Films")
+    for index in range(300):
+        film = _item(f"m{index:03d}", added_at=T0 + timedelta(seconds=index))
+        server.add_item(film, T0)
+        server.place(film.external_id, "films")
+    emby = EmbyAdapter(
+        fixture.source,
+        SourceCredentials(username=server.username, password=SecretStr(server.password)),
+        client=httpx.AsyncClient(transport=server.transport(), base_url=fixture.source.base_url),
+        page_size=100,
+        sleep=instant_sleep,
+    )
+    created = T0 + timedelta(seconds=199) - datetime(1970, 1, 1, tzinfo=UTC)
+    lines: list[str] = []
+    try:
+        server.fail_after = 200
+        first = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, emby)
+        assert first.status is SyncRunStatus.FAILED, "the premise: the first attempt failed"
+        (films,) = [
+            u for u in await fixture.runs.units_for(first.id) if u.unit_key == "titles:films"
+        ]
+        assert (films.position, films.checkpoint, films.status) == (
+            150,
+            str(created // timedelta(microseconds=1)),
+            SyncRunUnitStatus.FAILED,
+        )
+        for index in range(80):
+            server.remove_item(f"m{index:03d}")
+        server.fail_after = None
+        handle = logger.add(lines.append, level="WARNING", format="{message}")
+        try:
+            second = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, emby)
+        finally:
+            logger.remove(handle)
+    finally:
+        await emby.aclose()
+    assert (second.id, second.status) == (first.id, SyncRunStatus.COMPLETED)
+    assert [line.rstrip("\n") for line in lines] == [
+        "Living Room Emby's listing moved past the overlap before StartIndex=150; "
+        "reading again from StartIndex=50"
+    ]
+    missing = [
+        f"m{index:03d}"
+        for index in range(80, 300)
+        if await fixture.media_items.get_by_external_id(fixture.source.id, f"m{index:03d}") is None
+    ]
+    assert missing == []
 
 
 async def test_a_cursored_delta_walks_beside_a_live_whole_library_walk() -> None:

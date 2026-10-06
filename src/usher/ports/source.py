@@ -182,10 +182,15 @@ WHOLE_LIBRARY = WalkPlan((WalkUnit(DEFAULT_UNIT_KEY, WalkStage.TITLES, "the whol
 
 @dataclass(frozen=True, slots=True)
 class UnitPage:
-    """One page of a unit: its items, and the `start_index` that resumes after it."""
+    """One page of a unit: its items, and the `start_index` that resumes after it.
+
+    `checkpoint` is the adapter's own opaque note of where `resume_at` stands, handed
+    back with it on a resume, or `None` for none.
+    """
 
     items: tuple[SourceItem, ...]
     resume_at: int
+    checkpoint: str | None = None
 
 
 async def pages_of(
@@ -457,13 +462,17 @@ class SourceAdapter(ABC):
         """
         return WHOLE_LIBRARY
 
-    def list_unit(self, key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage]:
+    def list_unit(
+        self, key: str, *, start_index: int = 0, checkpoint: str | None = None
+    ) -> AsyncGenerator[UnitPage]:
         """One unit of this adapter's plan, in pages, from `start_index`.
 
-        Each page's `resume_at` is the `start_index` that resumes after it. Never
-        yields an empty page, and raises rather than truncating, as `list_items`
-        does. A key outside this adapter's key space, one no plan of its could name,
-        raises `PortDataMalformed`; a key from an earlier plan stays walkable.
+        Each page's `resume_at` is the `start_index` that resumes after it, and a
+        resume hands back that page's `checkpoint` beside it; this default ignores
+        it. Never yields an empty page, and raises rather than truncating, as
+        `list_items` does. A key outside this adapter's key space, one no plan of its
+        could name, raises `PortDataMalformed`; a key from an earlier plan stays
+        walkable.
         """
         if key != DEFAULT_UNIT_KEY:
             raise PortDataMalformed(f"no plan of this adapter's could name walk unit {key!r}")

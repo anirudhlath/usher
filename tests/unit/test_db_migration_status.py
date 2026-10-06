@@ -15,7 +15,7 @@ def test_code_head_revision_matches_the_head_migration_on_disk() -> None:
     None", so a migration added without updating this test fails loudly instead
     of silently changing what "the" expected head means.
     """
-    assert code_head_revision() == "m10g"
+    assert code_head_revision() == "m10h"
 
 
 #: Every revision from `ffa` -- the landing that created `test_migrations.py`'s
@@ -38,6 +38,7 @@ _REPOINTING_CHAIN = (
     "m10e",
     "m10f",
     "m10g",
+    "m10h",
 )
 
 #: The English cardinal `.claude/rules/db-and-sql.md` writes out. Keyed by
@@ -49,6 +50,7 @@ _CARDINALS = {
     15: "fifteen",
     16: "sixteen",
     17: "seventeen",
+    18: "eighteen",
 }
 
 #: The document that states the count in prose. A rules file is read by people

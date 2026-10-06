@@ -110,6 +110,9 @@ class SyncRunUnitRow(Base):
     label: Mapped[str] = mapped_column(Text, nullable=False)
     # Where the unit resumes, in the adapter's offsets.
     position: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    # The adapter's own opaque note of where `position` stands, moved only with a
+    # position at least as far.
+    checkpoint: Mapped[str | None] = mapped_column(Text, nullable=True)
     expected_items: Mapped[int | None] = mapped_column(Integer)
     items_seen: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     status: Mapped[SyncRunUnitStatus] = mapped_column(

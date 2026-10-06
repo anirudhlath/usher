@@ -132,6 +132,9 @@ class SyncRunUnit(DomainModel):
     stage: WalkStage
     label: str
     position: int = Field(default=0, ge=0)
+    # The adapter's own note of where `position` stands, written only with a position
+    # at least as far.
+    checkpoint: str | None = None
     expected_items: int | None = Field(default=None, ge=0)
     items_seen: int = Field(default=0, ge=0)
     status: SyncRunUnitStatus = SyncRunUnitStatus.PENDING

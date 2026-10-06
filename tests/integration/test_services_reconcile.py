@@ -175,7 +175,9 @@ class _Adapter:
     async def plan_walk(self) -> WalkPlan:
         return WHOLE_LIBRARY
 
-    def list_unit(self, key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage]:
+    def list_unit(
+        self, key: str, *, start_index: int = 0, checkpoint: str | None = None
+    ) -> AsyncGenerator[UnitPage]:
         # Pages of two, so at the fixture's batch of two a planned walk commits
         # page by page, as its single walk commits item pair by item pair.
         return pages_of(self._walk(), start_index=start_index, size=2)

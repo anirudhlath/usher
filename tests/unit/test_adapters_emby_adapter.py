@@ -28,7 +28,13 @@ from tests.fakes.emby_fixtures import load_emby_fixture
 from tests.fakes.emby_server import SERVER_VERSION, USER_ID, FakeEmbyServer
 from tests.fakes.push_connection import FakePushConnection, FakePushConnector
 from tests.fakes.slow_transport import SlowTransport
-from usher.adapters.emby.adapter import IDS_PER_REQUEST, MAX_PAGES, SEED_UNIT, EmbyAdapter
+from usher.adapters.emby.adapter import (
+    IDS_PER_REQUEST,
+    MAX_PAGES,
+    SEED_UNIT,
+    EmbyAdapter,
+    _unit_query,
+)
 from usher.adapters.emby.limit import RAISE_AFTER
 from usher.adapters.emby.paging import PAGE_OVERLAP
 from usher.adapters.emby.planning import SEED_KEY, LibraryUnit
@@ -50,6 +56,7 @@ from usher.ports.source import (
     SourceItem,
     SourceItemKind,
     SourceWatchState,
+    UnitPage,
     WalkUnit,
     WatchStateUpdate,
 )
@@ -98,6 +105,20 @@ def _numbered(count: int) -> list[SourceItem]:
         )
         for index in range(count)
     ]
+
+
+def _dated(count: int) -> list[SourceItem]:
+    """`_numbered`, each created a second after the one before, so no two tie."""
+    return [
+        replace(item, added_at=T0 + timedelta(seconds=index))
+        for index, item in enumerate(_numbered(count))
+    ]
+
+
+def _created_key(index: int) -> str:
+    """The checkpoint `_dated`'s item `index` leaves: its `DateCreated` in microseconds."""
+    created = T0 + timedelta(seconds=index)
+    return str((created - datetime(1970, 1, 1, tzinfo=UTC)) // timedelta(microseconds=1))
 
 
 def _series(index: int) -> SourceItem:
@@ -3350,7 +3371,10 @@ async def test_a_bounded_chunk_reads_past_its_end_by_the_overlap_and_no_further(
 
 
 async def test_a_chunk_resumed_at_its_stop_asks_for_nothing() -> None:
-    """Its last page committed and the attempt died before the unit did."""
+    """Its last page committed and the attempt died before the unit did.
+
+    The checkpoint is the one that page left: every episode here was created at `T0`.
+    """
     server = FakeEmbyServer()
     shows = _library(server, 2, "Shows", [_series(0), *(_episode(index) for index in range(6))])
     adapter, seen = _recorded(server, unit_max_items=3)
@@ -3358,7 +3382,7 @@ async def test_a_chunk_resumed_at_its_stop_asks_for_nothing() -> None:
         pages = [
             page
             async for page in adapter.list_unit(
-                f"episodes:{shows}:0:3", start_index=3 + PAGE_OVERLAP
+                f"episodes:{shows}:0:3", start_index=3 + PAGE_OVERLAP, checkpoint=_created_key(0)
             )
         ]
     finally:
@@ -3393,6 +3417,40 @@ async def test_a_chunk_above_zero_starts_its_walk_at_its_lower_bound() -> None:
     assert read == {f"episode-{index:03d}" for index in range(3, 7)}
 
 
+async def test_a_chunk_resumed_at_its_lower_bound_starts_there_whatever_its_checkpoint() -> None:
+    """A unit at its floor starts again as a fresh one does, and no checkpoint judges it.
+
+    Judged by this one, which ties with every episode, its first page would count as
+    moved and send it back before its bound.
+    """
+    server = FakeEmbyServer()
+    shows = _library(
+        server,
+        2,
+        "Shows",
+        [_series(0), *(_episode(index) for index in range(7))],
+        collection_type="tvshows",
+    )
+    adapter, seen = _recorded(server)
+    lines: list[str] = []
+    handle = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        read = {
+            item.external_id
+            async for page in adapter.list_unit(
+                f"episodes:{shows}:3:6", start_index=3, checkpoint=_created_key(0)
+            )
+            for item in page.items
+        }
+    finally:
+        logger.remove(handle)
+        await adapter.aclose()
+    starts = [request.url.params["StartIndex"] for request in _listings(seen)]
+    assert starts[0] == "3" and "0" not in starts
+    assert read == {f"episode-{index:03d}" for index in range(3, 7)}
+    assert lines == []
+
+
 async def test_a_page_s_resume_point_is_the_next_request_s_start_reach_back_included() -> None:
     """Resuming there re-reads the page's tail, so a deletion between attempts skips nothing."""
     server = FakeEmbyServer()
@@ -3407,6 +3465,182 @@ async def test_a_page_s_resume_point_is_the_next_request_s_start_reach_back_incl
         await adapter.aclose()
     assert first.resume_at == 4 - 2, "a page of four reaches back two"
     assert int(_listings(seen)[1].url.params["StartIndex"]) == first.resume_at
+
+
+async def test_each_unit_page_carries_the_checkpoint_of_its_last_item() -> None:
+    server = FakeEmbyServer()
+    view = _library(server, 1, "Films", _dated(5))
+    adapter = _adapter(server, page_size=2)
+    try:
+        pages = [page async for page in adapter.list_unit(f"titles:{view}")]
+    finally:
+        await adapter.aclose()
+    assert [page.checkpoint for page in pages] == [_created_key(i) for i in (1, 2, 3, 4)]
+
+
+async def test_a_resumed_unit_skips_nothing_that_left_its_library_between_attempts() -> None:
+    server = FakeEmbyServer()
+    library = _dated(300)
+    view = _library(server, 1, "Films", library)
+    adapter = _adapter(server, page_size=100)
+    try:
+        first: list[UnitPage] = []
+        async with aclosing(adapter.list_unit(f"titles:{view}")) as pages:
+            async for page in pages:
+                first.append(page)
+                if page.resume_at >= 150:
+                    break
+        assert (first[-1].resume_at, first[-1].checkpoint) == (150, _created_key(199))
+        for index in range(80):
+            server.remove_item(f"movie-{index:03d}")
+        lines: list[str] = []
+        handle = logger.add(lines.append, level="WARNING", format="{message}")
+        try:
+            resumed = [
+                item.external_id
+                async for page in adapter.list_unit(
+                    f"titles:{view}", start_index=150, checkpoint=first[-1].checkpoint
+                )
+                for item in page.items
+            ]
+        finally:
+            logger.remove(handle)
+    finally:
+        await adapter.aclose()
+    assert {f"movie-{index:03d}" for index in range(200, 300)} <= set(resumed)
+    assert any("moved past the overlap" in line for line in lines)
+
+
+# A library's unit and the whole library resume through two call sites of one rule.
+_EITHER_UNIT = pytest.mark.parametrize("whole", [False, True], ids=["library", "whole-library"])
+
+
+@_EITHER_UNIT
+# The last three are numbers to `int()`, and not the decimal the adapter writes.
+@pytest.mark.parametrize("checkpoint", [None, "", "12x", "1.5", "+12", " 12", "1_2"])
+async def test_a_unit_resumed_without_a_usable_checkpoint_restarts_at_its_floor(
+    checkpoint: str | None, whole: bool
+) -> None:
+    server = FakeEmbyServer()
+    view = _library(server, 1, "Films", _dated(5))
+    key = DEFAULT_UNIT_KEY if whole else f"titles:{view}"
+    adapter, seen = _recorded(server, page_size=2)
+    try:
+        _ = [p async for p in adapter.list_unit(key, start_index=3, checkpoint=checkpoint)]
+    finally:
+        await adapter.aclose()
+    assert _listings(seen)[0].url.params["StartIndex"] == "0"
+
+
+async def test_a_resume_over_an_unchanged_listing_starts_at_its_resume_point_and_stays() -> None:
+    server = FakeEmbyServer()
+    view = _library(server, 1, "Films", _dated(10))
+    adapter, seen = _recorded(server, page_size=4)
+    lines: list[str] = []
+    handle = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        _ = [
+            p
+            async for p in adapter.list_unit(
+                f"titles:{view}", start_index=4, checkpoint=_created_key(5)
+            )
+        ]
+    finally:
+        logger.remove(handle)
+        await adapter.aclose()
+    starts = [request.url.params["StartIndex"] for request in _listings(seen)]
+    assert starts[0] == "4" and "0" not in starts
+    assert lines == []
+
+
+async def test_a_checkpoint_from_before_the_epoch_is_usable() -> None:
+    """A creation time before 1970 is a negative key, and still names where to resume."""
+    early = datetime(1969, 12, 31, 23, 59, tzinfo=UTC)
+    films = [
+        replace(item, added_at=early + timedelta(seconds=index))
+        for index, item in enumerate(_numbered(10))
+    ]
+    created = early + timedelta(seconds=5) - datetime(1970, 1, 1, tzinfo=UTC)
+    checkpoint = str(created // timedelta(microseconds=1))
+    assert checkpoint.startswith("-"), "the premise: the fifth film's key is negative"
+    server = FakeEmbyServer()
+    view = _library(server, 1, "Films", films)
+    adapter, seen = _recorded(server, page_size=4)
+    try:
+        _ = [
+            p
+            async for p in adapter.list_unit(f"titles:{view}", start_index=4, checkpoint=checkpoint)
+        ]
+    finally:
+        await adapter.aclose()
+    starts = [request.url.params["StartIndex"] for request in _listings(seen)]
+    assert starts[0] == "4" and "0" not in starts
+
+
+@_EITHER_UNIT
+async def test_a_resume_that_reaches_back_only_to_its_checkpoints_item_reads_again(
+    whole: bool,
+) -> None:
+    """At pages of two the resume point re-reads one item, the one the checkpoint names.
+
+    Its creation time ties with the checkpoint, which no listing can tell from another
+    item created at that instant, so the page counts as moved: the walk asks again from
+    the start, and skips nothing.
+    """
+    server = FakeEmbyServer()
+    view = _library(server, 1, "Films", _dated(5))
+    key = DEFAULT_UNIT_KEY if whole else f"titles:{view}"
+    adapter, seen = _recorded(server, page_size=2)
+    lines: list[str] = []
+    handle = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        read = [
+            item.external_id
+            async for page in adapter.list_unit(key, start_index=1, checkpoint=_created_key(1))
+            for item in page.items
+        ]
+    finally:
+        logger.remove(handle)
+        await adapter.aclose()
+    starts = [request.url.params["StartIndex"] for request in _listings(seen)]
+    assert starts[:2] == ["1", "0"]
+    assert read[0] == "movie-000"
+    assert set(read) == {item.external_id for item in _dated(5)}
+    assert [line.rstrip("\n") for line in lines] == [
+        "Living Room Emby's listing moved past the overlap before StartIndex=1; "
+        "reading again from StartIndex=0"
+    ]
+
+
+async def test_a_page_judged_moved_is_never_yielded_by_the_listing() -> None:
+    """Read off `_pages` itself: every consumer drops a page that carries no entries.
+
+    The resume of the eighty-deletion case above. The page at 150 moved, so the first
+    page yielded is the one read again from 50, carrying its own anchor.
+    """
+    server = FakeEmbyServer()
+    view = _library(server, 1, "Films", _dated(300))
+    for index in range(80):
+        server.remove_item(f"movie-{index:03d}")
+    adapter, seen = _recorded(server, page_size=100)
+    listing = adapter._pages(
+        _unit_query(LibraryUnit(WalkStage.TITLES, view)),
+        start_index=150,
+        after=int(_created_key(199)),
+    )
+    try:
+        yielded = [
+            (len(fresh), resume_at, None if anchor is None else str(anchor))
+            async for fresh, resume_at, anchor in listing
+        ]
+    finally:
+        await adapter.aclose()
+    assert [request.url.params["StartIndex"] for request in _listings(seen)][:2] == ["150", "50"]
+    assert yielded == [
+        (100, 100, _created_key(229)),
+        (50, 150, _created_key(279)),
+        (20, 220, _created_key(299)),
+    ]
 
 
 async def test_a_movie_library_s_episodes_unit_ends_on_one_empty_page() -> None:

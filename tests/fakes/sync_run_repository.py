@@ -93,7 +93,10 @@ class FakeSyncRunRepository(SyncRunRepository):
             )
         if stored.status is SyncRunUnitStatus.COMPLETED:
             return
-        self._units[key] = unit.evolve(position=max(stored.position, unit.position))
+        self._units[key] = unit.evolve(
+            position=max(stored.position, unit.position),
+            checkpoint=unit.checkpoint if unit.position >= stored.position else stored.checkpoint,
+        )
 
     async def units_for(self, run_id: uuid.UUID) -> list[SyncRunUnit]:
         owned = [unit for (owner, _), unit in self._units.items() if owner == run_id]

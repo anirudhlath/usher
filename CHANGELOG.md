@@ -88,6 +88,11 @@ Versioning is `0.x` while the wire contract may still move —
   the walk logs a WARNING and asks again 100 items earlier, doubling while pages
   keep moving. Before, it read on, and a full walk's sweep then retracted the
   items it had skipped.
+- **A resumed unit of a whole-library walk no longer skips items that left its
+  library between attempts.** Each unit commits the creation time of the last
+  item it read beside its position (`sync_run_units.checkpoint`, migration
+  `m10h`), and its first page after a resume is judged against it. A unit saved
+  before this release restarts from its beginning.
 - **An embedding model that fails the embedder's norm check now fails every
   batch, not only the first.** The first batch used to park one `index` job and
   let every later vector through unchecked.

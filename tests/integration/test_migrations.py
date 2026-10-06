@@ -480,11 +480,17 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         await asyncio.to_thread(run_alembic, url, "-1")
         # **Asserted against whatever the current head actually reverses**, so every
         # new migration breaks this block and has to re-point it.
-        at_m10f_columns = await column_set(url, "sync_runs")
-        assert "heartbeat_at" not in at_m10f_columns, "heartbeat_at should not exist below m10g"
+        at_m10g_unit_columns = await column_set(url, "sync_run_units")
+        assert "checkpoint" not in at_m10g_unit_columns, "checkpoint should not exist below m10h"
         # The premise, for the reason the `m09a` stop below records: an empty
         # column set satisfies the absence above, so without this the block
-        # would pass at any depth at which `sync_runs` had ceased to exist.
+        # would pass at any depth at which `sync_run_units` had ceased to exist.
+        assert at_m10g_unit_columns, "the premise: `sync_run_units` still exists at `m10g`"
+
+        # **A named stop at `m10f`, holding `m10g`'s.**
+        await asyncio.to_thread(functools.partial(run_alembic, url, "m10f", direction="down"))
+        at_m10f_columns = await column_set(url, "sync_runs")
+        assert "heartbeat_at" not in at_m10f_columns, "heartbeat_at should not exist below m10g"
         assert at_m10f_columns, "the premise: `sync_runs` still exists at `m10f`"
         # One assertion per table a head creates, and `m10g` creates one.
         at_m10f_indexes = await index_set(url)

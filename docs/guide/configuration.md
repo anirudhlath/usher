@@ -135,7 +135,11 @@ less every full piece of `USHER_SYNC_UNIT_MAX_ITEMS` (100,000) fails. A server
 that serves fewer items a page than it is asked for moves on by what it serves.
 A page the listing moved past, because items were deleted while the piece was
 read, costs that page and sends the walk back 100 items or more to read again,
-so a piece that loses many items while it is read fails sooner.
+so a piece that loses many items while it is read fails sooner. Below a page
+size of 4, a resumed piece reaches back at most to the last item it read, too
+little to tell a listing that moved from one that held still, so every resumed
+piece reads again from 100 items earlier, or from its start, and logs that its
+listing moved.
 
 Every request is work for the media server. If you don't administer it, or a
 sync slows down somebody's playback, set `USHER_SYNC_WALKERS=1` for one request

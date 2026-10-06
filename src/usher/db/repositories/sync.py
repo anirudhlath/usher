@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any, cast
 
 from pydantic import AwareDatetime
-from sqlalchemy import CursorResult, func, select, text, update
+from sqlalchemy import CursorResult, Text, case, func, literal, select, text, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -222,9 +222,18 @@ class PostgresSyncRunRepository(SyncRunRepository):
     async def save_unit(self, unit: SyncRunUnit) -> None:
         stored = unit.model_dump()
         values: dict[str, Any] = {name: stored[name] for name in _UNIT_MUTABLE}
-        # `save`'s two rules, for `save`'s reasons: the checkpoint only rises, and a
+        # `save`'s two rules, for `save`'s reasons: the position only rises, and a
         # completed unit refuses the whole write.
         values["position"] = func.greatest(SyncRunUnitRow.position, unit.position)
+        # The note moves only with a position at least as far as the stored one, so
+        # the two always describe the same place.
+        values["checkpoint"] = case(
+            (
+                literal(unit.position) >= SyncRunUnitRow.position,
+                literal(unit.checkpoint, Text()),
+            ),
+            else_=SyncRunUnitRow.checkpoint,
+        )
         try:
             async with self._session.begin_nested():
                 result = await self._session.execute(
