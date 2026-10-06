@@ -107,8 +107,10 @@ when the walk stops:
   walk is read by the next full walk. A resumed unit of a whole-library walk
   judges its first page the same way, against the creation time of the last
   item it committed, so items that left its library between attempts are not
-  skipped either; a unit committed before that time was recorded is read again
-  from its start. Duplicates are permitted; silent truncation is not.
+  skipped either. One that stopped after a page of fewer than four items reads
+  again from 100 items earlier, or from its start, and logs that WARNING whether
+  or not its listing moved; a unit committed before that time was recorded is
+  read again from its start. Duplicates are permitted; silent truncation is not.
 - **A walk fails on a listing that 10,000 pages do not finish**, and each unit
   of a whole-library walk is a listing of its own: at the default page size,
   while its listing holds still, that is one of 9,500,050 items or more, and
@@ -136,11 +138,18 @@ when the walk stops:
 - **A whole-library walk is split into units.** Emby plans three stages: what
   the account is watching, then each library's movies and series, then each
   library's episodes in chunks of `USHER_SYNC_UNIT_MAX_ITEMS` (default
-  **100,000**), the largest library first. A library is any view but a
-  collection or a playlist. The first stage is planned only when the played
-  and the in-progress filters each narrow the library. When the libraries hold
-  fewer items than the source, everything after the first stage is one walk of
-  the whole source, and a WARNING names both numbers.
+  **100,000**), the largest library first. Each chunk after the first is
+  bounded by the creation time of the item at its start, read once when the walk
+  is planned: a chunk starts 50 items before that item, further back if items
+  have left the library since, and reads until it passes the next chunk's first
+  item, so an item moving across a boundary is read by one chunk or both. A
+  chunk planned before chunks carried creation times starts where it was
+  planned to, however many items have left the library since, and reads to the
+  end of its library. A library is any view but a collection or a playlist. The
+  first stage is planned only when the played and the in-progress filters each
+  narrow the library. When the libraries hold fewer items than the source,
+  everything after the first stage is one walk of the whole source, and a
+  WARNING names both numbers.
 
 The item lane filters on the library edit time, the watch lane on the user-data
 change time.

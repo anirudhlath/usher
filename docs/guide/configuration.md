@@ -130,16 +130,20 @@ half the page below 100. A piece those pages do not finish fails:
 | 21 | 110,010 items |
 | 20 | 100,010 items |
 
-A piece of episodes reads 50 items past its end, so at a page size of 20 or
-less every full piece of `USHER_SYNC_UNIT_MAX_ITEMS` (100,000) fails. A server
-that serves fewer items a page than it is asked for moves on by what it serves.
-A page the listing moved past, because items were deleted while the piece was
-read, costs that page and sends the walk back 100 items or more to read again,
-so a piece that loses many items while it is read fails sooner. Below a page
-size of 4, a resumed piece reaches back at most to the last item it read, too
-little to tell a listing that moved from one that held still, so every resumed
-piece reads again from 100 items earlier, or from its start, and logs that its
-listing moved.
+Each piece of episodes reads until it passes the next piece's first item, or to
+the end, and each after the first starts 50 items before its own first item. At
+a page size of 20 or less every full piece of `USHER_SYNC_UNIT_MAX_ITEMS`
+(100,000) fails but the first, which at 19 or 20 needs every one of its 10,000
+pages, and at 18 or less fails as well. A server that serves fewer items a page
+than it is asked for moves on by what it serves. A page the listing moved past,
+because items were deleted while the piece was read, costs that page and sends
+the walk back 100 items or more to read again, so a piece that loses many items
+while it is read fails sooner. A resumed piece reaches back into the page it
+resumes after just as the next page would have. After a page of fewer than 4
+items, which below a page size of 4 is every page, that is at most the last item
+it read: too little to tell a listing that moved from one that held still, so
+the piece reads again from 100 items earlier, or from its start, and logs that
+its listing moved.
 
 Every request is work for the media server. If you don't administer it, or a
 sync slows down somebody's playback, set `USHER_SYNC_WALKERS=1` for one request

@@ -238,24 +238,6 @@ def test_a_first_page_of_nothing_but_junk_does_not_end_the_walk() -> None:
     assert not OffsetWindow(limit=4, start=0).receive(["junk", "junk"], 10).ended
 
 
-def test_a_bounded_window_asks_for_no_more_than_its_stop_allows() -> None:
-    """Neither the total nor a drained tail ends this walk; only the stop does."""
-    window = OffsetWindow(limit=4, start=0, stop=5)
-    assert window.request_limit == 4
-    assert not window.receive(_entries("a", "b", "c", "d"), 9).ended
-    assert window.advance() == 2
-    assert window.request_limit == 3
-    assert window.receive(_entries("c", "d", "e"), 0).ended
-
-
-def test_a_bounded_window_already_at_its_stop_asks_for_nothing() -> None:
-    assert OffsetWindow(limit=4, start=5, stop=5).request_limit == 0
-
-
-def test_an_unbounded_window_always_asks_for_its_limit() -> None:
-    assert OffsetWindow(limit=4, start=10_000).request_limit == 4
-
-
 def test_the_cursor_is_where_the_page_just_served_ends() -> None:
     window = OffsetWindow(limit=4, start=10)
     window.receive(_entries("a", "b", "c"), 20)
@@ -485,3 +467,21 @@ def test_a_tie_group_wider_than_the_backup_backs_up_to_the_start() -> None:
             break
         starts.append(window.advance())
     assert starts == [150, 0]
+
+
+def test_a_window_ends_after_the_page_that_passes_its_until() -> None:
+    window = OffsetWindow(limit=2, start=0, keyed=True, until=_key(3))
+    assert not window.receive([_at("a", 2), _at("b", 3)], 100).ended
+    window.advance()
+    assert window.receive([_at("b", 3), _at("c", 4)], 0).ended
+
+
+def test_an_unsorted_window_does_not_end_at_its_until() -> None:
+    window = OffsetWindow(limit=2, start=0, keyed=True, until=_key(3))
+    assert not window.receive([_at("a", 9), _at("b", 4)], 100).ended
+
+
+def test_an_unkeyed_window_does_not_end_at_its_until() -> None:
+    """Keys judge nothing in a listing not sorted by them, so neither does `until`."""
+    window = OffsetWindow(limit=2, start=0, until=_key(3))
+    assert not window.receive([_at("a", 2), _at("b", 4)], 100).ended

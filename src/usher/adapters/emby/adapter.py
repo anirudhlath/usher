@@ -22,8 +22,14 @@ from usher.adapters.emby.mapping import (
     to_source_item,
     to_watch_state,
 )
-from usher.adapters.emby.paging import PAGE_OVERLAP, OffsetWindow
-from usher.adapters.emby.planning import SEED_KEY, LibraryUnit, episode_chunks, parse_unit_key
+from usher.adapters.emby.paging import PAGE_OVERLAP, OffsetWindow, key_of
+from usher.adapters.emby.planning import (
+    SEED_KEY,
+    LibraryUnit,
+    episode_chunks,
+    keyed_chunks,
+    parse_unit_key,
+)
 from usher.adapters.emby.playback import build_stream_targets
 from usher.adapters.emby.push import (
     DEFAULT_POLL_SECONDS,
@@ -197,15 +203,15 @@ def _checkpoint_key(checkpoint: str | None) -> int | None:
 
 
 def _resume(
-    start_index: int, checkpoint: str | None, floor: int, lower_key: int | None = None
+    start_index: int, checkpoint: str | None, floor: int, anchor: int | None = None
 ) -> tuple[int, int | None]:
     """Where a unit's walk starts, and the anchor its first page is judged by.
 
     A unit past its floor with a usable checkpoint resumes there; any other starts again
-    at its floor, judged by `lower_key`.
+    at its floor, judged by `anchor`.
     """
     after = _checkpoint_key(checkpoint) if start_index > floor else None
-    return (start_index, after) if after is not None else (floor, lower_key)
+    return (start_index, after) if after is not None else (floor, anchor)
 
 
 def _unit_query(unit: LibraryUnit) -> dict[str, str]:
@@ -389,19 +395,19 @@ class EmbyAdapter(SourceAdapter):
         query: Mapping[str, str],
         *,
         start_index: int,
-        stop: int | None = None,
         path: str | None = None,
         after: int | None = None,
+        until: int | None = None,
     ) -> AsyncGenerator[tuple[list[dict[str, Any]], int, int | None]]:
         """Page one listing to its end, one request ahead of the consumer.
 
         Yields each page's new entries, the `StartIndex` that resumes after it (the next
-        request's start, reach-back included) and the window's anchor. The next page is
-        asked for as soon as a page arrives and before it is yielded; the request
-        outstanding when the consumer stops is cancelled. `stop` bounds the walk, and
-        one already at its stop sends nothing. A listing sorted by `SORT_BY` is keyed:
-        `after` is the anchor a resumed walk judges its first page by. A page that moved
-        is logged and not yielded. `start_index` is the resume point, never defaulted.
+        request's start, reach-back included, whether or not one is sent) and the window's
+        anchor. The next page is asked for as soon as a page arrives and before it is
+        yielded; the request outstanding when the consumer stops is cancelled. A listing
+        sorted by `SORT_BY` is keyed: `after` is the anchor a resumed walk judges its first
+        page by, and `until` ends the walk on the page whose last key passes it. A page that
+        moved is logged and not yielded. `start_index` is the resume point, never defaulted.
         """
         if path is None:
             path = await self._items_path()
@@ -409,13 +415,11 @@ class EmbyAdapter(SourceAdapter):
         window = OffsetWindow(
             limit=self._page_size,
             start=start_index,
-            stop=stop,
             keyed=keyed,
             after=after if keyed else None,
+            until=until,
         )
-        if window.request_limit == 0:
-            return
-        pending = self._read(path, query, window.start, window.request_limit, count=True)
+        pending = self._read(path, query, window.start, window.limit, count=True)
         warned = False
         try:
             # `for`, not `while True`: the bound is part of the loop, and the raise
@@ -439,11 +443,11 @@ class EmbyAdapter(SourceAdapter):
                         "judged by ids alone",
                         source=self._source.name,
                     )
-                resume_at = window.cursor
+                resume_at = window.next_start
                 more = not page.ended and number < self._max_pages
                 if more:
                     resume_at = window.advance()
-                    pending = self._read(path, query, resume_at, window.request_limit, count=False)
+                    pending = self._read(path, query, resume_at, window.limit, count=False)
                 if page.shifted:
                     # The last request allowed asks for nothing again; the raise below says so.
                     if more:
@@ -486,14 +490,14 @@ class EmbyAdapter(SourceAdapter):
         query: Mapping[str, str],
         *,
         start_index: int,
-        stop: int | None = None,
         after: int | None = None,
+        until: int | None = None,
     ) -> AsyncGenerator[UnitPage]:
         """`_pages` as the port's pages; one holding no item Usher models is not yielded.
 
         Each page's checkpoint is the window's anchor after it, in decimal.
         """
-        listing = self._pages(query, start_index=start_index, stop=stop, after=after)
+        listing = self._pages(query, start_index=start_index, after=after, until=until)
         async with aclosing(listing) as pages:
             async for entries, resume_at, anchor in pages:
                 items = tuple(item for item in map(to_source_item, entries) if item is not None)
@@ -585,6 +589,8 @@ class EmbyAdapter(SourceAdapter):
         libraries hold fewer items than the source, the seed is followed by one
         walk of everything, and a WARNING names both numbers. A library is counted
         once, over every type a walk lists, so its count rides on its TITLES unit.
+        Each episode chunk after a library's first is bounded by the key of the item at
+        its start, every library's asked for at once.
         """
         libraries = await self._views()
         self._library_ids = frozenset(view_id for view_id, _ in libraries)
@@ -622,8 +628,14 @@ class EmbyAdapter(SourceAdapter):
         for (view_id, name), count in ranked:
             titles = LibraryUnit(WalkStage.TITLES, view_id)
             units.append(WalkUnit(titles.key, WalkStage.TITLES, titles.label(name), count))
-        for (view_id, name), count in ranked:
-            for chunk in episode_chunks(view_id, count, self._unit_max_items):
+        chunked = [
+            (name, episode_chunks(view_id, count, self._unit_max_items))
+            for (view_id, name), count in ranked
+        ]
+        keys = iter(await self._boundary_keys([c for _, chunks in chunked for c in chunks[1:]]))
+        for name, chunks in chunked:
+            bounds = [next(keys) for _ in chunks[1:]]
+            for chunk in keyed_chunks(chunks, bounds):
                 units.append(WalkUnit(chunk.key, WalkStage.EPISODES, chunk.label(name)))
         return WalkPlan(tuple(units), expected_total=total)
 
@@ -662,11 +674,17 @@ class EmbyAdapter(SourceAdapter):
                 key=unit.key,
             )
             return
-        # A bounded chunk reads `PAGE_OVERLAP` items past its end, so a shift at the
-        # boundary with the next chunk is covered the way one between pages is.
-        stop = None if unit.upper is None else unit.upper + PAGE_OVERLAP
-        start, after = _resume(start_index, checkpoint, unit.lower)
-        pages = self._unit_pages(_unit_query(unit), start_index=start, stop=stop, after=after)
+        # A keyed chunk starts an overlap before its bound and reads until it passes the
+        # next chunk's: an item moving across a bound is read by one chunk or both. The
+        # chunk before reads every item keyed at or below the bound, so a first page that
+        # starts on the bound's key has skipped nothing: only one past it counts as moved.
+        # A chunk planned without keys reads to the end.
+        floor = unit.lower if unit.lower_key is None else max(0, unit.lower - PAGE_OVERLAP)
+        anchor = None if unit.lower_key is None else unit.lower_key + 1
+        start, after = _resume(start_index, checkpoint, floor, anchor)
+        pages = self._unit_pages(
+            _unit_query(unit), start_index=start, after=after, until=unit.upper_key
+        )
         async with aclosing(pages) as unit_pages:
             async for page in unit_pages:
                 yield page
@@ -785,6 +803,40 @@ class EmbyAdapter(SourceAdapter):
         if not isinstance(total, int) or total < 0:
             raise PortDataMalformed("Emby's count carried no TotalRecordCount")
         return total
+
+    async def _boundary_keys(self, chunks: Sequence[LibraryUnit]) -> list[int | None]:
+        """The key of the item at each chunk's lower bound, `None` where the listing ends first.
+
+        `None` too where that item carries no creation time. Asked at once; one that fails
+        raises only once every one has settled.
+        """
+        path = await self._items_path()
+        answers = await asyncio.gather(
+            *(
+                self._page(
+                    path,
+                    {
+                        **_unit_query(chunk),
+                        "StartIndex": str(chunk.lower),
+                        "Limit": "1",
+                        "EnableTotalRecordCount": "false",
+                    },
+                    chunk.lower,
+                    op="boundary",
+                )
+                for chunk in chunks
+            ),
+            return_exceptions=True,
+        )
+        keys: list[int | None] = []
+        for answer in answers:
+            if isinstance(answer, BaseException):
+                raise answer
+            entries = answer.get("Items")
+            if not isinstance(entries, list):
+                raise PortDataMalformed("Emby's boundary listing carried no Items array")
+            keys.append(key_of(entries[0]) if entries else None)
+        return keys
 
     async def _fetch(self, external_id: str, *, op: str = "get_item") -> dict[str, Any] | None:
         """One item's payload, or `None` for a 404.

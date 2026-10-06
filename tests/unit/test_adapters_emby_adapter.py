@@ -116,7 +116,7 @@ def _dated(count: int) -> list[SourceItem]:
 
 
 def _created_key(index: int) -> str:
-    """The checkpoint `_dated`'s item `index` leaves: its `DateCreated` in microseconds."""
+    """The key of `_dated`'s item `index` or `_episodes`' episode: `DateCreated` in µs."""
     created = T0 + timedelta(seconds=index)
     return str((created - datetime(1970, 1, 1, tzinfo=UTC)) // timedelta(microseconds=1))
 
@@ -141,6 +141,17 @@ def _episode(index: int) -> SourceItem:
         episode_number=index + 1,
         added_at=T0,
     )
+
+
+def _episodes(count: int) -> list[SourceItem]:
+    """`series-0` and `count` of its episodes, each created a second after the one before."""
+    return [
+        _series(0),
+        *(
+            replace(_episode(index), added_at=T0 + timedelta(seconds=index))
+            for index in range(count)
+        ),
+    ]
 
 
 def _library(
@@ -3319,82 +3330,233 @@ async def test_a_titles_unit_lists_titles_and_an_episodes_unit_lists_episodes() 
 
 
 async def test_a_library_s_episodes_are_planned_in_chunks_of_the_unit_size() -> None:
+    """Nine items in chunks of three, each boundary landing on an episode it is keyed by."""
     server = FakeEmbyServer()
-    shows = _library(
-        server,
-        2,
-        "Shows",
-        [_series(0), *(_episode(index) for index in range(6))],
-        collection_type="tvshows",
-    )
+    shows = _library(server, 2, "Shows", _episodes(8), collection_type="tvshows")
     adapter = _adapter(server, unit_max_items=3)
     try:
         plan = await adapter.plan_walk()
     finally:
         await adapter.aclose()
     episodes = [unit for unit in plan.units if unit.stage is WalkStage.EPISODES]
+    three, six = _created_key(3), _created_key(6)
     assert [(unit.key, unit.label) for unit in episodes] == [
-        (f"episodes:{shows}:0:3", "episodes in Shows, 0 to 3"),
-        (f"episodes:{shows}:3:6", "episodes in Shows, 3 to 6"),
-        (f"episodes:{shows}:6:", "episodes in Shows, from 6"),
+        (f"episodes:{shows}:0:3@{three}", "episodes in Shows, 0 to 3"),
+        (f"episodes:{shows}:3@{three}:6@{six}", "episodes in Shows, 3 to 6"),
+        (f"episodes:{shows}:6@{six}:", "episodes in Shows, from 6"),
     ]
 
 
-async def test_a_bounded_chunk_reads_past_its_end_by_the_overlap_and_no_further() -> None:
-    """Chunk 0 to 100 reads episodes 0 to 149, and no request reaches past 150.
-
-    The reach past its end covers a shift at the boundary with the next chunk.
-    """
+async def test_a_plan_bounds_its_episode_chunks_by_key() -> None:
+    """Each boundary's key is that of the episode the boundary's index lands on."""
     server = FakeEmbyServer()
-    shows = _library(
-        server,
-        2,
-        "Shows",
-        [_series(0), *(_episode(index) for index in range(249))],
-        collection_type="tvshows",
+    view = _library(server, 1, "Shows", _episodes(250), collection_type="tvshows")
+    adapter = _adapter(server, unit_max_items=100)
+    try:
+        plan = await adapter.plan_walk()
+    finally:
+        await adapter.aclose()
+    episodes = [unit.key for unit in plan.units if unit.stage is WalkStage.EPISODES]
+    assert episodes == [
+        f"episodes:{view}:0:100@{_created_key(100)}",
+        f"episodes:{view}:100@{_created_key(100)}:200@{_created_key(200)}",
+        f"episodes:{view}:200@{_created_key(200)}:",
+    ]
+
+
+async def test_a_plan_asks_each_boundary_for_one_uncounted_episode_under_its_own_label() -> None:
+    """One request per boundary of every library, so a library of one chunk sends none.
+
+    Films counted past the unit size list no episode at their boundary, so they plan one
+    episodes unit with no bound. Timed as `list`, a read of one item would sit in the
+    bucket of pages of a thousand.
+    """
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    trace.set_tracer_provider(provider)
+    server = FakeEmbyServer()
+    shows = _library(server, 1, "Shows", _episodes(250), collection_type="tvshows")
+    films = _library(server, 2, "Films", _numbered(150))
+    shorts = _library(server, 3, "Shorts", [_movie(index) for index in range(3)])
+    adapter, seen = _recorded(server, unit_max_items=100)
+    try:
+        plan = await adapter.plan_walk()
+    finally:
+        await adapter.aclose()
+    probes = [request.url.params for request in _listings(seen) if "SortBy" in request.url.params]
+    assert sorted((probe["ParentId"], probe["StartIndex"]) for probe in probes) == sorted(
+        [(shows, "100"), (shows, "200"), (films, "100")]
     )
-    adapter, seen = _recorded(server, page_size=40, unit_max_items=100)
+    assert {
+        (probe["Limit"], probe["EnableTotalRecordCount"], probe["IncludeItemTypes"])
+        for probe in probes
+    } == {("1", "false", "Episode")}
+    labels = [
+        str(span.attributes["usher.op"])
+        for span in exporter.get_finished_spans()
+        if span.name == "source.request" and span.attributes is not None
+    ]
+    assert sorted(labels) == sorted(["views", *["count"] * 6, *["boundary"] * len(probes)])
+    assert [unit.key for unit in plan.units if unit.stage is WalkStage.EPISODES][3:] == [
+        f"episodes:{films}:0:",
+        f"episodes:{shorts}:0:",
+    ]
+
+
+async def _read(adapter: EmbyAdapter, key: str) -> list[str]:
     try:
-        read = {
-            item.external_id
-            async for page in adapter.list_unit(f"episodes:{shows}:0:100")
-            for item in page.items
-        }
+        return [item.external_id async for page in adapter.list_unit(key) for item in page.items]
     finally:
         await adapter.aclose()
-    ends = [
-        int(request.url.params["StartIndex"]) + int(request.url.params["Limit"])
-        for request in _listings(seen)
-    ]
-    assert max(ends) == 100 + PAGE_OVERLAP
-    assert read == {f"episode-{index:03d}" for index in range(100 + PAGE_OVERLAP)}
 
 
-async def test_a_chunk_resumed_at_its_stop_asks_for_nothing() -> None:
-    """Its last page committed and the attempt died before the unit did.
+async def test_a_keyed_chunk_reads_past_its_boundary_and_stops() -> None:
+    server = FakeEmbyServer()
+    view = _library(server, 1, "Shows", _episodes(300), collection_type="tvshows")
+    key = f"episodes:{view}:100@{_created_key(100)}:200@{_created_key(200)}"
+    read = await _read(_adapter(server, page_size=40), key)
+    assert {f"episode-{i:03d}" for i in range(100, 201)} <= set(read)
+    assert max(read) < "episode-260", "the chunk ran on to the end of its library"
 
-    The checkpoint is the one that page left: every episode here was created at `T0`.
+
+@pytest.mark.parametrize(("lower", "first"), [(100, 100 - PAGE_OVERLAP), (30, 0)])
+async def test_a_keyed_chunk_starts_an_overlap_before_its_bound(lower: int, first: int) -> None:
+    """Never before the start of the listing, and over one that held still, read as it is."""
+    server = FakeEmbyServer()
+    view = _library(server, 1, "Shows", _episodes(300), collection_type="tvshows")
+    adapter, seen = _recorded(server, page_size=40)
+    lines: list[str] = []
+    handle = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        upper = lower + 100
+        read = await _read(
+            adapter,
+            f"episodes:{view}:{lower}@{_created_key(lower)}:{upper}@{_created_key(upper)}",
+        )
+    finally:
+        logger.remove(handle)
+    assert _listings(seen)[0].url.params["StartIndex"] == str(first)
+    assert read[0] == f"episode-{first:03d}"
+    assert lines == []
+
+
+async def test_deletions_before_a_chunk_between_plan_and_walk_skip_nothing() -> None:
+    server = FakeEmbyServer()
+    view = _library(server, 1, "Shows", _episodes(300), collection_type="tvshows")
+    key = f"episodes:{view}:100@{_created_key(100)}:200@{_created_key(200)}"
+    for index in range(80):
+        server.remove_item(f"episode-{index:03d}")
+    read = await _read(_adapter(server, page_size=40), key)
+    assert {f"episode-{i:03d}" for i in range(100, 201)} <= set(read)
+
+
+async def test_a_chunk_whose_bound_falls_among_items_created_together_starts_unmoved() -> None:
+    """Episodes 30 to 120 share one creation time, so the boundary at 100 falls among them.
+
+    The second chunk's first page, at 50, starts with its bound's own key and is read
+    rather than judged moved, and the three chunks read every episode between them.
     """
     server = FakeEmbyServer()
-    shows = _library(server, 2, "Shows", [_series(0), *(_episode(index) for index in range(6))])
-    adapter, seen = _recorded(server, unit_max_items=3)
+    shared = range(30, 121)
+    episodes = [
+        replace(_episode(index), added_at=T0 + timedelta(seconds=30 if index in shared else index))
+        for index in range(300)
+    ]
+    view = _library(server, 1, "Shows", [_series(0), *episodes], collection_type="tvshows")
+    adapter, seen = _recorded(server, page_size=40, unit_max_items=100)
+    lines: list[str] = []
+    handle = logger.add(lines.append, level="WARNING", format="{message}")
     try:
-        pages = [
-            page
-            async for page in adapter.list_unit(
-                f"episodes:{shows}:0:3", start_index=3 + PAGE_OVERLAP, checkpoint=_created_key(0)
-            )
+        plan = await adapter.plan_walk()
+        chunks = [unit.key for unit in plan.units if unit.stage is WalkStage.EPISODES]
+        bounds = f"100@{_created_key(30)}:200@{_created_key(200)}"
+        assert chunks[1] == f"episodes:{view}:{bounds}", "the premise: the bound is a shared key"
+        asked = len(_listings(seen))
+        read = [
+            item.external_id async for page in adapter.list_unit(chunks[1]) for item in page.items
         ]
+        starts = [request.url.params["StartIndex"] for request in _listings(seen)[asked:]]
+        for chunk in (chunks[0], chunks[2]):
+            read += [
+                item.external_id async for page in adapter.list_unit(chunk) for item in page.items
+            ]
+    finally:
+        logger.remove(handle)
+        await adapter.aclose()
+    assert len(chunks) == 3
+    assert starts[0] == "50" and "0" not in starts
+    assert [line.rstrip("\n") for line in lines] == []
+    assert set(read) == {item.external_id for item in episodes}
+
+
+@pytest.mark.parametrize(("later", "moved"), [(0, False), (1, True)], ids=["at", "past"])
+async def test_a_chunk_s_first_page_counts_as_moved_only_past_its_bound_s_key(
+    later: int, moved: bool
+) -> None:
+    """The item at the chunk's start is keyed `later` microseconds past the chunk's bound.
+
+    The chunk before reads every item keyed at or below that bound, so a first page starting
+    on it has skipped nothing; one starting past it may have, and reads again from earlier.
+    """
+    server = FakeEmbyServer()
+    view = _library(server, 1, "Shows", _episodes(300), collection_type="tvshows")
+    bound = int(_created_key(100 - PAGE_OVERLAP)) - later
+    adapter, seen = _recorded(server, page_size=40)
+    lines: list[str] = []
+    handle = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        await _read(adapter, f"episodes:{view}:100@{bound}:200@{_created_key(200)}")
+    finally:
+        logger.remove(handle)
+    starts = [request.url.params["StartIndex"] for request in _listings(seen)]
+    assert starts[:2] == (["50", "0"] if moved else ["50", "70"])
+    assert [line.rstrip("\n") for line in lines] == (
+        [
+            "Living Room Emby's listing moved past the overlap before StartIndex=50; "
+            "reading again from StartIndex=0"
+        ]
+        if moved
+        else []
+    )
+
+
+async def test_a_boundary_probe_that_finds_nothing_ends_the_chunks_unbounded() -> None:
+    """The library shrank below the boundary between being counted and being probed."""
+    server = FakeEmbyServer()
+    view = _library(server, 1, "Shows", _episodes(150), collection_type="tvshows")
+
+    def emptied(request: httpx.Request) -> httpx.Response:
+        params = request.url.params
+        if params.get("Limit") == "1" and params.get("StartIndex") == "100":
+            return httpx.Response(200, json={"Items": []})
+        return server.handle(request)
+
+    adapter = EmbyAdapter(
+        SOURCE,
+        CREDENTIALS,
+        client=httpx.AsyncClient(transport=httpx.MockTransport(emptied), base_url=SOURCE.base_url),
+        unit_max_items=100,
+    )
+    try:
+        plan = await adapter.plan_walk()
     finally:
         await adapter.aclose()
-    assert pages == []
-    assert _listings(seen) == []
+    assert [u.key for u in plan.units if u.stage is WalkStage.EPISODES] == [f"episodes:{view}:0:"]
+
+
+async def test_an_old_format_chunk_reads_to_the_end_of_its_library() -> None:
+    """Past its upper bound and the overlap beyond it, which is all a chunk once read."""
+    server = FakeEmbyServer()
+    view = _library(server, 1, "Shows", _episodes(200), collection_type="tvshows")
+    read = await _read(_adapter(server, page_size=40), f"episodes:{view}:0:100")
+    assert {f"episode-{i:03d}" for i in range(200)} == set(read)
 
 
 async def test_a_chunk_above_zero_starts_its_walk_at_its_lower_bound() -> None:
-    """Chunk 3 to 6 asks first at `StartIndex=3`, so it re-reads no chunk before it.
+    """Chunk 3 to 6, planned without keys, asks first at `StartIndex=3`.
 
-    The library's seven episodes end inside the chunk's reach past 6, so it reads to the end.
+    So it re-reads no chunk before it, having no key to judge a reach-back by.
     """
     server = FakeEmbyServer()
     shows = _library(
@@ -3465,6 +3627,48 @@ async def test_a_page_s_resume_point_is_the_next_request_s_start_reach_back_incl
         await adapter.aclose()
     assert first.resume_at == 4 - 2, "a page of four reaches back two"
     assert int(_listings(seen)[1].url.params["StartIndex"]) == first.resume_at
+
+
+@pytest.mark.parametrize(
+    ("bounded", "last_item", "resume_at"),
+    [(True, 209, 190), (False, 109, 95)],
+    ids=["keyed-chunk", "unbounded-unit"],
+)
+async def test_a_unit_resumed_from_its_last_page_asks_once_and_ends(
+    bounded: bool, last_item: int, resume_at: int
+) -> None:
+    """The page that ends a walk resumes a reach-back before its end, as every other page does.
+
+    So the page a resume reads there is judged by the checkpoint as unmoved, and ends the
+    walk. The chunk's last page is 170 to 210, past its bound at 200; the titles unit's is
+    80 to 110, the end of its library.
+    """
+    server = FakeEmbyServer()
+    if bounded:
+        view = _library(server, 1, "Shows", _episodes(300), collection_type="tvshows")
+        key = f"episodes:{view}:100@{_created_key(100)}:200@{_created_key(200)}"
+    else:
+        key = f"titles:{_library(server, 1, 'Films', _dated(110))}"
+    adapter, seen = _recorded(server, page_size=40)
+    lines: list[str] = []
+    handle = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        last = [page async for page in adapter.list_unit(key)][-1]
+        assert last.checkpoint == _created_key(last_item), "the premise: the walk's own last page"
+        asked = len(_listings(seen))
+        resumed = [
+            page
+            async for page in adapter.list_unit(
+                key, start_index=last.resume_at, checkpoint=last.checkpoint
+            )
+        ]
+    finally:
+        logger.remove(handle)
+        await adapter.aclose()
+    assert [line.rstrip("\n") for line in lines] == []
+    assert len(_listings(seen)) - asked == 1
+    assert len(resumed) == 1
+    assert last.resume_at == resume_at
 
 
 async def test_each_unit_page_carries_the_checkpoint_of_its_last_item() -> None:
@@ -3616,7 +3820,8 @@ async def test_a_page_judged_moved_is_never_yielded_by_the_listing() -> None:
     """Read off `_pages` itself: every consumer drops a page that carries no entries.
 
     The resume of the eighty-deletion case above. The page at 150 moved, so the first
-    page yielded is the one read again from 50, carrying its own anchor.
+    page yielded is the one read again from 50, carrying its own anchor. The last, a page
+    of 70 ending the listing at 220, resumes 35 before that end, as any page of 70 would.
     """
     server = FakeEmbyServer()
     view = _library(server, 1, "Films", _dated(300))
@@ -3639,7 +3844,7 @@ async def test_a_page_judged_moved_is_never_yielded_by_the_listing() -> None:
     assert yielded == [
         (100, 100, _created_key(229)),
         (50, 150, _created_key(279)),
-        (20, 220, _created_key(299)),
+        (20, 220 - 70 // 2, _created_key(299)),
     ]
 
 
@@ -3838,6 +4043,96 @@ async def test_a_count_without_a_total_fails_the_plan() -> None:
             await adapter.plan_walk()
     finally:
         await adapter.aclose()
+
+
+@pytest.mark.parametrize(
+    ("answer", "raised", "message"),
+    [
+        (lambda: httpx.Response(400, json={"Error": "refused"}), PortUnavailable, "400"),
+        (
+            lambda: httpx.Response(200, json={"TotalRecordCount": 0}),
+            PortDataMalformed,
+            "boundary listing carried no Items array",
+        ),
+    ],
+    ids=["refused", "no-items-array"],
+)
+async def test_a_boundary_probe_that_fails_fails_the_plan(
+    answer: Callable[[], httpx.Response], raised: type[Exception], message: str
+) -> None:
+    """Read as a listing that ended, it would plan one chunk for the whole library."""
+    server = FakeEmbyServer()
+    _library(server, 1, "Shows", _episodes(150), collection_type="tvshows")
+    probes: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("Limit") != "1":
+            return server.handle(request)
+        probes.append(request.url.params["StartIndex"])
+        return answer()
+
+    adapter = EmbyAdapter(
+        SOURCE,
+        CREDENTIALS,
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handle), base_url=SOURCE.base_url),
+        unit_max_items=100,
+    )
+    try:
+        with pytest.raises(raised, match=message):
+            await adapter.plan_walk()
+    finally:
+        await adapter.aclose()
+    assert probes == ["100"], "the premise: the one boundary was probed"
+
+
+async def test_boundary_probes_are_in_flight_together_and_one_refused_waits_for_the_rest() -> None:
+    """A library's two probes are asked at once, and the refused one raises once both settle.
+
+    Each probe waits for the other before it answers, giving up after `BOUND` seconds, so
+    probes asked one at a time are recorded apart rather than hanging. Then the probe at
+    100 is refused at once and the one at 200 answers a moment later.
+    """
+    server = FakeEmbyServer()
+    _library(server, 1, "Shows", _episodes(250), collection_type="tvshows")
+    both = asyncio.Event()
+    began: dict[str, float] = {}
+    windows: dict[str, tuple[float, float]] = {}
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("Limit") != "1":
+            return server.handle(request)
+        start = request.url.params["StartIndex"]
+        began[start] = time.monotonic()
+        if len(began) == 2:
+            both.set()
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(both.wait(), BOUND)
+        if start == "100":
+            response = httpx.Response(400, json={"Error": "refused"})
+        else:
+            await asyncio.sleep(0.1)
+            response = server.handle(request)
+        windows[start] = (began[start], time.monotonic())
+        return response
+
+    adapter = EmbyAdapter(
+        SOURCE,
+        CREDENTIALS,
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handle), base_url=SOURCE.base_url),
+        unit_max_items=100,
+    )
+    try:
+        with pytest.raises(PortUnavailable, match="400"):
+            await adapter.plan_walk()
+        settled = dict(windows)
+    finally:
+        await adapter.aclose()
+    assert sorted(began) == ["100", "200"], "the premise: both boundaries were probed"
+    assert sorted(settled) == ["100", "200"], f"the plan raised before both settled: {settled}"
+    (refused_began, refused_ended), (slow_began, slow_ended) = settled["100"], settled["200"]
+    assert max(refused_began, slow_began) < min(refused_ended, slow_ended), (
+        f"the probes were asked one at a time: {settled}"
+    )
 
 
 async def test_a_plan_s_views_read_and_counts_carry_their_own_operation_labels() -> None:

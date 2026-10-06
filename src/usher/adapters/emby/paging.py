@@ -59,7 +59,7 @@ class OffsetWindow:
     it reads a page. Falling keys inside a page mark a keyed listing unsorted, and
     keys judge nothing after that.
 
-    A bounded window never asks past `stop`, and reaching it ends the walk.
+    A keyed window bounded by `until` ends on the page whose last key passes it.
     """
 
     def __init__(
@@ -67,14 +67,14 @@ class OffsetWindow:
         *,
         limit: int,
         start: int,
-        stop: int | None = None,
         keyed: bool = False,
         after: int | None = None,
+        until: int | None = None,
     ) -> None:
         self.limit = limit
         self.start = start
-        self.stop = stop
         self.keyed = keyed
+        self.until = until
         self.overlap = 0
         self.total: int | None = None
         self._cursor = start
@@ -103,13 +103,6 @@ class OffsetWindow:
     def unsorted(self) -> bool:
         """Whether a keyed listing has served a page whose keys fall."""
         return self._unsorted
-
-    @property
-    def request_limit(self) -> int:
-        """The `Limit` for the request at `start`: `limit`, cut short at `stop`."""
-        if self.stop is None:
-            return self.limit
-        return max(0, min(self.limit, self.stop - self.start))
 
     def receive(self, entries: list[Any], total: object) -> Page:
         """Account for the page requested at `start`."""
@@ -146,8 +139,14 @@ class OffsetWindow:
         self._served_ids = ids
         if known:
             self._anchor = known[-1]
-        stopped = self.stop is not None and self._cursor >= self.stop
-        ended = not entries or (short and reached) or drained or stopped
+        passed = (
+            self.until is not None
+            and self.keyed
+            and not self._unsorted
+            and self._anchor is not None
+            and self._anchor > self.until
+        )
+        ended = not entries or (short and reached) or drained or passed
         return Page(fresh=fresh, ended=ended, shifted=False)
 
     def _moved(self, ids: list[str | None], known: list[int]) -> bool:
@@ -167,17 +166,24 @@ class OffsetWindow:
             return False
         return anchor is None or not known or known[0] >= anchor
 
+    @property
+    def next_start(self) -> int:
+        """The `StartIndex` `advance` moves to, without moving: what resumes after the last page."""
+        if self._backoff:
+            return max(0, self.start - self._backoff)
+        return max(0, self._cursor - min(PAGE_OVERLAP, self._served // 2))
+
     def advance(self) -> int:
         """The next `StartIndex`: back into the last page read, or before a page that moved."""
+        start = self.next_start
         if self._backoff:
-            self.start = max(0, self.start - self._backoff)
             self._reach = self._served_ids
             self._reached = True
         else:
-            reach = min(PAGE_OVERLAP, self._served // 2)
-            self.start = max(0, self._cursor - reach)
+            reach = self._cursor - start
             self._reach = self._served_ids[len(self._served_ids) - reach :]
             self._reached = reach > 0
+        self.start = start
         self.overlap = self._cursor - self.start
         return self.start
 

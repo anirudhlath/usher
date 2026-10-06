@@ -93,6 +93,11 @@ Versioning is `0.x` while the wire contract may still move —
   item it read beside its position (`sync_run_units.checkpoint`, migration
   `m10h`), and its first page after a resume is judged against it. A unit saved
   before this release restarts from its beginning.
+- **An episode chunk no longer skips items that move across its boundary.**
+  Chunks are bounded by the creation time of the item at each boundary, read
+  when the walk is planned, and each reads until it passes the next chunk's
+  first item. A chunk planned before this release reads to the end of its
+  library.
 - **An embedding model that fails the embedder's norm check now fails every
   batch, not only the first.** The first batch used to park one `index` job and
   let every later vector through unchecked.
