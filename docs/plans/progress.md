@@ -112,6 +112,17 @@ table"* one obligation rather than four separate ones a plan can fall between.
 is not a milestone, so a row under any heading above would make that heading
 false. `tests/unit/test_docs_currency.py` reads it into the same union.
 
+## Sync correctness (from docs/plans/2026-10-05-sync-correctness.md's Decisions)
+| Task | What it delivers | Plan file | Status |
+|---|---|---|---|
+| 1–7 | The owner's rulings on PR #95's review concerns: a cancelled walk closes its run, paging that backs up rather than skips (mid-walk, across a resume via `m10h`'s checkpoint, and at chunk boundaries), dead runs closed by the next run of their lane with the watch lane no longer resuming, and a source merge keeping its own instant | docs/plans/2026-10-05-sync-correctness.md | 🔨 in progress |
+| 8 | Status rows: fast first sync's Phase 2 landed, this plan in review | docs/plans/2026-10-05-sync-correctness.md | 📋 planned |
+
+**A sixth table, for the fifth's reason.** Sync correctness has no spec of its
+own — the owner's rulings are its plan's Decisions — and is not a milestone, so a
+row under any heading above would make that heading false.
+`tests/unit/test_docs_currency.py` reads it into the same union.
+
 ## M1 task groups → plan line ranges
 Plan file: `docs/plans/2026-07-28-m1-foundation.md` (2470 lines)
 
