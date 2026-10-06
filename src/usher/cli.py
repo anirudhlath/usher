@@ -321,6 +321,7 @@ async def _sync(
                 # already documents: one adapter is one connection pool, and
                 # a walk that raises would otherwise leak it for the rest of
                 # the process.
+                mark = len(failed)
                 hook = _watch_lane(pipeline.watch, source, adapter, user_id, failed)
                 run = await pipeline.reconcile.reconcile(
                     source, SyncRunKind(kind), adapter, after_seed=hook
@@ -335,9 +336,9 @@ async def _sync(
                     source, adapter, user_id=user_id, since_at_most=run.started_at
                 )
                 print(_watch_line(source, watch))
-                # This run may have resumed the row the after-seed run failed, and it holds
-                # that row's last word: one row is counted once, and not at all if it completed.
-                failed[:] = [one for one in failed if one.id != watch.id]
+                # The watch run after the walk reads back to the instant the walk began,
+                # covering the hook's run: it is this source's watch lane's last word.
+                del failed[mark:]
                 failed.extend(one for one in (run, watch) if one.status is SyncRunStatus.FAILED)
             except WalkRefused as exc:
                 # Another process is walking this source, and runs its watch lane after.
@@ -401,7 +402,7 @@ def _watch_lane(
     user_id: uuid.UUID,
     failed: list[SyncRun],
 ) -> AfterSeed:
-    """The watch lane as a walk's `after_seed`, printed and kept like the run after the walk.
+    """The watch lane as a walk's `after_seed`, printed and kept until the run after the walk.
 
     The walk's beat goes on to `watch.sync`, which awaits it with each commit and beat of
     its own, so the walk's heartbeat keeps moving while the watch lane runs.

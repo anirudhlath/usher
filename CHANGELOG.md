@@ -24,12 +24,16 @@ Versioning is `0.x` while the wire contract may still move —
   same run, each unit from the position it committed. While one is alive — its
   heartbeat under 10 minutes old — a second is refused, saying how long until
   one whose process stopped can be resumed: `usher sync` exits non-zero, and a
-  worker job is deferred 10 minutes, spending none of its attempts. A
-  watch-state walk started while another is alive runs beside it instead of
-  closing or resuming the other's run.
+  worker job is deferred 10 minutes, spending none of its attempts. A walk
+  stopped with Ctrl-C closes its run `failed` with
+  `cancelled: the walk was stopped before it finished`, as last committed, so
+  the next starts at once; one whose process was killed outright counts as live
+  until its heartbeat is 10 minutes old. A watch-state walk started while
+  another is alive runs beside it and leaves the other's run alone.
 - The watch lane runs as soon as a whole-library walk has stored what the
   account is watching — played, in progress and next up — so a household's own
-  shelves fill long before the walk ends. It still runs after the walk.
+  shelves fill long before the walk ends. It still runs after the walk, and
+  `usher sync` exits on that run's outcome.
 - `GET /admin/sources/{id}/status` carries `last_sync`: the source's live
   whole-library walk if it has one, and otherwise its newest full or delta
   walk. It, every `sync.progress` frame and `usher sync-status` say where a
@@ -59,10 +63,14 @@ Versioning is `0.x` while the wire contract may still move —
   whole library, which on a million-item library took most of a day. If most of
   the played listing reads unwatched, the server is taken to ignore the filter,
   and the walk lists once and logs a WARNING.
-- **An unfinished first watch-state walk starts again rather than resuming.**
-  Its position counted the old whole-library walk, so resuming it would skip
-  every played item that is not also in progress; its row is closed `failed`
-  as superseded.
+- **The watch lane no longer resumes an unfinished run**, withdrawing #41's
+  resume: a `StartIndex` into a listing that has lost items since skips them.
+  Each watch run starts afresh from the oldest of the lane's cursor and the
+  cursor of every failed watch run that no completed run has covered — by
+  starting no earlier and reading from no later, both with a cursor or both
+  without — so a failed run costs a re-read from its cursor. A run whose process
+  stopped is closed `failed` with `abandoned: its process stopped before it
+  finished` by the next, and its cursor counts.
 - **`USHER_PUSH_STALE_AFTER_SECONDS` defaults to 300, up from 90.** An idle
   library's push channel routinely went longer than 90 s between messages, and
   every such gap cost a reconnect. `usher push --probe` listens for one window,
@@ -74,12 +82,6 @@ Versioning is `0.x` while the wire contract may still move —
 
 ### Fixed
 
-- **A sync stopped with Ctrl-C no longer blocks the next one for 10 minutes.**
-  The cancelled walk closes its run `failed` with
-  `cancelled: the walk was stopped before it finished`, as last committed, so
-  the next `usher sync` starts at once and a whole-library walk resumes. A
-  process killed outright still leaves its run live until its heartbeat is 10
-  minutes old.
 - **Items deleted from the source mid-walk no longer hide others from the
   walk.** Each page re-reads the end of the page before, so a full walk no
   longer marks a file that is still there unavailable.

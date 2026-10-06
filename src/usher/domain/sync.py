@@ -107,6 +107,9 @@ STALE_AFTER = timedelta(minutes=10)
 #: What a walk closed by its own cancellation says.
 CANCELLED_ERROR = "cancelled: the walk was stopped before it finished"
 
+#: What a run closed by a later run of its lane says, its own process having stopped.
+ABANDONED_ERROR = "abandoned: its process stopped before it finished"
+
 
 def is_live(run: SyncRun, now: datetime) -> bool:
     """Whether `run` is a live walk: `running`, with a heartbeat under `STALE_AFTER` old.

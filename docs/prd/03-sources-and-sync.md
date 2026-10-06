@@ -246,7 +246,9 @@ whole-library walk's plan starts with what the account is watching, `usher
 sync` and a worker job run the watch lane the moment that stage has committed —
 on a resumed walk too — and again after the walk, as before. The second run
 reads back to the instant the walk began, so a state saved meanwhile for an
-item the walk had not yet stored is not skipped.
+item the walk had not yet stored is not skipped. `usher sync` takes the watch
+run after a walk as the source's last word: a failure of the run the seed
+started does not fail the command once the run after the walk completes.
 
 **A bounded walk records `FAILED`, never `COMPLETED`.**
 `USHER_PUSH_GAP_MAX_ITEMS` (default **20,000**; 0 is unlimited) stops a
@@ -280,25 +282,27 @@ play state to an account on a server the operator does not administer.
 (full or delta). A full walk ignores every cursor. `watch_state` is a third lane
 with its own cursor.
 
-**A watch-lane delta is resumable.** A run checkpoints its position on
-`sync_runs.position`, and the next attempt reclaims that same row and resumes
-there, so a failure that outlasts a page's retries costs the page in flight
-rather than the whole walk. The run after a whole-library walk resumes a delta
-only when its cursor is at or before the instant the walk began; otherwise it
-starts afresh from that instant, and the delta, if still `running` and not
-alive (below), is closed `failed` with `superseded: a watch delta restarts from
-an earlier cursor`. **Until a source has completed one `watch_state`
-run, its watch lane has no cursor**, and its next run asks the source only for
-what the account has played or holds a resume position in — two filtered
-listings, a few requests on most libraries — and merges nothing else. That
-first walk is never resumed: an unfinished one still `running` and not alive
-(below) is closed `failed` with `superseded: a first watch walk restarts`, and
-the next run starts again. Nothing schedules it.
+**A watch-lane run is never resumed.** Each run starts afresh from the oldest of
+the lane's cursor and the cursor of each `failed` watch run of the source —
+cancelled and abandoned ones included — that no completed run covers yet, and
+never past the instant the item walk it follows began. A failed run with no
+cursor counts as older than any. A completed run covers a failed one when it
+started no earlier and either both read from a cursor, the completed run's no
+later, or neither had one. So a failure that outlasts a page's retries costs a
+re-read from that run's cursor, even after a run walking beside it from a later
+cursor, or from none, completes; a resumed `StartIndex` into a listing that has
+lost items since would skip some. **Until a source has completed one
+`watch_state` run, its watch lane has no cursor**, and a run with no cursor asks
+the source only for what the account has played or holds a resume position in —
+two filtered listings, a few requests on most libraries — and merges nothing
+else. Nothing schedules it.
 A watch run moves its heartbeat when it starts, with every batch it commits,
-and at least once a minute between commits, also while it waits on a page. One
-still `running` whose heartbeat is under 10 minutes old is alive, and a second
-watch run neither closes nor resumes it: it walks beside it in a run of its
-own, a delta from the cursor or, with no cursor yet, a first walk.
+and at least once a minute between commits, also while it waits on a page.
+Before it starts, a run closes its source's watch runs still `running` whose
+heartbeat is 10 minutes old or missing, `failed` with `abandoned: its process
+stopped before it finished`, and logs a WARNING counting them. One whose
+heartbeat is younger is alive and is left alone: the new run walks beside it,
+in a run of its own.
 
 **Each batch is committed with the run's counters**, and a `sync_runs` row an
 operator can watch exists before the walk starts rather than after it finishes.

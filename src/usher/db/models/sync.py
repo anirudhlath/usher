@@ -29,12 +29,11 @@ class SyncRunRow(Base):
 
     A history, not a checkpoint -- contrast `ImportRunRow`, one row per dataset.
 
-    **`position` half-excepts that**, and only for the `watch_state` kind: such
-    a run advances `position` per committed batch, and a delta reuses its own
-    row across attempts, so while it is unfinished its row is read back as a
-    checkpoint. The table is still a history -- one row per *walk* rather than
-    one per attempt at it -- and the other kinds leave the column at 0 and
-    restart from `cursor_at`.
+    `position` is the `watch_state` kind's alone: such a run advances it per
+    committed batch, counting the states it has committed, and nothing reads it
+    back, since a watch run is never resumed. The other kinds leave it at 0. The
+    table is one row per *walk* rather than one per attempt at it: a resumed
+    whole-library walk continues its own row.
 
     No `set_updated_at` trigger and no `updated_at` column: a run's
     interesting timestamps are `started_at` and `finished_at`, and both are
@@ -56,7 +55,7 @@ class SyncRunRow(Base):
         enum_column(SyncRunStatus, length=16), nullable=False, server_default=text("'running'")
     )
     cursor_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # The walk's resume point: a **page offset**, not an ordering key.
+    # How many states a watch-state run has committed; 0 for every other kind.
     position: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
 
     items_seen: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))

@@ -2,12 +2,28 @@
 
 import uuid
 from collections.abc import Sequence
+from datetime import datetime
 
 from pydantic import AwareDatetime
 
-from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus, SyncRunUnit, SyncRunUnitStatus
+from usher.domain.sync import (
+    SyncRun,
+    SyncRunKind,
+    SyncRunStatus,
+    SyncRunUnit,
+    SyncRunUnitStatus,
+    is_live,
+)
 from usher.ports.errors import RepositoryConflict, RepositoryNotFound
 from usher.ports.repository import SyncRunRepository
+
+
+def _cursor_covers(done: AwareDatetime | None, failed: AwareDatetime | None) -> bool:
+    # Both with no cursor, or both with one and the completed run's no later: the Postgres
+    # arm's NULL comparison, which a run with a cursor and one without never pass.
+    if done is None or failed is None:
+        return done is None and failed is None
+    return done <= failed
 
 
 class FakeSyncRunRepository(SyncRunRepository):
@@ -33,6 +49,23 @@ class FakeSyncRunRepository(SyncRunRepository):
             return
         self._runs[run.id] = run.evolve(position=max(stored.position, run.position))
 
+    async def close_abandoned(
+        self, source_id: uuid.UUID, kinds: Sequence[SyncRunKind], *, now: datetime, error: str
+    ) -> int:
+        dead = [
+            one
+            for one in self._runs.values()
+            if one.source_id == source_id
+            and one.kind in kinds
+            and one.status is SyncRunStatus.RUNNING
+            and not is_live(one, now)
+        ]
+        for one in dead:
+            self._runs[one.id] = one.evolve(
+                status=SyncRunStatus.FAILED, error=error, error_code=None, finished_at=now
+            )
+        return len(dead)
+
     async def get(self, run_id: uuid.UUID) -> SyncRun | None:
         return self._runs.get(run_id)
 
@@ -51,6 +84,24 @@ class FakeSyncRunRepository(SyncRunRepository):
         if not completed:
             return None
         return max(run.started_at for run in completed)
+
+    async def uncovered_failed_cursors(
+        self, source_id: uuid.UUID, kind: SyncRunKind
+    ) -> set[AwareDatetime | None]:
+        mine = [
+            run for run in self._runs.values() if run.source_id == source_id and run.kind is kind
+        ]
+        completed = [run for run in mine if run.status is SyncRunStatus.COMPLETED]
+        return {
+            failed.cursor_at
+            for failed in mine
+            if failed.status is SyncRunStatus.FAILED
+            and not any(
+                done.started_at >= failed.started_at
+                and _cursor_covers(done.cursor_at, failed.cursor_at)
+                for done in completed
+            )
+        }
 
     async def latest_run(self, source_id: uuid.UUID, kind: SyncRunKind) -> SyncRun | None:
         return self._newest(source_id, kind, planned=False)

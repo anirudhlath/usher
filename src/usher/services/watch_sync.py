@@ -14,7 +14,7 @@ from pydantic import AwareDatetime
 
 from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.source import Source
-from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus, is_live
+from usher.domain.sync import ABANDONED_ERROR, SyncRun, SyncRunKind, SyncRunStatus
 from usher.ports.errors import UsherPortError
 from usher.ports.ingest import MediaItemTarget, WatchStateMerge
 from usher.ports.jobs import JobQueue, JobRequest
@@ -31,13 +31,6 @@ _run_duration = _meter.create_histogram(
 _backfilled = _meter.create_counter(
     "usher.watch_state.backfilled", unit="1", description="Play histories recovered by a backfill"
 )
-
-# What a superseded first walk's row says. A constant, so a test and an operator
-# grepping `sync_runs.error` read the same words.
-SUPERSEDED_ERROR = "superseded: a first watch walk restarts"
-
-# What a superseded delta's row says: it restarts to read from before its own cursor.
-DELTA_SUPERSEDED_ERROR = "superseded: a watch delta restarts from an earlier cursor"
 
 
 def _now() -> datetime:
@@ -107,33 +100,15 @@ class _Progress:
     per batch, and a failure handler holding the pre-walk value regresses
     the durable checkpoint to zero on every failure.
 
-    That checkpoint carries `position` too, and regressing *that* is not merely
-    a wrong number on a dashboard. `items_seen` reading 0 where the walk merged
-    thousands of states is a misreport an operator can discount; `position`
-    reading 0 is an instruction, and the next attempt obeys it by starting over
-    from page one. So the handler below evolves `progress.run`, or the resume is
-    a restart wearing a checkpoint's name.
+    A watch run's `position` counts the states it has committed, and nothing
+    reads it back: a watch run is never resumed, and a failed one hands the next
+    only its cursor.
     """
 
     __slots__ = ("run",)
 
     def __init__(self, run: SyncRun) -> None:
         self.run = run
-
-
-def _superseding(run: SyncRun, since_at_most: AwareDatetime | None) -> str | None:
-    """Why an unfinished watch run is closed rather than resumed, or `None` to resume it.
-
-    A first walk is a few hundred states, so its position means nothing to the next
-    one, and an old-style walk's 300,000 would skip its whole played listing. A delta
-    whose cursor is later than `since_at_most` cannot read from that instant: its
-    position counts into its own cursor's stream.
-    """
-    if run.cursor_at is None:
-        return SUPERSEDED_ERROR
-    if since_at_most is not None and run.cursor_at > since_at_most:
-        return DELTA_SUPERSEDED_ERROR
-    return None
 
 
 def _watch_target(target: MediaItemTarget) -> MediaItemTarget | None:
@@ -198,79 +173,62 @@ class WatchStateSyncService:
     ) -> SyncRun:
         """Walk this source's watch state into the catalog.
 
-        A fresh delta reads from `since_at_most` when that is earlier than its own
-        cursor, and an unfinished delta whose cursor is later is closed rather than
-        resumed, so a caller can cover what its item walk stored after this lane's
-        last run began. `beat` is awaited after each batch this walk commits and each
-        beat of its own heartbeat, due `heartbeat_seconds` after its last commit or beat,
-        so a caller whose own run waits on this walk can keep that run's heartbeat moving,
-        a page under retry included.
-        `beat` must not raise a `UsherPortError`, which would be recorded as this
-        walk's failure. A run another process is still walking is left to it, and
-        this walk runs beside it in a row of its own. Cancelled once its run has
-        committed, the walk closes that run with `close_cancelled` before the
-        cancellation propagates. Never raises a `UsherPortError`.
+        Each run starts afresh, after closing this source's dead watch runs: none is
+        resumed or superseded. It reads from the oldest of the lane's cursor, the cursor
+        of every failed run no completed run has covered yet -- by starting no earlier
+        and reading from no later, both with a cursor or both without -- and
+        `since_at_most`, so a caller can cover what its item walk stored after this
+        lane's last run began. A run another process is still walking is left to it, and
+        this walk runs beside it in a row of its own. `beat` is awaited after each batch
+        this walk commits and each beat of its own heartbeat, due `heartbeat_seconds`
+        after its last commit or beat, so a caller whose own run waits on this walk can
+        keep that run's heartbeat moving, a page under retry included. `beat` must not
+        raise a `UsherPortError`, which would be recorded as this walk's failure.
+        Cancelled once its run has committed, the walk closes that run with
+        `close_cancelled` before the cancellation propagates. Never raises a
+        `UsherPortError`.
         """
         started = time.perf_counter()
         with _tracer.start_as_current_span("sync.watch_state") as span:
             span.set_attribute("usher.source", source.name)
-            # This attempt's own instant, bound once. It is the fresh run's
-            # `started_at` *and* every merge's `observed_at`: the same thing on a
-            # first attempt and deliberately not on a resumed one, where the row
-            # keeps the instant the logical walk began while the merges carry the
-            # instant this attempt began.
+            # This attempt's instant, bound once: the run's `started_at` and every
+            # merge's `observed_at`.
             attempt_started = datetime.now(UTC)
-            # The newest incomplete delta is resumed in place: its id, its `cursor_at`
-            # and -- load-bearing -- its `started_at`, so that when the walk finally
-            # completes, `latest_completed_cursor` reads an instant covering
-            # everything saved since the logical walk *began*.
-            incomplete = await self._runs.latest_incomplete_run(source.id, SyncRunKind.WATCH_STATE)
-            if incomplete is not None and is_live(incomplete, self._clock()):
-                # Another process's walk, alive. Closing or resuming its row would write
-                # under that walk, so this one runs in a row of its own, both merging on
-                # one key under one conflict rule. A row with no heartbeat predates
-                # heartbeats, and is taken for dead.
-                incomplete = None
-            if incomplete is not None and (error := _superseding(incomplete, since_at_most)):
-                await self._supersede(incomplete, attempt_started, error)
-                incomplete = None
-            if incomplete is None:
-                cursor = await self._runs.latest_completed_cursor(
-                    source.id, SyncRunKind.WATCH_STATE
+            now = self._clock()
+            # A dead run's row is closed, never resumed: a `StartIndex` into a listing
+            # that has lost items since would skip some. A live one is another
+            # process's, and this run walks beside it.
+            closed = await self._runs.close_abandoned(
+                source.id, (SyncRunKind.WATCH_STATE,), now=now, error=ABANDONED_ERROR
+            )
+            if closed:
+                logger.warning(
+                    "closed {count} watch-state run(s) of {source} whose process had stopped",
+                    count=closed,
+                    source=source.name,
                 )
-                if cursor is not None and since_at_most is not None:
-                    # Never past the instant the caller's item walk began: a state saved
-                    # since then may be for an item that walk had not yet stored.
-                    cursor = min(cursor, since_at_most)
-                run = SyncRun(
-                    source_id=source.id,
-                    kind=SyncRunKind.WATCH_STATE,
-                    cursor_at=cursor,
-                    started_at=attempt_started,
-                    heartbeat_at=self._clock(),
-                )
-                # Committed `RUNNING` before the walk: an operator watching a
-                # long sync needs a row to watch, and a killed process must
-                # leave a trace rather than nothing.
-                await self._runs.add(run)
-            else:
-                cursor = incomplete.cursor_at
-                # `error` and `finished_at` cleared, so a resumed run does not read
-                # as one that already ended.
-                run = incomplete.evolve(
-                    status=SyncRunStatus.RUNNING,
-                    error=None,
-                    finished_at=None,
-                    heartbeat_at=self._clock(),
-                )
-                await self._runs.save(run)
-            # What this attempt inherited, for the telemetry below only.
-            # `_walk` reads the resume point off `progress.run` rather than
-            # taking it from here: two bindings for one number is exactly
-            # what `_Progress` exists to prevent, and the walk's copy is the
-            # one that moves.
-            inherited, resumed_from = run.items_seen, run.position
-            span.set_attribute("usher.resumed_from", resumed_from)
+            cursor = await self._runs.latest_completed_cursor(source.id, SyncRunKind.WATCH_STATE)
+            # A failed run's window is read again until a run that covers it completes,
+            # the runs just closed among them. `None`, from the beginning, is the oldest.
+            for carried in await self._runs.uncovered_failed_cursors(
+                source.id, SyncRunKind.WATCH_STATE
+            ):
+                cursor = None if cursor is None or carried is None else min(cursor, carried)
+            if cursor is not None and since_at_most is not None:
+                # Never past the instant the caller's item walk began: a state saved
+                # since then may be for an item that walk had not yet stored.
+                cursor = min(cursor, since_at_most)
+            run = SyncRun(
+                source_id=source.id,
+                kind=SyncRunKind.WATCH_STATE,
+                cursor_at=cursor,
+                started_at=attempt_started,
+                heartbeat_at=now,
+            )
+            # Committed `RUNNING` before the walk, with the close above: an operator
+            # watching a long sync needs a row to watch, and a killed process must leave
+            # a trace rather than nothing.
+            await self._runs.add(run)
             run_id = run.id
             try:
                 await self._commit()
@@ -293,17 +251,10 @@ class WatchStateSyncService:
                         finished_at=datetime.now(UTC),
                     )
                     span.set_attribute("usher.failed", True)
-                    # Both counts, because the run's is cumulative and reading it as
-                    # this attempt's is how a stalled resume looks healthy: an operator
-                    # watching one number climb across attempts cannot tell a walk that
-                    # is converging from one re-walking the same page forever.
                     logger.error(
-                        "watch-state sync of {source} failed after {attempt} states this attempt "
-                        "({total} for the run, resumed from {resumed_from}): {error}",
+                        "watch-state sync of {source} failed after {seen} states: {error}",
                         source=source.name,
-                        attempt=run.items_seen - inherited,
-                        total=run.items_seen,
-                        resumed_from=resumed_from,
+                        seen=run.items_seen,
                         error=str(exc),
                     )
                 await self._runs.save(run)
@@ -383,17 +334,6 @@ class WatchStateSyncService:
                 recovered += 1
         return recovered
 
-    async def _supersede(self, run: SyncRun, now: AwareDatetime, error: str) -> None:
-        """Close an unfinished run instead of resuming it, with `error` saying why.
-
-        `save` only ever raises `position`, so the row is closed rather than reset.
-        One already `FAILED` is closed already, and keeps its own error.
-        """
-        if run.status is SyncRunStatus.RUNNING:
-            await self._runs.save(
-                run.evolve(status=SyncRunStatus.FAILED, error=error, finished_at=now)
-            )
-
     async def _walk(
         self,
         progress: _Progress,
@@ -417,10 +357,10 @@ class WatchStateSyncService:
         the place somebody would add both.
         """
         queue: asyncio.Queue[_Read] = asyncio.Queue(maxsize=self._batch_size)
-        reader = asyncio.create_task(self._read(adapter, cursor, progress.run.position, queue))
+        reader = asyncio.create_task(self._read(adapter, cursor, 0, queue))
         try:
             batch: list[SourceWatchState] = []
-            seen = progress.run.position
+            seen = 0
             # A deadline, not a silence: states that keep arriving below a batch would
             # otherwise hold every beat off.
             due = time.monotonic() + self._heartbeat_seconds
@@ -548,12 +488,11 @@ class WatchStateSyncService:
             # still one of those.
             items_matched=run.items_matched + len(outcome.merged),
             items_unmatched=run.items_unmatched + outcome.unmatched,
-            # Committed progress, saved with the batch it describes: a crash
-            # re-walks the batch in flight and nothing before it.
+            # The states this run has committed, saved with the batch that ends them.
             position=position,
         )
-        # One commit per batch, exactly like `ReconcileService`: a crash
-        # costs the batch in flight, never the walk.
+        # One commit per batch, exactly like `ReconcileService`: a crash loses the
+        # batch in flight, never the merges committed before it.
         return await self._checkpoint(run, beat)
 
     async def _checkpoint(

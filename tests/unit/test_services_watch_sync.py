@@ -9,6 +9,7 @@ from collections.abc import AsyncGenerator, Iterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from loguru import logger
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
@@ -28,7 +29,14 @@ from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
 from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.source import Source
-from usher.domain.sync import CANCELLED_ERROR, SyncRun, SyncRunKind, SyncRunStatus
+from usher.domain.sync import (
+    ABANDONED_ERROR,
+    CANCELLED_ERROR,
+    STALE_AFTER,
+    SyncRun,
+    SyncRunKind,
+    SyncRunStatus,
+)
 from usher.ports.errors import PortUnavailable, UsherPortError
 from usher.ports.events import ClientEventKind
 from usher.ports.ingest import MediaItemTarget, MediaItemUpsert, WatchStateMerge
@@ -124,9 +132,8 @@ class _Fixture:
         async def _record(run: SyncRun) -> None:
             # **`positions` is the per-batch checkpoints, and "per batch" is spelled as
             # "this save carried states" rather than as "the status is RUNNING".**
-            # `sync`'s reclaim save is `RUNNING` too, so the status test would report
-            # the position an attempt *started* from as though a batch had committed it
-            # -- reading `[3, 5, 6]` where two batches committed.
+            # A beat between batches saves a `RUNNING` row too, so the status test would
+            # report the position it carried as though a batch had committed it.
             previous = await self.runs.get(run.id)
             if previous is not None and run.items_seen > previous.items_seen:
                 self.positions.append(run.position)
@@ -452,8 +459,8 @@ async def test_every_merge_in_one_walk_carries_one_instant_not_a_per_batch_now(
         )
     run = await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
     assert len(set(seen)) == 1, f"three batches, three different instants: {seen}"
-    # Equal to `started_at` *here* only because this is a fresh run, where the
-    # attempt's instant and the row's are the same value. See the docstring.
+    # The run's own `started_at`: a watch run is never resumed, so the instant its
+    # attempt began and the instant its row began are one value.
     assert seen == [run.started_at] * 5
 
 
@@ -1214,21 +1221,16 @@ def _no_ingest() -> IngestService:
     )
 
 
-# -- the resume, which keeps a long delta from starting over ------------------
+# -- a watch run never resumes: a failed one costs a re-read from its cursor --
 
 
-async def test_a_failed_walk_is_resumed_from_the_position_it_committed(
+async def test_a_failed_walk_is_read_again_from_its_cursor_in_a_run_of_its_own(
     fixture_batched: _Fixture,
 ) -> None:
-    """A crashed walk leaves no completed run, so the next one resumes rather than restarts.
+    """A failed delta costs a re-read from its cursor, never a resume from its position.
 
-    Without the resume a long delta starts over from its first page, which is where
-    the next transient failure comes from.
-
-    Batched at 2 deliberately: at the default 1,000 a six-item walk that
-    fails part-way has committed *nothing*, so the position it resumes from
-    would be 0 and the case would pass against a service that never
-    checkpoints at all.
+    A `StartIndex` into a listing that has lost items since would skip some. Batched at
+    2, so the failed attempt really did commit a position a resume could start from.
     """
     await fixture_batched.given_completed_walk()
     for index in range(6):
@@ -1248,16 +1250,16 @@ async def test_a_failed_walk_is_resumed_from_the_position_it_committed(
         fixture_batched.source, fixture_batched.adapter, user_id=fixture_batched.user_id
     )
 
-    assert second.id == first.id, "the run row is reclaimed, not duplicated"
-    assert second.status is SyncRunStatus.COMPLETED
-    assert second.started_at == first.started_at, (
-        "the reclaimed row keeps its original start instant, so the next delta's "
-        "`since` covers everything saved since the logical walk began"
+    assert second.id != first.id, "the failed run's row was reclaimed"
+    assert (second.status, second.cursor_at, second.items_seen) == (
+        SyncRunStatus.COMPLETED,
+        T0,
+        6,
     )
-    assert fixture_batched.adapter.resumed_from == [0, 2], (
-        "the second attempt walked from page one: either it minted a fresh run beside "
-        "the failed one, or it reclaimed the row and ignored its `position`"
+    assert fixture_batched.adapter.resumed_from == [0, 0], (
+        "the second attempt started from the failed run's position"
     )
+    assert await fixture_batched.runs.get(first.id) == first, "the failed run was written again"
 
 
 async def test_a_walk_whose_newest_run_completed_starts_fresh(fixture: _Fixture) -> None:
@@ -1278,10 +1280,10 @@ async def test_a_walk_whose_newest_run_completed_starts_fresh(fixture: _Fixture)
 
 
 async def test_the_position_advances_per_committed_batch(fixture_batched: _Fixture) -> None:
-    """`position` is committed progress, never the batch in flight.
+    """`position` counts the states this run has committed, never the batch in flight.
 
-    A crash re-walks exactly the uncommitted batch, which the merge's idempotent
-    upsert makes free.
+    It is saved with every batch, the trailing partial one included, and nothing reads
+    it back: a watch run is never resumed.
     """
     await fixture_batched.given_completed_walk()
     for index in range(5):
@@ -1301,7 +1303,7 @@ async def test_the_position_advances_per_committed_batch(fixture_batched: _Fixtu
 async def test_a_failed_walk_keeps_the_position_it_reached(
     fixture_batched: _Fixture,
 ) -> None:
-    """`_Progress`' reason, extended to the resume point.
+    """`_Progress`' reason, for `position` as for the counters.
 
     A failure handler holding the pre-walk run reports `position = 0` for an attempt
     that committed two.
@@ -1335,255 +1337,6 @@ async def test_a_failed_walk_keeps_the_position_it_reached(
     )
 
 
-class _DuplicatingSourceAdapter(_LossySourceAdapter):
-    """A source whose walk yields every record twice."""
-
-    async def _walk_states(
-        self, since: AwareDatetime | None, start_index: int
-    ) -> AsyncGenerator[SourceWatchState]:
-        yielded = 0
-        async for state in super()._walk_states(since, 0):
-            for _ in range(2):
-                if yielded >= start_index:
-                    yield state
-                yielded += 1
-
-
-async def test_the_resume_point_is_the_position_and_not_the_counter(
-    fixture_batched: _Fixture,
-) -> None:
-    """`position` and `items_seen` are two statements, and one row carries both."""
-    dupes = _DuplicatingSourceAdapter(fixture_batched.source)
-    for index in range(3):
-        await fixture_batched.given_matched(f"movie-{index}")
-        dupes.seed(_item(f"movie-{index}"), T0)
-    await fixture_batched.runs.add(
-        SyncRun(
-            source_id=fixture_batched.source.id,
-            kind=SyncRunKind.WATCH_STATE,
-            status=SyncRunStatus.RUNNING,
-            cursor_at=T0,
-            position=0,
-            items_seen=5,
-        )
-    )
-
-    run = await fixture_batched.service.sync(
-        fixture_batched.source, dupes, user_id=fixture_batched.user_id
-    )
-
-    assert dupes.resumed_from == [0], "the walk resumed from the counter, not the checkpoint"
-    assert run.position == 6, "six yields is six pages of this walk"
-    assert run.items_seen == 11, "the five it inherited, plus the six it yielded"
-    assert run.items_seen > run.position, (
-        "the counter and the checkpoint have collapsed into one number"
-    )
-
-
-async def test_a_running_run_left_by_a_killed_process_is_reclaimed_not_orphaned(
-    fixture_batched: _Fixture,
-) -> None:
-    """`RUNNING` is the designed trace of a hard kill, not an anomaly."""
-    for index in range(6):
-        await fixture_batched.given_matched(f"movie-{index}")
-    abandoned = SyncRun(
-        source_id=fixture_batched.source.id,
-        kind=SyncRunKind.WATCH_STATE,
-        status=SyncRunStatus.RUNNING,
-        cursor_at=T0,
-        position=3,
-        items_seen=3,
-        items_matched=3,
-        error="source went away mid-walk",
-        finished_at=T0,
-    )
-    await fixture_batched.runs.add(abandoned)
-
-    run = await fixture_batched.service.sync(
-        fixture_batched.source, fixture_batched.adapter, user_id=fixture_batched.user_id
-    )
-
-    assert run.id == abandoned.id, "a fresh run was minted beside the abandoned one"
-    assert run.started_at == abandoned.started_at, (
-        "the reclaimed row lost the instant the logical walk began"
-    )
-    assert run.status is SyncRunStatus.COMPLETED
-    assert fixture_batched.adapter.resumed_from == [3], "the abandoned row's position was ignored"
-    assert run.items_seen == 6, "the three it inherited, plus the three still to walk"
-    assert len(await fixture_batched.runs.list_for_source(fixture_batched.source.id)) == 1, (
-        "the stuck row is still there and a second one is beside it"
-    )
-    # Asserted on the *reclaim* save rather than on the returned run, which
-    # is `COMPLETED` and carries a legitimate `finished_at`: the window this
-    # is about is the hours the row spends `RUNNING`, which is the whole time
-    # an operator is watching it.
-    reclaimed = fixture_batched.saved[0]
-    assert reclaimed.status is SyncRunStatus.RUNNING, (
-        "the premise: the first save is the reclaim, before any batch"
-    )
-    assert reclaimed.error is None, "a running walk reports the last attempt's outage as its own"
-    assert reclaimed.finished_at is None, "a running walk carries an instant it finished at"
-
-
-async def test_each_failed_attempt_resumes_further_in_than_the_last(
-    fixture_batched: _Fixture,
-) -> None:
-    """Three attempts, because two cannot tell a converging walk from a stuck one.
-
-    Every other case in this file either completes or fails exactly once, and a walk
-    that resumes at the right page *once* and then never advances again satisfies all
-    of them: its `items_seen` still climbs attempt after attempt.
-    """
-    await fixture_batched.given_completed_walk()
-    for index in range(8):
-        await fixture_batched.given_matched(f"movie-{index}")
-
-    reached = []
-    for _ in range(2):
-        fixture_batched.adapter.fail_after(3)
-        attempt = await fixture_batched.service.sync(
-            fixture_batched.source, fixture_batched.adapter, user_id=fixture_batched.user_id
-        )
-        assert attempt.status is SyncRunStatus.FAILED, "the premise: this attempt really did fail"
-        reached.append(attempt.position)
-
-    fixture_batched.adapter.clear_failure()
-    done = await fixture_batched.service.sync(
-        fixture_batched.source, fixture_batched.adapter, user_id=fixture_batched.user_id
-    )
-
-    assert reached == sorted(set(reached)), (
-        f"the second failure did not get further than the first: {reached}"
-    )
-    assert done.position > reached[-1]
-    assert fixture_batched.adapter.resumed_from == [0, 2, 4], (
-        "an attempt asked to resume from a page an earlier one had already passed"
-    )
-    assert done.status is SyncRunStatus.COMPLETED
-    assert done.items_seen == 8, "a state was walked twice, or never"
-
-
-async def test_a_resumed_attempt_merges_at_its_own_start_not_the_reclaimed_runs(
-    fixture_batched: _Fixture,
-) -> None:
-    """The reclaimed `started_at` is the cursor's, and it must not become the merge's.
-
-    PRD 03 settles a conflict on "latest `updated_at` wins", and `watch_states` has a
-    `BEFORE UPDATE` trigger that stamps the *write* instant -- so a row the push lane
-    touched an hour ago reads back an `updated_at` of an hour ago, and a resumed walk
-    merging under a run that began *days* ago loses to it.
-
-    The walk that exists to repair those rows would write nothing to exactly the rows
-    most recently in play, and the rows it *creates* would be stamped days in the past,
-    which reorders `list_needing_history`'s oldest-first drain and leaves the taste
-    watermark motionless.
-
-    One instant per attempt rather than per batch, which is what
-    `test_every_merge_in_one_walk_carries_one_instant_not_a_per_batch_now` states for a
-    first attempt: a library-sized walk takes hours, and a creeping `now()` starts
-    winning races against clients who know more than it does. That case cannot say
-    *which* instant, because on a fresh run the attempt's and the row's are one value;
-    this one is where they differ.
-    """
-    seen: list[datetime] = []
-    original = fixture_batched.watch_states.merge_from_source
-
-    async def _record(merges: object) -> int:
-        seen.extend(merge.observed_at for merge in merges)  # type: ignore[attr-defined]
-        return await original(merges)  # type: ignore[arg-type]
-
-    fixture_batched.watch_states.merge_from_source = _record  # type: ignore[method-assign]
-    for index in range(3):
-        await fixture_batched.given_matched(f"movie-{index}")
-    abandoned = SyncRun(
-        source_id=fixture_batched.source.id,
-        kind=SyncRunKind.WATCH_STATE,
-        status=SyncRunStatus.RUNNING,
-        cursor_at=T0,
-        started_at=T0,
-    )
-    await fixture_batched.runs.add(abandoned)
-
-    run = await fixture_batched.service.sync(
-        fixture_batched.source, fixture_batched.adapter, user_id=fixture_batched.user_id
-    )
-
-    assert run.started_at == T0, (
-        "the premise: the row still carries the instant the logical walk began, "
-        "which is what the next delta's `since` will be"
-    )
-    assert len(seen) == 3, "the premise: three states really were merged"
-    assert seen == [seen[0]] * 3, "the instant crept forward between batches"
-    assert seen[0] > T0, "a resumed walk merged under an instant weeks in the past"
-
-
-async def test_the_span_records_the_page_the_walk_resumed_from(
-    fixture_batched: _Fixture, spans: InMemorySpanExporter
-) -> None:
-    """The one number that separates a converging resume from a stuck one.
-
-    The only place it is legible without reading `sync_runs`, and asserted here
-    because an attribute nothing reads is an attribute nothing notices the loss of.
-    """
-    for index in range(6):
-        await fixture_batched.given_matched(f"movie-{index}")
-    await fixture_batched.runs.add(
-        SyncRun(
-            source_id=fixture_batched.source.id,
-            kind=SyncRunKind.WATCH_STATE,
-            status=SyncRunStatus.RUNNING,
-            cursor_at=T0,
-            position=4,
-        )
-    )
-
-    await fixture_batched.service.sync(
-        fixture_batched.source, fixture_batched.adapter, user_id=fixture_batched.user_id
-    )
-
-    walks = [one for one in spans.get_finished_spans() if one.name == "sync.watch_state"]
-    assert walks, [one.name for one in spans.get_finished_spans()]
-    assert walks[0].attributes is not None
-    assert walks[0].attributes["usher.resumed_from"] == 4
-
-
-async def test_an_unfinished_first_walk_is_superseded_rather_than_resumed(
-    fixture: _Fixture,
-) -> None:
-    """A first walk is a few hundred states; an old position would skip its played listing.
-
-    `save` only raises `position`, so the old row cannot be reset: it is closed
-    `FAILED`, and a fresh run walks from the start.
-    """
-    await fixture.given_matched("movie-0")
-    fixture.adapter.seed_state(
-        SourceWatchState(external_id="movie-0", position_seconds=0, played=True)
-    )
-    abandoned = SyncRun(
-        source_id=fixture.source.id,
-        kind=SyncRunKind.WATCH_STATE,
-        status=SyncRunStatus.RUNNING,
-        position=300_000,
-        items_seen=300_000,
-        started_at=T0,
-    )
-    await fixture.runs.add(abandoned)
-
-    run = await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
-
-    assert run.id != abandoned.id, "the abandoned first walk was resumed"
-    assert fixture.adapter.resumed_from == [0]
-    assert run.status is SyncRunStatus.COMPLETED
-    assert run.items_matched == 1, "the fresh walk merged nothing: it kept the old position"
-    closed = await fixture.runs.get(abandoned.id)
-    assert closed is not None
-    assert (closed.status, closed.error) == (
-        SyncRunStatus.FAILED,
-        "superseded: a first watch walk restarts",
-    )
-    assert closed.finished_at is not None
-
-
 async def test_a_first_walk_that_already_failed_keeps_its_own_error(fixture: _Fixture) -> None:
     """Closed already, so it is not relabelled: its error says why that walk failed."""
     failed = SyncRun(
@@ -1606,7 +1359,7 @@ async def test_a_first_walk_that_already_failed_keeps_its_own_error(fixture: _Fi
     assert stored.error == "GET /Users/{user_id}/Items returned HTTP 502"
 
 
-# -- a live watch walk is left alone, and a new one runs beside it ----------
+# -- a dead watch run is closed, and a live one is left alone ----------------
 
 
 async def _given_watch_run(
@@ -1615,11 +1368,13 @@ async def _given_watch_run(
     heartbeat_at: datetime | None,
     status: SyncRunStatus = SyncRunStatus.RUNNING,
     delta: bool = True,
+    cursor_at: datetime = T0,
 ) -> SyncRun:
     """An unfinished watch run two states in, as another process left it, live or dead.
 
-    A delta's cursor is a walk this stores first, completed at `T0`; a first walk has
-    none. The run starts an hour after `T0`, so it is the newest.
+    A delta follows a walk this stores first, completed at `T0`, and reads from
+    `cursor_at`; a first walk has neither. The run starts an hour after `T0`, so it is
+    the newest.
     """
     if delta:
         await fixture.given_completed_walk(at=T0)
@@ -1627,7 +1382,7 @@ async def _given_watch_run(
         source_id=fixture.source.id,
         kind=SyncRunKind.WATCH_STATE,
         status=status,
-        cursor_at=T0 if delta else None,
+        cursor_at=cursor_at if delta else None,
         position=2,
         items_seen=2,
         heartbeat_at=heartbeat_at,
@@ -1637,10 +1392,97 @@ async def _given_watch_run(
     return run
 
 
+async def _three(fixture: _Fixture) -> None:
+    for index in range(3):
+        await fixture.given_matched(f"movie-{index}")
+
+
+@contextlib.contextmanager
+def _warnings() -> Iterator[list[str]]:
+    """Every WARNING logged inside the block, one message per entry."""
+    lines: list[str] = []
+    sink = logger.add(
+        lambda line: lines.append(line.rstrip("\n")), level="WARNING", format="{message}"
+    )
+    try:
+        yield lines
+    finally:
+        logger.remove(sink)
+
+
+@pytest.mark.parametrize(
+    "heartbeat_at", [NOW - STALE_AFTER, None], ids=["ten-minutes-old", "no-heartbeat"]
+)
+async def test_an_abandoned_watch_run_is_closed_and_a_fresh_one_reads_from_its_cursor(
+    heartbeat_at: datetime | None,
+) -> None:
+    """Closed by this start, so its cursor, older than the lane's, is the one read from."""
+    fixture = _Fixture()
+    await _three(fixture)
+    dead = await _given_watch_run(
+        fixture, heartbeat_at=heartbeat_at, cursor_at=T0 - timedelta(days=1)
+    )
+    lane = await fixture.runs.latest_completed_cursor(fixture.source.id, SyncRunKind.WATCH_STATE)
+    assert dead.cursor_at is not None and lane is not None and dead.cursor_at < lane, (
+        "the premise: the dead run read from before the lane's cursor"
+    )
+    with _warnings() as lines:
+        run = await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
+
+    closed = await fixture.runs.get(dead.id)
+    assert closed is not None
+    assert (closed.status, closed.error, closed.finished_at) == (
+        SyncRunStatus.FAILED,
+        ABANDONED_ERROR,
+        NOW,
+    )
+    assert run.id != dead.id
+    assert (run.status, run.cursor_at, run.items_seen) == (
+        SyncRunStatus.COMPLETED,
+        dead.cursor_at,
+        3,
+    )
+    assert [await fixture.stored(f"movie-{index}") is not None for index in range(3)] == [
+        True,
+        True,
+        True,
+    ], "a state before the dead run's position was not read"
+    assert lines == ["closed 1 watch-state run(s) of Living Room Emby whose process had stopped"]
+
+
+async def test_a_failed_watch_run_is_not_resumed() -> None:
+    """Closed already, so it is neither written nor counted as closed."""
+    fixture = _Fixture()
+    await _three(fixture)
+    failed = await _given_watch_run(fixture, heartbeat_at=None, status=SyncRunStatus.FAILED)
+    with _warnings() as lines:
+        run = await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
+    assert run.id != failed.id and run.items_seen == 3
+    assert await fixture.runs.get(failed.id) == failed
+    assert lines == []
+
+
+async def test_a_live_watch_run_is_left_running() -> None:
+    """Nothing is closed, so nothing is logged, and a live run's cursor is not carried."""
+    fixture = _Fixture()
+    await _three(fixture)
+    live = await _given_watch_run(
+        fixture,
+        heartbeat_at=NOW - STALE_AFTER + timedelta(microseconds=1),
+        cursor_at=T0 - timedelta(days=1),
+    )
+    with _warnings() as lines:
+        run = await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
+    assert run.id != live.id and run.status is SyncRunStatus.COMPLETED
+    assert await fixture.runs.get(live.id) == live
+    assert run.cursor_at == T0
+    assert lines == []
+
+
 async def test_a_live_first_watch_walk_is_left_alone_and_a_new_one_completes_beside_it(
     fixture: _Fixture,
 ) -> None:
-    """Superseding it would close the row under a live walk, so this walk takes its own."""
+    """Closing it would write under a live walk, so this walk takes a row of its own."""
     await fixture.given_matched("movie-0")
     fixture.adapter.seed_state(
         SourceWatchState(external_id="movie-0", position_seconds=0, played=True)
@@ -1654,59 +1496,6 @@ async def test_a_live_first_watch_walk_is_left_alone_and_a_new_one_completes_bes
     assert (run.status, run.cursor_at, run.items_matched) == (SyncRunStatus.COMPLETED, None, 1)
     assert fixture.adapter.resumed_from == [0]
     assert len(await fixture.runs.list_for_source(fixture.source.id)) == 2
-
-
-async def test_a_live_watch_delta_is_not_resumed_and_a_new_delta_runs_beside_it(
-    fixture: _Fixture,
-) -> None:
-    """A heartbeat a second short of ten minutes old is alive: its row is not resumed."""
-    for index in range(3):
-        await fixture.given_matched(f"movie-{index}")
-    live = await _given_watch_run(
-        fixture, heartbeat_at=NOW - timedelta(minutes=10) + timedelta(seconds=1)
-    )
-
-    run = await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
-
-    assert await fixture.runs.get(live.id) == live, "the live delta's row was written"
-    assert run.id != live.id, "the live delta was resumed"
-    assert (run.status, run.cursor_at, run.items_matched) == (SyncRunStatus.COMPLETED, T0, 3)
-    assert fixture.adapter.resumed_from == [0]
-
-
-@pytest.mark.parametrize("delta", [False, True], ids=["first-walk", "delta"])
-@pytest.mark.parametrize(
-    "heartbeat_at", [NOW - timedelta(minutes=10), None], ids=["ten-minutes-old", "no-heartbeat"]
-)
-async def test_a_dead_watch_walk_is_superseded_or_resumed_as_before(
-    fixture: _Fixture, heartbeat_at: datetime | None, delta: bool
-) -> None:
-    """A heartbeat ten minutes old is a walk that died, and so is none, from before heartbeats."""
-    dead = await _given_watch_run(fixture, heartbeat_at=heartbeat_at, delta=delta)
-
-    run = await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
-
-    assert run.status is SyncRunStatus.COMPLETED
-    if delta:
-        assert run.id == dead.id, "a dead delta was not resumed"
-        assert fixture.adapter.resumed_from == [2]
-        assert fixture.saved[0].heartbeat_at == NOW, "the reclaim kept the dead walk's heartbeat"
-        return
-    assert run.id != dead.id, "a dead first walk was resumed"
-    assert fixture.adapter.resumed_from == [0]
-    closed = await fixture.runs.get(dead.id)
-    assert closed is not None
-    assert (closed.status, closed.error) == (
-        SyncRunStatus.FAILED,
-        "superseded: a first watch walk restarts",
-    )
-
-
-async def test_a_failed_watch_walk_resumes_however_fresh_its_heartbeat(fixture: _Fixture) -> None:
-    """A `failed` row recorded its own end, so its heartbeat says nothing about a live walk."""
-    failed = await _given_watch_run(fixture, heartbeat_at=NOW, status=SyncRunStatus.FAILED)
-    run = await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
-    assert (run.id, run.status) == (failed.id, SyncRunStatus.COMPLETED)
 
 
 async def test_a_watch_walk_that_fails_before_its_first_batch_still_leaves_its_heartbeat(
@@ -1735,6 +1524,208 @@ async def test_every_batch_of_a_watch_walk_moves_its_heartbeat() -> None:
     assert fixture.positions == [2, 4, 5], "the premise: three batches committed"
     beats = [saved.heartbeat_at for saved in fixture.saved if saved.status is SyncRunStatus.RUNNING]
     assert beats == [NOW + timedelta(seconds=seconds) for seconds in (1, 2, 3)]
+
+
+# -- a failed run's cursor is carried until a run that covers it completes ----
+
+WALK_BEGAN = datetime(2026, 9, 1, tzinfo=UTC)
+
+
+async def _given_a_failed_run_after_a_walk(fixture: _Fixture) -> tuple[SyncRun, SyncRun]:
+    """`usher sync`'s two watch runs, the first completed and the second failed.
+
+    The first, the walk's hook, reads before the walk stores `movie-1`, whose state was
+    saved after the walk began; the second reads from the walk's start and fails on it.
+    """
+    await fixture.given_completed_walk(at=T0)
+    seeded = await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
+    await fixture.given_matched("movie-1", changed_at=WALK_BEGAN + timedelta(hours=12))
+    fixture.adapter.seed_state(
+        SourceWatchState(external_id="movie-1", position_seconds=640, played=False)
+    )
+    fixture.adapter.fail_after(0)
+    after_walk = await fixture.service.sync(
+        fixture.source, fixture.adapter, user_id=fixture.user_id, since_at_most=WALK_BEGAN
+    )
+    assert (seeded.status, after_walk.status) == (SyncRunStatus.COMPLETED, SyncRunStatus.FAILED)
+    assert after_walk.cursor_at == WALK_BEGAN < seeded.started_at, (
+        "the premise: the failed run read from before the completed run began"
+    )
+    return seeded, after_walk
+
+
+async def test_a_failed_runs_cursor_is_carried_past_a_newer_completion(fixture: _Fixture) -> None:
+    """The lane's cursor is the completed run's start; the next run reads from the failed one's.
+
+    From the completion, `movie-1`'s state, saved before it, would never be read.
+    """
+    _, after_walk = await _given_a_failed_run_after_a_walk(fixture)
+    fixture.adapter.clear_failure()
+
+    run = await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
+
+    assert (run.status, run.cursor_at, run.items_seen) == (
+        SyncRunStatus.COMPLETED,
+        after_walk.cursor_at,
+        1,
+    )
+    assert await fixture.stored("movie-1") is not None
+
+
+async def test_a_carried_cursor_survives_a_run_that_fails_again(fixture: _Fixture) -> None:
+    _, after_walk = await _given_a_failed_run_after_a_walk(fixture)
+    again = await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
+    assert (again.status, again.cursor_at) == (SyncRunStatus.FAILED, after_walk.cursor_at)
+    fixture.adapter.clear_failure()
+
+    run = await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
+
+    assert (run.status, run.cursor_at, run.items_seen) == (
+        SyncRunStatus.COMPLETED,
+        after_walk.cursor_at,
+        1,
+    )
+
+
+async def test_a_failed_run_carries_nothing_once_a_run_that_covers_it_completes(
+    fixture: _Fixture,
+) -> None:
+    """Started after it, from its cursor, that run read the failed one's window whole."""
+    failed = SyncRun(
+        source_id=fixture.source.id,
+        kind=SyncRunKind.WATCH_STATE,
+        status=SyncRunStatus.FAILED,
+        cursor_at=T0 - timedelta(days=1),
+        started_at=T0,
+        finished_at=T0,
+    )
+    covering = SyncRun(
+        source_id=fixture.source.id,
+        kind=SyncRunKind.WATCH_STATE,
+        status=SyncRunStatus.COMPLETED,
+        cursor_at=failed.cursor_at,
+        started_at=T0 + timedelta(hours=1),
+        finished_at=T0 + timedelta(hours=1),
+    )
+    for one in (failed, covering):
+        await fixture.runs.add(one)
+    lane = await fixture.runs.latest_completed_cursor(fixture.source.id, SyncRunKind.WATCH_STATE)
+    assert lane == covering.started_at > failed.started_at, "the premise: it started after"
+
+    run = await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
+
+    assert run.cursor_at == lane
+
+
+async def test_a_failed_runs_cursor_outlives_a_run_that_walked_beside_it(
+    fixture: _Fixture,
+) -> None:
+    """The run beside it read from the lane's later cursor, so it covered nothing.
+
+    `usher sync`'s run after the walk reads from the walk's start; a run in another
+    process, started while it was alive, reads from the lane's cursor and completes.
+    The failed run's window is still read again.
+    """
+    lane_at = WALK_BEGAN + timedelta(days=1)
+    await fixture.given_completed_walk(at=lane_at)
+    after_walk = SyncRun(
+        source_id=fixture.source.id,
+        kind=SyncRunKind.WATCH_STATE,
+        status=SyncRunStatus.FAILED,
+        cursor_at=WALK_BEGAN,
+        started_at=lane_at + timedelta(hours=1),
+    )
+    beside = SyncRun(
+        source_id=fixture.source.id,
+        kind=SyncRunKind.WATCH_STATE,
+        status=SyncRunStatus.COMPLETED,
+        cursor_at=lane_at,
+        started_at=lane_at + timedelta(hours=2),
+    )
+    for one in (after_walk, beside):
+        await fixture.runs.add(one)
+    await fixture.given_matched("movie-1", changed_at=WALK_BEGAN + timedelta(hours=12))
+    fixture.adapter.seed_state(
+        SourceWatchState(external_id="movie-1", position_seconds=640, played=False)
+    )
+    assert beside.started_at > after_walk.started_at, "the premise: it started after"
+    assert beside.cursor_at is not None and after_walk.cursor_at is not None
+    assert beside.cursor_at > after_walk.cursor_at, "the premise: and read from later"
+
+    run = await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
+
+    assert (run.status, run.cursor_at, run.items_seen) == (
+        SyncRunStatus.COMPLETED,
+        after_walk.cursor_at,
+        1,
+    )
+    assert await fixture.stored("movie-1") is not None
+
+
+async def test_the_oldest_carried_cursor_is_read_from_not_the_newest_runs(
+    fixture: _Fixture,
+) -> None:
+    await fixture.given_completed_walk(at=T0)
+    for days, hours in ((2, 1), (1, 2)):
+        await fixture.runs.add(
+            SyncRun(
+                source_id=fixture.source.id,
+                kind=SyncRunKind.WATCH_STATE,
+                status=SyncRunStatus.FAILED,
+                cursor_at=T0 - timedelta(days=days),
+                started_at=T0 + timedelta(hours=hours),
+            )
+        )
+
+    run = await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
+
+    assert run.cursor_at == T0 - timedelta(days=2)
+
+
+async def test_a_failed_first_walk_is_followed_by_a_first_walk(fixture: _Fixture) -> None:
+    await _given_watch_run(fixture, heartbeat_at=None, status=SyncRunStatus.FAILED, delta=False)
+    run = await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
+    assert (run.status, run.cursor_at) == (SyncRunStatus.COMPLETED, None)
+
+
+async def test_a_failed_first_walk_newer_than_a_completion_is_carried_as_one(
+    fixture: _Fixture,
+) -> None:
+    """`None` reads from the beginning, which is older than the completion's instant."""
+    await fixture.given_completed_walk(at=T0)
+    await fixture.runs.add(
+        SyncRun(
+            source_id=fixture.source.id,
+            kind=SyncRunKind.WATCH_STATE,
+            status=SyncRunStatus.FAILED,
+            started_at=T0 + timedelta(hours=1),
+        )
+    )
+
+    run = await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
+
+    assert (run.status, run.cursor_at) == (SyncRunStatus.COMPLETED, None)
+
+
+async def test_a_lane_without_a_cursor_reads_from_the_beginning_whatever_is_carried(
+    fixture: _Fixture,
+) -> None:
+    """`None` is older than any instant: the lane's own, as much as a failed run's."""
+    await fixture.runs.add(
+        SyncRun(
+            source_id=fixture.source.id,
+            kind=SyncRunKind.WATCH_STATE,
+            status=SyncRunStatus.FAILED,
+            cursor_at=T0,
+            started_at=T0 + timedelta(hours=1),
+        )
+    )
+    lane = await fixture.runs.latest_completed_cursor(fixture.source.id, SyncRunKind.WATCH_STATE)
+    assert lane is None, "the premise: the lane has no cursor"
+
+    run = await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
+
+    assert (run.status, run.cursor_at) == (SyncRunStatus.COMPLETED, None)
 
 
 # -- since_at_most: the run after a walk reads back to the walk's start ------
@@ -1772,59 +1763,6 @@ async def test_since_at_most_leaves_a_first_walk_without_a_cursor(fixture: _Fixt
         fixture.source, fixture.adapter, user_id=fixture.user_id, since_at_most=T0
     )
     assert run.cursor_at is None
-
-
-async def test_since_at_most_leaves_a_resumed_deltas_cursor_alone(fixture: _Fixture) -> None:
-    """A delta whose cursor is at `since_at_most` already reads from that instant.
-
-    So it resumes in place: its own row, its own cursor and its own position.
-    """
-    resumed_from = datetime(2026, 9, 2, tzinfo=UTC)
-    failed = SyncRun(
-        source_id=fixture.source.id,
-        kind=SyncRunKind.WATCH_STATE,
-        status=SyncRunStatus.FAILED,
-        cursor_at=resumed_from,
-        position=1,
-        items_seen=1,
-        started_at=resumed_from + timedelta(days=1),
-        finished_at=resumed_from + timedelta(days=1),
-    )
-    await fixture.runs.add(failed)
-    run = await fixture.service.sync(
-        fixture.source, fixture.adapter, user_id=fixture.user_id, since_at_most=resumed_from
-    )
-    assert (run.id, run.cursor_at) == (failed.id, resumed_from), "the delta did not resume"
-    assert fixture.adapter.resumed_from == [1]
-
-
-async def test_since_at_most_supersedes_a_delta_whose_cursor_is_later(fixture: _Fixture) -> None:
-    """Its position counts into its own cursor's stream, so it cannot be rewound in place.
-
-    Resumed, it would skip a state saved after the walk began and before that cursor.
-    It is closed instead, and a fresh delta reads from `since_at_most`.
-    """
-    walk_began = T0 - timedelta(days=1)
-    dead = await _given_watch_run(fixture, heartbeat_at=None)
-    await fixture.given_matched("movie-1", changed_at=walk_began + timedelta(hours=12))
-    fixture.adapter.seed_state(
-        SourceWatchState(external_id="movie-1", position_seconds=640, played=False)
-    )
-    assert dead.cursor_at is not None and dead.cursor_at > walk_began, "the premise: later"
-
-    run = await fixture.service.sync(
-        fixture.source, fixture.adapter, user_id=fixture.user_id, since_at_most=walk_began
-    )
-
-    assert run.id != dead.id, "the delta resumed from its later cursor"
-    assert (run.cursor_at, fixture.adapter.resumed_from) == (walk_began, [0])
-    assert run.items_seen == 1, "the state saved after the walk began was skipped"
-    closed = await fixture.runs.get(dead.id)
-    assert closed is not None
-    assert (closed.status, closed.error) == (
-        SyncRunStatus.FAILED,
-        "superseded: a watch delta restarts from an earlier cursor",
-    )
 
 
 # -- beat: a caller's run, waiting on this walk, kept alive by it ------------

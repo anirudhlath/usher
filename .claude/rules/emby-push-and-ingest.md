@@ -125,11 +125,12 @@ delta, permanently.
 runs `watch.sync(...)`** (#41): a source with completed delta runs and no
 completed `watch_state` run passes it and runs the watch lane's first walk, two
 filtered listings (`FIRST_WALK_FILTERS`), and **neither log line names it**.
-An unfinished first walk is superseded, never resumed
-(`watch_sync.SUPERSEDED_ERROR`): `save` only raises `position`, so its row
-cannot be reset. A `running` watch run whose heartbeat is under `STALE_AFTER`
-old is alive, first walk or delta, and is left alone: the next run walks beside
-it.
+No watch run is resumed: each starts at `StartIndex` 0 from the oldest of the
+lane's cursor and `uncovered_failed_cursors` — a failed run's cursor, never its
+position, kept until a completed run that started no earlier read from no later,
+both with a cursor or neither — after closing its source's dead watch runs
+`failed` (`ABANDONED_ERROR`), so theirs count. A `running` one whose heartbeat
+is under `STALE_AFTER` old is alive and left alone: the next walks beside it.
 
 ## The match ladder
 

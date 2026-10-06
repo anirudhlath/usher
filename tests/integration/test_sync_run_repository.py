@@ -20,12 +20,13 @@ from tests.contract.sync_run_repository_contract import (
     unit,
 )
 from tests.integration.conftest import Analyze
+from usher.db.models.sync import SyncRunRow
 from usher.db.repositories.source import PostgresSourceRepository
 from usher.db.repositories.sync import _NEWEST, PostgresSyncRunRepository
 from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
 from usher.domain.source import Source
-from usher.domain.sync import SyncRunKind, SyncRunStatus, SyncRunUnit
+from usher.domain.sync import ABANDONED_ERROR, SyncRunKind, SyncRunStatus, SyncRunUnit
 from usher.ports.errors import RepositoryConflict
 
 
@@ -237,6 +238,52 @@ async def test_started_at_survives_a_save(
     ).scalar_one()
     assert stored == EARLIER
     assert datetime.now(UTC) > EARLIER, "the fixture instant is genuinely in the past"
+
+
+async def test_a_run_this_session_holds_reads_back_closed(
+    session: AsyncSession, repository: PostgresSyncRunRepository, source_id: uuid.UUID
+) -> None:
+    """`close_abandoned` is an `UPDATE`, which a row in the identity map does not see alone.
+
+    `get` serves a row this session still holds with no SQL at all, so an unsynchronised
+    close would read back `running`. The contract cannot hold a row: its `add` keeps no
+    reference, so every `get` there is a fresh `SELECT`.
+    """
+    dead = run(source_id, kind=SyncRunKind.WATCH_STATE, heartbeat_at=None)
+    await repository.add(dead)
+    held = await session.get(SyncRunRow, dead.id)
+    assert held is not None and held.status is SyncRunStatus.RUNNING, "the premise: held"
+
+    closed = await repository.close_abandoned(
+        source_id, (SyncRunKind.WATCH_STATE,), now=LATER, error=ABANDONED_ERROR
+    )
+
+    stored = await repository.get(dead.id)
+    assert closed == 1 and stored is not None
+    assert (stored.status, stored.error, held.status) == (
+        SyncRunStatus.FAILED,
+        ABANDONED_ERROR,
+        SyncRunStatus.FAILED,
+    )
+
+
+async def test_a_refused_close_is_a_port_error_and_leaves_the_session_usable(
+    repository: PostgresSyncRunRepository, source_id: uuid.UUID
+) -> None:
+    """`error` is the caller's text, and Postgres refuses a NUL in it as a refused row.
+
+    The refusal reaches the caller as `RepositoryConflict`, and the SAVEPOINT leaves the
+    session able to read the run back, still unclosed.
+    """
+    dead = run(source_id, kind=SyncRunKind.WATCH_STATE, heartbeat_at=None)
+    await repository.add(dead)
+
+    with pytest.raises(RepositoryConflict):
+        await repository.close_abandoned(
+            source_id, (SyncRunKind.WATCH_STATE,), now=LATER, error="a NUL \x00 here"
+        )
+
+    assert await repository.get(dead.id) == dead
 
 
 async def test_a_negative_unit_position_is_a_port_error(

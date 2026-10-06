@@ -106,14 +106,13 @@ predates it. Re-derive with
 - **E1, the quality-eval harness** — `src/usher/eval/`, the `eval` extra, `usher
   eval`, two more import contracts. One surface (`suggest`); E2–E4 are not
   planned. Three `fuzzy recall_at_5` bars are `pending` on #39. `evals.md`.
-- **The resumable watch lane** — `m10b`. Two behaviours came from
-  review rather than the plan and are the ones a later reader will want to undo:
-  `SyncRunRepository.save` is non-destructive (`completed` absorbs), and a
-  resumed walk stamps its merges with the attempt's instant, not the original
-  run's. ⚠️ **The code shipped and issue #41 is still OPEN**, closing it being
-  the owner's call: the live deployment's watch walk completed and its lane runs
-  cursored deltas, but nothing schedules a source's first one. Check
-  `gh issue view 41 --repo anirudhlath/usher` before reading the merge as done.
+- **The watch lane** — `m10b`. `SyncRunRepository.save` is non-destructive:
+  `completed` absorbs, and `position` never moves back. **Its resume is withdrawn
+  by sync-correctness**: a `StartIndex` into a listing that has lost items skips
+  them, so a watch run starts afresh and a failed one hands the next only its
+  cursor. ⚠️ **Issue #41 is still OPEN**, closing it being the owner's call:
+  nothing schedules a source's first watch walk. Check
+  `gh issue view 41 --repo anirudhlath/usher` before reading it as done.
 - **`VisibilityService`** — the plural half of PRD 03's demand lane. The module
   docstring is the record.
 - **Enrichment-driven shelf staleness** — the row cache had two invalidation
