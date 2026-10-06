@@ -133,6 +133,9 @@ half the page below 100. A piece those pages do not finish fails:
 A piece of episodes reads 50 items past its end, so at a page size of 20 or
 less every full piece of `USHER_SYNC_UNIT_MAX_ITEMS` (100,000) fails. A server
 that serves fewer items a page than it is asked for moves on by what it serves.
+A page the listing moved past, because items were deleted while the piece was
+read, costs that page and sends the walk back 100 items or more to read again,
+so a piece that loses many items while it is read fails sooner.
 
 Every request is work for the media server. If you don't administer it, or a
 sync slows down somebody's playback, set `USHER_SYNC_WALKERS=1` for one request

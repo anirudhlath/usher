@@ -348,7 +348,7 @@ class EmbyAdapter(SourceAdapter):
     ) -> AsyncGenerator[dict[str, Any]]:
         """Every new entry of one listing, from `start_index` to its end."""
         async with aclosing(self._pages(query, start_index=start_index)) as pages:
-            async for entries, _ in pages:
+            async for entries, _, _ in pages:
                 for entry in entries:
                     yield entry
 
@@ -359,22 +359,32 @@ class EmbyAdapter(SourceAdapter):
         start_index: int,
         stop: int | None = None,
         path: str | None = None,
-    ) -> AsyncGenerator[tuple[list[dict[str, Any]], int]]:
+        after: int | None = None,
+    ) -> AsyncGenerator[tuple[list[dict[str, Any]], int, int | None]]:
         """Page one listing to its end, one request ahead of the consumer.
 
-        Yields each page's new entries with the `StartIndex` that resumes after it,
-        which is the next request's start, reach-back included. The next page is
+        Yields each page's new entries, the `StartIndex` that resumes after it (the next
+        request's start, reach-back included) and the window's anchor. The next page is
         asked for as soon as a page arrives and before it is yielded; the request
-        outstanding when the consumer stops is cancelled. `stop` bounds the walk,
-        and one already at its stop sends nothing. `start_index` is the resume
-        point (#41), never defaulted: every caller states its own.
+        outstanding when the consumer stops is cancelled. `stop` bounds the walk, and
+        one already at its stop sends nothing. A listing sorted by `SORT_BY` is keyed:
+        `after` is the anchor a resumed walk judges its first page by. A page that moved
+        is logged and not yielded. `start_index` is the resume point, never defaulted.
         """
         if path is None:
             path = await self._items_path()
-        window = OffsetWindow(limit=self._page_size, start=start_index, stop=stop)
+        keyed = query.get("SortBy") == SORT_BY
+        window = OffsetWindow(
+            limit=self._page_size,
+            start=start_index,
+            stop=stop,
+            keyed=keyed,
+            after=after if keyed else None,
+        )
         if window.request_limit == 0:
             return
         pending = self._read(path, query, window.start, window.request_limit, count=True)
+        warned = False
         try:
             # `for`, not `while True`: the bound is part of the loop, and the raise
             # below is reachable only by a walk that never ended.
@@ -388,21 +398,32 @@ class EmbyAdapter(SourceAdapter):
                         "Emby's item listing carried no Items array",
                         detail=f"StartIndex={window.start}",
                     )
+                asked = window.start
                 page = window.receive(entries, body.get("TotalRecordCount"))
-                if page.shifted:
+                if window.unsorted and not warned:
+                    warned = True
                     logger.warning(
-                        "{source}'s listing shifted by at least {overlap} items before "
-                        "StartIndex={start}; an item shifted further was not read, and the "
-                        "next full walk reads it",
+                        "{source}'s listing is not in DateCreated order, so its pages are "
+                        "judged by ids alone",
                         source=self._source.name,
-                        overlap=window.overlap,
-                        start=window.start,
                     )
                 resume_at = window.cursor
-                if not page.ended and number < self._max_pages:
+                more = not page.ended and number < self._max_pages
+                if more:
                     resume_at = window.advance()
                     pending = self._read(path, query, resume_at, window.request_limit, count=False)
-                yield page.fresh, resume_at
+                if page.shifted:
+                    # The last request allowed asks for nothing again; the raise below says so.
+                    if more:
+                        logger.warning(
+                            "{source}'s listing moved past the overlap before StartIndex={start}; "
+                            "reading again from StartIndex={again}",
+                            source=self._source.name,
+                            start=asked,
+                            again=resume_at,
+                        )
+                    continue
+                yield page.fresh, resume_at, window.anchor
                 if page.ended:
                     return
         finally:
@@ -433,7 +454,7 @@ class EmbyAdapter(SourceAdapter):
     ) -> AsyncGenerator[UnitPage]:
         """`_pages` as the port's pages; one holding no item Usher models is not yielded."""
         async with aclosing(self._pages(query, start_index=start_index, stop=stop)) as pages:
-            async for entries, resume_at in pages:
+            async for entries, resume_at, _ in pages:
                 items = tuple(item for item in map(to_source_item, entries) if item is not None)
                 if items:
                     yield UnitPage(items, resume_at)
@@ -624,7 +645,7 @@ class EmbyAdapter(SourceAdapter):
         yielded: set[str] = set()
         for path, query in listings:
             async with aclosing(self._pages(query, start_index=0, path=path)) as pages:
-                async for entries, _ in pages:
+                async for entries, _, _ in pages:
                     fresh = [
                         item
                         for item in map(to_source_item, entries)

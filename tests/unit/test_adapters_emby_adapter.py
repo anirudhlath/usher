@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import gc
 import io
+import itertools
 import json
 import time
 import weakref
@@ -320,57 +321,146 @@ async def test_a_deletion_behind_the_cursor_skips_nothing() -> None:
     assert lines == []
 
 
-async def test_a_shift_past_the_overlap_is_logged_with_the_page_it_hit() -> None:
+async def test_a_shift_past_the_overlap_asks_again_earlier_and_skips_nothing() -> None:
     """Sixty deletions behind the cursor are more than the overlap can absorb.
 
-    Ten items are skipped, which nothing inside the walk can repair; it says so,
-    names the page, and carries on.
+    The page at 50 holds none of the first page's items and starts no earlier, so it is
+    not read; the walk asks again from 0 and reads every survivor.
     """
     server = FakeEmbyServer()
-    for item in _numbered(250):
+    library = _numbered(250)
+    for item in library:
         server.add_item(item, T0)
+    gone = [f"movie-{index:03d}" for index in range(60)]
     lines: list[str] = []
     handle = logger.add(lines.append, level="WARNING", format="{message}")
     try:
-        adapter = _on(
-            _deleting(server, [f"movie-{index:03d}" for index in range(60)]), page_size=100
-        )
+        adapter = _on(_deleting(server, gone), page_size=100)
         try:
-            _ = [item async for item in adapter.list_items()]
+            seen = [item.external_id async for item in adapter.list_items()]
         finally:
             await adapter.aclose()
     finally:
         logger.remove(handle)
+    assert {item.external_id for item in library} - set(gone) - set(seen) == set()
     assert [line.rstrip("\n") for line in lines] == [
-        "Living Room Emby's listing shifted by at least 50 items before StartIndex=50; "
-        "an item shifted further was not read, and the next full walk reads it"
+        "Living Room Emby's listing moved past the overlap before StartIndex=50; "
+        "reading again from StartIndex=0"
     ]
 
 
-async def test_a_shift_past_a_clamped_overlap_names_the_clamped_reach_back() -> None:
-    """Pages of 40 reach back 20, so the WARNING says 20, not `PAGE_OVERLAP`.
-
-    Thirty deletions move the page at `StartIndex=20` past `movie-039`; the ten items
-    after it are skipped.
-    """
+async def test_a_shift_past_a_clamped_overlap_asks_again_from_the_start() -> None:
+    """Pages of 40 reach back 20; thirty deletions move the page at 20 past them."""
     server = FakeEmbyServer()
-    for item in _numbered(200):
+    library = _numbered(200)
+    for item in library:
         server.add_item(item, T0)
+    gone = [f"movie-{index:03d}" for index in range(30)]
     lines: list[str] = []
     handle = logger.add(lines.append, level="WARNING", format="{message}")
     try:
-        adapter = _on(
-            _deleting(server, [f"movie-{index:03d}" for index in range(30)]), page_size=40
-        )
+        adapter = _on(_deleting(server, gone), page_size=40)
         try:
-            _ = [item async for item in adapter.list_items()]
+            seen = [item.external_id async for item in adapter.list_items()]
         finally:
             await adapter.aclose()
     finally:
         logger.remove(handle)
+    assert {item.external_id for item in library} - set(gone) - set(seen) == set()
     assert [line.rstrip("\n") for line in lines] == [
-        "Living Room Emby's listing shifted by at least 20 items before StartIndex=20; "
-        "an item shifted further was not read, and the next full walk reads it"
+        "Living Room Emby's listing moved past the overlap before StartIndex=20; "
+        "reading again from StartIndex=0"
+    ]
+
+
+async def test_a_page_moved_on_the_last_request_allowed_raises_without_a_shift_warning() -> None:
+    """No request is left to read it again, so the walk says it never ended and nothing else.
+
+    The same sixty deletions as above, with `max_pages=2`: the page at 50 is the last.
+    """
+    server = FakeEmbyServer()
+    library = _numbered(250)
+    for item in library:
+        server.add_item(item, T0)
+    gone = [f"movie-{index:03d}" for index in range(60)]
+    seen: list[str] = []
+    lines: list[str] = []
+    handle = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        adapter = _on(_deleting(server, gone), page_size=100, max_pages=2)
+        try:
+            with pytest.raises(PortDataMalformed, match="never ended") as raised:
+                async for item in adapter.list_items():
+                    seen.append(item.external_id)
+        finally:
+            await adapter.aclose()
+    finally:
+        logger.remove(handle)
+    assert seen == [item.external_id for item in library[:100]], (
+        "the premise: the page at 50 moved, so nothing past the first page was read"
+    )
+    assert raised.value.detail == "gave up after 2 pages at StartIndex=50"
+    assert lines == []
+
+
+async def test_eighty_deletions_after_the_first_page_skip_nothing() -> None:
+    server = FakeEmbyServer()
+    library = _numbered(300)
+    for item in library:
+        server.add_item(item, T0)
+    gone = [f"movie-{index:03d}" for index in range(80)]
+    adapter = _on(_deleting(server, gone), page_size=100)
+    try:
+        seen = [item.external_id async for item in adapter.list_items()]
+    finally:
+        await adapter.aclose()
+    assert {item.external_id for item in library} - set(gone) - set(seen) == set()
+
+
+async def test_a_tail_that_moved_out_of_reach_is_still_read() -> None:
+    """The page at 50 comes back empty; the old walk ended there and lost 100 to 119."""
+    server = FakeEmbyServer()
+    library = _numbered(120)
+    for item in library:
+        server.add_item(item, T0)
+    gone = [f"movie-{index:03d}" for index in range(80)]
+    adapter = _on(_deleting(server, gone), page_size=100)
+    try:
+        seen = [item.external_id async for item in adapter.list_items()]
+    finally:
+        await adapter.aclose()
+    assert {f"movie-{index:03d}" for index in range(100, 120)} <= set(seen)
+
+
+async def test_a_listing_out_of_date_order_warns_once_and_is_walked_by_ids() -> None:
+    server = FakeEmbyServer()
+    library = _numbered(5)
+    for item in library:
+        server.add_item(item, T0)
+
+    def falling(request: httpx.Request) -> httpx.Response:
+        response = server.handle(request)
+        if not request.url.path.endswith("/Items"):
+            return response
+        body = response.json()
+        for offset, entry in enumerate(body.get("Items", [])):
+            entry["DateCreated"] = f"2026-07-20T12:00:{59 - offset:02d}.0000000Z"
+        return httpx.Response(response.status_code, json=body)
+
+    lines: list[str] = []
+    handle = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        adapter = _on(falling, page_size=2)
+        try:
+            seen = [item.external_id async for item in adapter.list_items()]
+        finally:
+            await adapter.aclose()
+    finally:
+        logger.remove(handle)
+    assert set(seen) == {item.external_id for item in library}
+    assert [line.rstrip("\n") for line in lines] == [
+        "Living Room Emby's listing is not in DateCreated order, so its pages are judged "
+        "by ids alone"
     ]
 
 
@@ -423,22 +513,31 @@ async def test_a_limit_capped_below_the_overlap_still_advances() -> None:
 async def test_a_walk_that_deletions_left_short_of_its_total_ends_on_its_tail() -> None:
     """Two deletions make the first page's total of six unreachable.
 
-    The page that re-reads the tail brings nothing new and ends the walk. Without
-    that rule the reach-back halves its way down to an empty page, one deep request
-    at a time.
+    They are also the page at 2's whole reach-back, and every `DateCreated` ties, so
+    nothing shows that page skipped nothing: it is not read, and the walk asks again
+    from 0. The page that then re-reads the tail brings nothing new and ends the walk.
+    Without that rule the reach-back halves its way down to an empty page, one deep
+    request at a time.
     """
     server = FakeEmbyServer()
     library = _numbered(6)
     for item in library:
         server.add_item(item, T0)
-    adapter = _on(_deleting(server, ["movie-000", "movie-001"]), page_size=4)
+    deleting = _deleting(server, ["movie-000", "movie-001"])
+    starts: list[int] = []
+
+    def recording(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/Items"):
+            starts.append(int(request.url.params["StartIndex"]))
+        return deleting(request)
+
+    adapter = _on(recording, page_size=4)
     try:
         seen = [item.external_id async for item in adapter.list_items()]
     finally:
         await adapter.aclose()
-    listings = [entry for entry in server.requests if entry.endswith("/Items")]
     assert set(seen) == {item.external_id for item in library}
-    assert len(listings) == 3
+    assert starts == [0, 2, 0, 2]
 
 
 async def test_a_server_that_caps_the_limit_is_still_walked_to_its_end() -> None:
@@ -3828,6 +3927,54 @@ async def test_a_server_ignoring_ids_seeds_only_the_series_asked_for_and_warns()
         "Living Room Emby did not return 1 of the 2 series the seed asked for by Ids; "
         "their episodes are seeded without them"
     ]
+
+
+async def test_the_seed_s_up_next_listing_is_not_judged_by_creation_time() -> None:
+    """Up next is in watching order, so its creation times may fall, and it is never keyed.
+
+    They fall inside every page here: a keyed listing would warn that it is out of order.
+    """
+    server = FakeEmbyServer()
+    server.add_item(_series(0), T0)
+    episodes = [
+        replace(
+            _episode(index),
+            external_id=f"next-{index}",
+            name=f"Next {index}",
+            added_at=T0 - timedelta(days=index),
+        )
+        for index in range(5)
+    ]
+    for episode in episodes:
+        server.add_item(episode, T0)
+    server.set_next_up(*(episode.external_id for episode in episodes))
+    created: list[list[str]] = []
+
+    def recording(request: httpx.Request) -> httpx.Response:
+        response = server.handle(request)
+        if request.url.path == "/Shows/NextUp":
+            created.append([entry["DateCreated"] for entry in response.json()["Items"]])
+        return response
+
+    lines: list[str] = []
+    handle = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        adapter = _on(recording, page_size=2)
+        try:
+            walked = [
+                item.external_id
+                async for page in adapter.list_unit(SEED_KEY)
+                for item in page.items
+            ]
+        finally:
+            await adapter.aclose()
+    finally:
+        logger.remove(handle)
+    assert [page for page in created if len(page) > 1] and all(
+        later < earlier for page in created for earlier, later in itertools.pairwise(page)
+    ), f"the premise: creation times fall inside every page of up next: {created}"
+    assert lines == []
+    assert walked == ["series-0", *(episode.external_id for episode in episodes)]
 
 
 async def test_a_resumed_seed_starts_again() -> None:

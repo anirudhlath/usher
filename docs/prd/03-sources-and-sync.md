@@ -95,17 +95,24 @@ when the walk stops:
 
 - **Items are walked in ascending creation order**, so items added during a
   walk land at the end. Each page after the first re-reads the last 50 items of
-  the page before (half the page, if it held fewer than 100), so a deletion
-  mid-walk shifts nothing out of view unless more items than that vanish between
-  two pages; the walk then logs a WARNING naming the page, and the next full
-  reconcile covers what it missed. A resumed unit of a whole-library walk
+  the page before (half the page, if it held fewer than 100). A page that holds
+  none of the page before's items, and does not start before the creation time
+  of the last item read, has moved — at least as many items as that overlap
+  left the listing between the two pages — and is not read: the walk logs a
+  WARNING naming both requests and asks again 100 items earlier, doubling while
+  pages keep moving, never before the start. A page at the start of the listing
+  is never judged, and neither is one after a page of a single item, which
+  re-reads nothing. A listing that is not in creation order is judged by its
+  items alone, after one WARNING; an item whose creation time moves behind the
+  walk is read by the next full walk. A resumed unit of a whole-library walk
   re-reads only that overlap before where it stopped, and logs nothing: if more
   items vanish ahead of it between attempts, it misses them, a full walk's sweep
   retracts them, and the next full walk reads them again. Duplicates are
   permitted; silent truncation is not, except across such a resume.
 - **A walk fails on a listing that 10,000 pages do not finish**, and each unit
-  of a whole-library walk is a listing of its own: at the default page size
-  that is one of 9,500,050 items or more, and fewer at a smaller page (the
+  of a whole-library walk is a listing of its own: at the default page size,
+  while its listing holds still, that is one of 9,500,050 items or more, and
+  fewer at a smaller page (the
   [configuration guide](../guide/configuration.md#walking-a-large-library) has
   the table).
 - **The delta cursor is widened by one second.**

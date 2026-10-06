@@ -81,9 +81,13 @@ Versioning is `0.x` while the wire contract may still move —
   process killed outright still leaves its run live until its heartbeat is 10
   minutes old.
 - **Items deleted from the source mid-walk no longer hide others from the
-  walk**, unless more of them vanish between two pages than a page re-reads.
-  Each page re-reads the end of the page before, so a full walk no longer marks
-  a file that is still there unavailable.
+  walk.** Each page re-reads the end of the page before, so a full walk no
+  longer marks a file that is still there unavailable.
+- **A walk no longer skips items when more than the page overlap leave the
+  listing between two pages.** A page that moved past the overlap is not read:
+  the walk logs a WARNING and asks again 100 items earlier, doubling while pages
+  keep moving. Before, it read on, and a full walk's sweep then retracted the
+  items it had skipped.
 - **An embedding model that fails the embedder's norm check now fails every
   batch, not only the first.** The first batch used to park one `index` job and
   let every later vector through unchecked.
