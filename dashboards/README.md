@@ -1233,10 +1233,22 @@ max by (source) (usher_source_listing_concurrency_ratio)
 sum by (source, stage) (rate(usher_sync_unit_duration_seconds_sum[15m])) / sum by (source, stage) (rate(usher_sync_unit_duration_seconds_count[15m]))
 ```
 
-**Not yet observed.** Both series exist only in a process that has walked a
-source: the gauge is first written by a listing page, the histogram by a unit's
-completion. No whole-library walk has run against a real source since this
-panel was committed, so there is no reading to record.
+**Returned** 1 frame for the limit and 3 for the durations, in 57.8 / 15.1 ms,
+over fast first sync's acceptance walk: 2026-10-07 18:11–19:08 UTC, 1,174,332
+items in 38 units. **The limit sat flat at the walker count, 4,** for 56 of its
+57 points. Two `ConnectError`s at 18:48 dropped it to **1**, and the next
+minute's successes raised it back to 4. **Mean unit duration, by stage:** titles
+**56.7–353.9 s** (median 81.6 s, 19 points, 18:15–18:33), episodes
+**299.9–1,104.1 s** (median 1,046.2 s, 28 points, 18:39–19:08). The next walk
+read the same 323 s in, at 12 of 38 units: limit 4, titles 75.4 s.
+
+**The seed never draws, and no stage draws before its second unit completes.**
+Both series exist only in a process that has walked a source: the gauge is
+first written by a listing page, the histogram by a unit's completion. A
+counter whose series begins at 1 has risen by nothing inside the window, so
+`rate()` divides zero by zero. The seed is one unit per walk, so its series is
+always `NaN`. The episodes line starts at 18:39, two minutes after the stage's
+first unit completed.
 
 ## ⚠️ Three Dashboard 3 panels plot a mean, not a quantile, and the reason is an instrument
 
