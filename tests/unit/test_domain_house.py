@@ -21,6 +21,8 @@ from tests.fakes.house import (
 from usher.domain.house import DeviceRole, HouseSnapshot
 
 PLAYER = "media_player.x"
+# Names run opposite to ids, so a sort keyed on a name cannot pass for one keyed on the id.
+NAME_OF = {"a": "Zulu", "b": "Mike", "c": "Alpha"}
 
 
 def test_an_entity_with_its_own_area_overrides_its_device() -> None:
@@ -113,39 +115,46 @@ def test_with_registries_keeps_what_it_was_not_given() -> None:
 
 
 @pytest.mark.parametrize(
-    ("build", "ids_of"),
+    ("build", "rows_of"),
     [
         pytest.param(
-            lambda ids: snapshot(areas=tuple(area(one) for one in ids)),
-            lambda house: [one.area_id for one in house.areas],
+            lambda ids: snapshot(areas=tuple(area(one, NAME_OF[one]) for one in ids)),
+            lambda house: [(one.area_id, one.name) for one in house.areas],
             id="areas",
         ),
         pytest.param(
-            lambda ids: snapshot(devices=tuple(device(one) for one in ids)),
-            lambda house: [one.device_id for one in house.devices],
+            lambda ids: snapshot(devices=tuple(device(one, name=NAME_OF[one]) for one in ids)),
+            lambda house: [(one.device_id, one.name) for one in house.devices],
             id="devices",
         ),
         pytest.param(
-            lambda ids: snapshot(entities=tuple(entity(one, integration="cast") for one in ids)),
-            lambda house: [one.entity_id for one in house.entities],
+            lambda ids: snapshot(
+                entities=tuple(entity(one, integration="cast", name=NAME_OF[one]) for one in ids)
+            ),
+            lambda house: [(one.entity_id, one.name) for one in house.entities],
             id="entities",
         ),
         pytest.param(
-            lambda ids: snapshot(states=tuple(state(one) for one in ids)),
-            lambda house: [one.entity_id for one in house.states],
+            lambda ids: snapshot(
+                states=tuple(state(one, friendly_name=NAME_OF[one]) for one in ids)
+            ),
+            lambda house: [(one.entity_id, one.friendly_name) for one in house.states],
             id="states",
         ),
     ],
 )
 def test_equality_ignores_the_order_rows_arrived_in(
     build: Callable[[tuple[str, ...]], HouseSnapshot],
-    ids_of: Callable[[HouseSnapshot], list[str]],
+    rows_of: Callable[[HouseSnapshot], list[tuple[str, str]]],
 ) -> None:
     """A 3-cycle, not a swap: a reversal is its own inverse and can hide a sort by accident."""
     in_order, cycled = ("a", "b", "c"), ("c", "a", "b")
-    assert ids_of(build(in_order)) == ["a", "b", "c"], "the premise: the case reads its own rows"
+    stored = rows_of(build(in_order))
+    assert sorted(stored) == sorted(NAME_OF.items()), "the premise: the case reads its own rows"
+    by_name = [one for one, _ in sorted(stored, key=lambda row: row[1])]
+    assert by_name != sorted(by_name), "the premise: name order is not id order"
     assert build(cycled) == build(in_order)
-    assert ids_of(build(cycled)) == ["a", "b", "c"]
+    assert [one for one, _ in rows_of(build(cycled))] == ["a", "b", "c"]
 
 
 def test_a_new_snapshot_answers_from_its_own_rows_not_an_old_index() -> None:
