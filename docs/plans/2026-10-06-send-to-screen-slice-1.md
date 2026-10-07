@@ -1511,6 +1511,7 @@ Expected: ERROR at collection, `ModuleNotFoundError: No module named 'usher.doma
 ```python
 """Screens: the house projected onto what Usher can play on, recomputed on every read."""
 
+import unicodedata
 from dataclasses import dataclass
 from typing import Final
 
@@ -1586,6 +1587,16 @@ def _candidate(
     )
 
 
+def reading_key(name: str, ident: str) -> tuple[str, str]:
+    """Sorts a name as a person reads it: case, accents and compatibility forms set aside.
+
+    The id breaks ties, so names that read alike still sort one way every time.
+    """
+    unfolded = unicodedata.normalize("NFKD", name)
+    unaccented = "".join(char for char in unfolded if not unicodedata.combining(char))
+    return unaccented.casefold(), ident
+
+
 def _by_name(players: list[ScreenDevice]) -> tuple[ScreenDevice, ...]:
     return tuple(sorted(players, key=lambda player: reading_key(player.name, player.entity_id)))
 
@@ -1593,11 +1604,12 @@ def _by_name(players: list[ScreenDevice]) -> tuple[ScreenDevice, ...]:
 def project(house: HouseSnapshot, recipes: tuple[Recipe, ...] = RECIPES) -> HouseView:
     """Snapshot to screens.
 
-    A candidate is an enabled `media_player` entity some recipe answers to by
-    integration *and* model, so Music Assistant's copy of a TV, a Cast speaker
-    and a TV no recipe knows are never candidates. Its area is HA's: the
-    entity's own, else its device's. An area id naming no area is no area, so a
-    deleted area never becomes a screen named by its id.
+    A candidate is an enabled `media_player` entity on a device some recipe
+    answers to by integration *and* model, so Music Assistant's copy of a TV, a
+    Cast speaker, a TV no recipe knows and a group player with no device are
+    never candidates. Its area is HA's: the entity's own, else its device's. An
+    area id naming no area is no area, so a deleted area never becomes a screen
+    named by its id. Every list is in `reading_key` order.
     """
     grouped: dict[str, list[ScreenDevice]] = {}
     unconfirmed: list[ScreenDevice] = []
