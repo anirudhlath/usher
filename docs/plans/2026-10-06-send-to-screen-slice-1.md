@@ -5807,7 +5807,9 @@ Departure 2: the port has no `call_service` yet; slice 2 adds it with the dispat
 ```python
 """Behaviour every `Players` implementation must satisfy, over `this_house()`."""
 
+import asyncio
 from abc import ABC, abstractmethod
+from dataclasses import replace
 
 import pytest
 
@@ -5842,6 +5844,14 @@ def _area(house: HouseSnapshot, entity_id: str) -> str | None:
     return house.area_of(entity)
 
 
+def _roles(house: HouseSnapshot) -> dict[str, DeviceRole | None]:
+    return {one.entity_id: one.role for one in house.entities}
+
+
+def _placed(house: HouseSnapshot) -> dict[str, str | None]:
+    return {one.device_id: one.area_id for one in house.devices}
+
+
 def _reading(house: HouseSnapshot, entity_id: str) -> str | None:
     state = house.state(entity_id)
     return state.state if state is not None else None
@@ -5860,7 +5870,11 @@ class PlayersContract:
             lambda house: _role(house, SHIELD) is DeviceRole.USE, timeout=1.0
         )
         assert _role(house, SHIELD) is DeviceRole.USE
-        assert _role(house, APPLE_TV) is DeviceRole.USE, "no other player moved"
+        expected = _roles(this_house()) | {SHIELD: DeviceRole.USE}
+        assert _roles(house) == expected, "no other player moved"
+        assert house == this_house(shield=DeviceRole.USE), (
+            "the write lost a reading or changed a row besides the role"
+        )
 
     async def test_a_new_role_replaces_the_old_one(self, harness: PlayersHarness) -> None:
         assert _role(harness.players.snapshot(), APPLE_TV) is DeviceRole.USE, "the premise"
@@ -5869,6 +5883,11 @@ class PlayersContract:
             lambda house: _role(house, APPLE_TV) is not DeviceRole.USE, timeout=1.0
         )
         assert _role(house, APPLE_TV) is DeviceRole.IGNORE
+        expected = _roles(this_house()) | {APPLE_TV: DeviceRole.IGNORE}
+        assert _roles(house) == expected, "no other player moved"
+        assert house == this_house(apple_tv=DeviceRole.IGNORE), (
+            "the write lost a reading or changed a row besides the role"
+        )
 
     async def test_a_device_is_placed_and_reported_back(self, harness: PlayersHarness) -> None:
         assert _area(harness.players.snapshot(), SHIELD) is None, "the premise"
@@ -5877,6 +5896,17 @@ class PlayersContract:
             lambda house: _area(house, SHIELD) is not None, timeout=1.0
         )
         assert _area(house, SHIELD) == BEDROOM
+        placed = _placed(house)
+        assert placed[SHIELD_DEVICE] == BEDROOM, "the device itself moved"
+        expected = _placed(this_house()) | {SHIELD_DEVICE: BEDROOM}
+        assert placed == expected, "no other device moved"
+        moved = tuple(
+            replace(one, area_id=BEDROOM) if one.device_id == SHIELD_DEVICE else one
+            for one in this_house().devices
+        )
+        assert house == this_house().with_registries(devices=moved), (
+            "the write lost a reading or changed a row besides the device's area"
+        )
 
     async def test_a_change_at_the_registry_reaches_the_snapshot(
         self, harness: PlayersHarness
@@ -5900,6 +5930,11 @@ class PlayersContract:
         with pytest.raises(PortUnavailable, match=r"within 0\.05s"):
             await harness.players.wait_until(lambda house: False, timeout=0.05)
 
+    async def test_a_callers_deadline_cancels_the_wait(self, harness: PlayersHarness) -> None:
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(0.05):
+                await harness.players.wait_until(lambda house: False, timeout=10.0)
+
     async def test_a_role_for_a_player_that_does_not_exist_is_refused(
         self, harness: PlayersHarness
     ) -> None:
@@ -5919,7 +5954,8 @@ class PlayersContract:
 """The `Players` contract on the fake, and what only the fake can be asked to do."""
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable, Coroutine
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -5929,6 +5965,15 @@ from tests.fakes.house import APPLE_TV, BEDROOM, SHIELD, SHIELD_DEVICE, this_hou
 from tests.fakes.players import FakePlayers
 from usher.domain.house import DeviceRole, HouseSnapshot, HouseState
 from usher.ports.errors import PortAuthFailed, PortUnavailable
+
+type _Write = Callable[[FakePlayers], Coroutine[Any, Any, None]]
+
+# Both writes, so an affordance honoured by one and not the other cannot pass.
+_WRITES: dict[str, _Write] = {
+    "role": lambda players: players.set_role(SHIELD, DeviceRole.USE),
+    "area": lambda players: players.set_device_area(SHIELD_DEVICE, BEDROOM),
+}
+each_write = pytest.mark.parametrize("write", list(_WRITES.values()), ids=list(_WRITES))
 
 
 class _FakeHarness(PlayersHarness):
@@ -5960,21 +6005,54 @@ async def test_writes_are_recorded_in_order() -> None:
     assert players.writes == [("role", SHIELD, "use"), ("area", SHIELD_DEVICE, BEDROOM)]
 
 
-async def test_a_fake_that_never_reports_a_write_leaves_the_house_unchanged() -> None:
+@each_write
+async def test_a_fake_that_never_reports_a_write_leaves_the_house_unchanged(
+    write: _Write,
+) -> None:
     players = FakePlayers(this_house())
     players.reports_writes = False
-    await players.set_role(SHIELD, DeviceRole.USE)
+    await write(players)
+    assert len(players.writes) == 1, "the premise: the write was sent"
     assert players.snapshot() == this_house()
     with pytest.raises(PortUnavailable):
         await players.wait_until(lambda house: house != this_house(), timeout=0.01)
 
 
-async def test_a_refusing_fake_raises_what_it_was_given_and_writes_nothing() -> None:
+@each_write
+async def test_a_refusing_fake_raises_what_it_was_given_and_writes_nothing(
+    write: _Write,
+) -> None:
     players = FakePlayers(this_house())
-    players.refuse = PortAuthFailed("refused")
-    with pytest.raises(PortAuthFailed):
-        await players.set_role(SHIELD, DeviceRole.USE)
-    assert players.writes == []
+    players.refuse = refusal = PortAuthFailed("refused")
+    with pytest.raises(PortAuthFailed) as raised:
+        await write(players)
+    assert raised.value is refusal
+    assert players.snapshot() == this_house(), "a refused write changed the house"
+    assert players.writes == [], "a refused write was recorded"
+
+
+@each_write
+def test_each_write_yields_to_the_loop_before_it_lands(write: _Write) -> None:
+    """Driven by hand: a write that never awaits gives a caller's `wait_for` nothing to cancel."""
+    players = FakePlayers(this_house())
+    writing = write(players)
+    try:
+        writing.send(None)
+    except StopIteration:
+        pytest.fail("the write landed without yielding to the loop")
+    assert players.writes == [], "nothing lands before the yield"
+    with pytest.raises(StopIteration):
+        writing.send(None)
+    assert len(players.writes) == 1, "the premise: resumed, the write lands"
+
+
+async def test_a_waiter_on_an_unpublished_house_waits_for_the_first_reading() -> None:
+    players = FakePlayers()
+    waiting = asyncio.create_task(players.wait_until(lambda house: True, timeout=1.0))
+    await asyncio.sleep(0)
+    assert not waiting.done(), "nothing has been published to agree with"
+    players.publish(this_house())
+    assert await waiting == this_house()
 
 
 async def test_a_waiter_sleeps_through_an_unrelated_publish_and_wakes_on_the_next() -> None:
@@ -6037,10 +6115,11 @@ class Players(ABC):
     async def wait_until(
         self, predicate: Callable[[HouseSnapshot], bool], *, timeout: float
     ) -> HouseSnapshot:
-        """The first reading `predicate` accepts, the current one included.
+        """The current reading if `predicate` accepts it, else a later one.
 
-        `PortUnavailable` naming `timeout` when none arrives in time. A write is
-        done when the registry reports it, not when it was sent.
+        Readings published in one turn of the loop are seen only as the last of
+        them. `PortUnavailable` naming `timeout` when none arrives in time. A write
+        is done when the registry reports it, not when it was sent.
         """
 ```
 
