@@ -23,6 +23,28 @@ HA_VERSION: Final = "2026.10.0"
 REFUSAL_MESSAGE: Final = "refusal text that may carry a submitted value"
 #: A non-player in every list, so every read exercises the domain filter.
 SENSOR: Final = "sensor.hallway_temperature"
+#: Paths the fake emits that no capture has recorded, by frame kind; a capture that records one
+#: takes it out, and the session's shape case fails until it does.
+PENDING_FRAMES: Final[dict[str, frozenset[str]]] = {
+    # The capture writes nothing, so it never saw a write's dict answer.
+    "result": frozenset({"result: dict"}),
+    "event": frozenset(
+        {
+            # The capture changed no registry while it listened.
+            "event.data.action: str",
+            "event.data.area_id: str",
+            "event.data.changes.area_id: str",
+            "event.data.changes.labels: list",
+            "event.data.changes.labels[]: str",
+            "event.data.changes: dict",
+            "event.data.device_id: str",
+            "event.data.label_id: str",
+            # No player arrived or left while it listened.
+            "event.data.new_state: NoneType",
+            "event.data.old_state: NoneType",
+        }
+    ),
+}
 _FIRED: Final = "2026-10-06T19:00:00.000000+00:00"
 _CONTEXT: Final = {"id": "01K0000000000000000000000E", "parent_id": None, "user_id": None}
 _DETAIL: Final[dict[str, Any]] = {

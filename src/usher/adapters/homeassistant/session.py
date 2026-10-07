@@ -19,6 +19,11 @@ from usher.ports.errors import PortAuthFailed, PortDataMalformed, PortUnavailabl
 #: transport's ping, so a quiet socket is a tick and never a failure.
 _TICK_SECONDS: Final = 30.0
 _CODE: Final = re.compile(r"[a-z0-9_]{1,64}")
+#: Why a waiting command failed; only a failed socket is blamed on Home Assistant.
+_HA_CLOSED: Final = "Home Assistant closed before answering {kind}"
+_HANDLER_RAISED: Final = "the event handler raised before {kind} was answered"
+_STOPPED_READING: Final = "the session stopped reading before {kind} was answered"
+_CLOSED_HERE: Final = "the session was closed before {kind} was answered"
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +69,7 @@ class HomeAssistantSession:
         self._seq = 0
         self._pending: dict[int, tuple[str, asyncio.Future[Answer]]] = {}
         self._closed = False
+        self._pumping = False
         self.skipped = 0
 
     @classmethod
@@ -101,7 +107,7 @@ class HomeAssistantSession:
         answered: asyncio.Future[Answer] = asyncio.get_running_loop().create_future()
         self._pending[ident] = (kind, answered)
         try:
-            await self._socket.send(json.dumps({"id": ident, "type": kind, **fields}))
+            await self._socket.send(json.dumps({**fields, "id": ident, "type": kind}))
             async with asyncio.timeout(self._command_timeout):
                 return await answered
         except TimeoutError:
@@ -115,43 +121,61 @@ class HomeAssistantSession:
         """Read every frame until the socket fails, numbering each in arrival order.
 
         The only reader after `open`, so an event and an answer are ordered by
-        their numbers. A frame that is neither an event nor a result is counted
-        in `skipped`. On exit every command still waiting fails at once with
-        `PortUnavailable`, rather than at its timeout.
+        their numbers; a second call while one runs raises `RuntimeError`. A
+        frame that is neither an event nor a result is counted in `skipped`.
+        On exit every command still waiting fails at once with `PortUnavailable`,
+        rather than at its timeout, and the message blames Home Assistant only
+        when the socket failed: not for a raising `on_event` or a cancelled reader.
         """
+        if self._pumping:
+            raise RuntimeError("this Home Assistant session already has a reader")
+        self._pumping = True
+        why = _STOPPED_READING
         try:
             while True:
                 try:
                     text = await self._socket.recv(_TICK_SECONDS)
                 except TimeoutError:
                     continue
+                except PortUnavailable:
+                    why = _HA_CLOSED
+                    raise
                 self._seq += 1
                 frame = _parse(text)
                 if frame is not None and frame.get("type") == "event":
-                    self._deliver(frame, on_event)
+                    event = self._event(frame)
+                    try:
+                        if event is not None:
+                            on_event(event)
+                    except Exception:
+                        why = _HANDLER_RAISED
+                        raise
                 elif frame is not None and frame.get("type") == "result":
                     self._settle(frame)
                 else:
                     self.skipped += 1
         finally:
-            self._closed = True
-            for kind, answered in self._pending.values():
-                if not answered.done():
-                    answered.set_exception(
-                        PortUnavailable(f"Home Assistant closed before answering {kind}")
-                    )
+            self._pumping = False
+            self._fail_pending(why)
 
-    def _deliver(self, frame: Mapping[str, object], on_event: Callable[[Event], None]) -> None:
+    def _fail_pending(self, why: str) -> None:
+        """Refuse every later command, and fail each waiting one at once, saying `why`."""
+        self._closed = True
+        for kind, answered in self._pending.values():
+            if not answered.done():
+                answered.set_exception(PortUnavailable(why.format(kind=kind)))
+
+    def _event(self, frame: Mapping[str, object]) -> Event | None:
         event = frame.get("event")
         event_type = event.get("event_type") if isinstance(event, Mapping) else None
         if not isinstance(event, Mapping) or not isinstance(event_type, str):
             self.skipped += 1
-            return
-        on_event(Event(event_type=event_type, data=event.get("data"), seq=self._seq))
+            return None
+        return Event(event_type=event_type, data=event.get("data"), seq=self._seq)
 
     def _settle(self, frame: Mapping[str, object]) -> None:
         ident = frame.get("id")
-        waiting = self._pending.get(ident) if isinstance(ident, int) else None
+        waiting = self._pending.get(ident) if type(ident) is int else None
         if waiting is None or waiting[1].done():
             return
         kind, answered = waiting
@@ -161,7 +185,8 @@ class HomeAssistantSession:
             answered.set_exception(_refusal(kind, frame))
 
     async def aclose(self) -> None:
-        self._closed = True
+        """Close the socket; a command still waiting fails at once, reader or none."""
+        self._fail_pending(_CLOSED_HERE)
         await self._socket.aclose()
 
 

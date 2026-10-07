@@ -9,29 +9,38 @@ import pytest
 from pydantic import SecretStr
 
 from tests.fakes.home_assistant import (
+    PENDING_FRAMES,
     REFUSAL_MESSAGE,
     TOKEN,
     FakeHomeAssistant,
     FakeHomeAssistantConnector,
 )
-from tests.fakes.home_assistant_rows import missing_keys, unrecorded_paths
-from tests.fakes.house import APPLE_TV, APPLE_TV_DEVICE, BEDROOM
+from tests.fakes.home_assistant_rows import missing_keys, recorded, unrecorded_paths
+from tests.fakes.house import APPLE_TV, APPLE_TV_DEVICE, BEDROOM, LIVING_ROOM
 from usher.adapters.homeassistant.session import Event, HomeAssistantSession
 from usher.domain.house import HouseState
 from usher.ports.errors import PortAuthFailed, PortDataMalformed, PortUnavailable
 
 URL = "ws://192.0.2.1:8123/api/websocket"
+#: A player HA has never reported, so its first state has no old one.
+_ARRIVAL = HouseState(entity_id="media_player.synthetic_arrival", state="idle")
 
 
 @asynccontextmanager
 async def _session(
-    server: FakeHomeAssistant, *, timeout: float = 1.0, events: list[Event] | None = None
+    server: FakeHomeAssistant,
+    *,
+    timeout: float = 1.0,
+    events: list[Event] | None = None,
+    pumps: list[asyncio.Task[None]] | None = None,
 ) -> AsyncIterator[HomeAssistantSession]:
     session = await HomeAssistantSession.open(
         FakeHomeAssistantConnector(server), URL, TOKEN, command_timeout=timeout
     )
     seen: list[Event] = events if events is not None else []
     pump = asyncio.create_task(session.pump(seen.append))
+    if pumps is not None:
+        pumps.append(pump)
     try:
         yield session
     finally:
@@ -43,8 +52,10 @@ async def _session(
 
 async def test_open_sends_the_token_in_the_auth_frame_and_nothing_else() -> None:
     server = FakeHomeAssistant()
-    async with _session(server):
-        pass
+    async with _session(server) as session:
+        state = repr(vars(session))
+    assert "_socket" in state, "the premise: the repr holds the session's state"
+    assert TOKEN.get_secret_value() not in state
     assert server.connections[0].sent == [
         {"type": "auth", "access_token": TOKEN.get_secret_value()}
     ]
@@ -194,14 +205,170 @@ async def test_a_frame_that_is_not_a_json_object_is_skipped_and_counted() -> Non
     assert answer.value == server.areas
 
 
-async def test_the_fakes_frames_have_the_recorded_shapes() -> None:
+@pytest.mark.parametrize(
+    "frame",
+    [
+        {"type": "event", "event": "x"},
+        {"type": "event", "event": {"event_type": 3}},
+        {"type": "event"},
+    ],
+)
+async def test_an_event_frame_with_no_event_type_is_skipped_and_the_reader_runs_on(
+    frame: dict[str, Any],
+) -> None:
+    server = FakeHomeAssistant()
+    events: list[Event] = []
+    pumps: list[asyncio.Task[None]] = []
+    async with _session(server, events=events, pumps=pumps) as session:
+        server.connections[0].deliver(frame)
+        answer = await session.command("config/area_registry/list")
+        assert not pumps[0].done()
+    assert session.skipped == 1
+    assert answer.value == server.areas
+    assert events == []
+
+
+@pytest.mark.parametrize("ident", [True, 1.0, "1"])
+async def test_a_result_whose_id_is_not_an_integer_answers_no_command(ident: object) -> None:
+    server = FakeHomeAssistant()
+    server.unanswered.add("get_states")
+    async with _session(server) as session:
+        waiting = asyncio.create_task(session.command("get_states"))
+        while not server.commands:
+            await asyncio.sleep(0)
+        assert server.commands[0]["id"] == 1, "the premise: the id the impostor resembles"
+        connection = server.connections[0]
+        connection.deliver({"id": ident, "type": "result", "success": True, "result": ["impostor"]})
+        connection.deliver({"id": 1, "type": "result", "success": True, "result": ["genuine"]})
+        answer = await waiting
+    assert answer.value == ["genuine"]
+
+
+async def test_an_answer_to_a_command_given_up_but_not_yet_unwound_is_dropped() -> None:
+    server = FakeHomeAssistant()
+    server.unanswered.add("get_states")
+    pumps: list[asyncio.Task[None]] = []
+    async with _session(server, timeout=10.0, pumps=pumps) as session:
+        waiting = asyncio.create_task(session.command("get_states"))
+        while not server.commands:
+            await asyncio.sleep(0)
+        # The answer is queued, then the command is cancelled: its future is done at once, and
+        # the reader settles the answer before the command's own `finally` forgets the id.
+        server.connections[0].deliver({"id": 1, "type": "result", "success": True, "result": []})
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        assert not pumps[0].done()
+        assert (await session.command("config/area_registry/list")).value == server.areas
+
+
+async def test_a_second_reader_is_refused_and_the_first_reads_on() -> None:
+    server = FakeHomeAssistant()
+    pumps: list[asyncio.Task[None]] = []
+    async with _session(server, pumps=pumps) as session:
+        await session.command("config/area_registry/list")
+        assert not pumps[0].done(), "the premise: the first reader is reading"
+        with pytest.raises(RuntimeError, match="already has a reader"):
+            async with asyncio.timeout(1.0):
+                await session.pump(lambda _event: None)
+        assert not pumps[0].done()
+        assert (await session.command("get_states")).value == server.states
+
+
+async def test_aclose_with_no_reader_fails_a_waiting_command_at_once() -> None:
+    server = FakeHomeAssistant()
+    server.unanswered.add("get_states")
+    session = await HomeAssistantSession.open(
+        FakeHomeAssistantConnector(server), URL, TOKEN, command_timeout=10.0
+    )
+    waiting = asyncio.create_task(session.command("get_states"))
+    while not server.commands:
+        await asyncio.sleep(0)
+    await session.aclose()
+    async with asyncio.timeout(1.0):
+        with pytest.raises(PortUnavailable) as closed:
+            await waiting
+    assert str(closed.value) == "the session was closed before get_states was answered"
+    assert server.connections[0].closed
+
+
+async def test_a_handler_that_raises_is_not_blamed_on_home_assistant() -> None:
+    server = FakeHomeAssistant()
+    server.unanswered.add("get_states")
+    session = await HomeAssistantSession.open(
+        FakeHomeAssistantConnector(server), URL, TOKEN, command_timeout=10.0
+    )
+
+    def explode(_event: Event) -> None:
+        raise ValueError("the handler's own failure")
+
+    pump = asyncio.create_task(session.pump(explode))
+    try:
+        await session.command("subscribe_events", event_type="state_changed")
+        waiting = asyncio.create_task(session.command("get_states"))
+        while len(server.commands) < 2:
+            await asyncio.sleep(0)
+        server.change_state(HouseState(entity_id=APPLE_TV, state="paused"))
+        async with asyncio.timeout(1.0):
+            with pytest.raises(PortUnavailable) as stopped:
+                await waiting
+            with pytest.raises(ValueError, match="the handler's own failure"):
+                await pump
+    finally:
+        pump.cancel()
+        with suppress(asyncio.CancelledError, ValueError, PortUnavailable):
+            await pump
+        await session.aclose()
+    assert str(stopped.value) == "the event handler raised before get_states was answered"
+
+
+async def test_a_cancelled_reader_is_not_blamed_on_home_assistant() -> None:
+    server = FakeHomeAssistant()
+    server.unanswered.add("get_states")
+    pumps: list[asyncio.Task[None]] = []
+    async with _session(server, timeout=10.0, pumps=pumps) as session:
+        waiting = asyncio.create_task(session.command("get_states"))
+        while not server.commands:
+            await asyncio.sleep(0)
+        pumps[0].cancel()
+        async with asyncio.timeout(1.0):
+            with pytest.raises(PortUnavailable) as stopped:
+                await waiting
+    assert str(stopped.value) == "the session stopped reading before get_states was answered"
+
+
+async def test_fields_cannot_replace_a_commands_id_or_type() -> None:
     server = FakeHomeAssistant()
     async with _session(server) as session:
-        await session.command("subscribe_events", event_type="state_changed")
+        answer = await session.command("config/area_registry/list", id=99, type="get_states")
+    assert server.commands == [{"id": 1, "type": "config/area_registry/list"}]
+    assert answer.value == server.areas
+
+
+async def test_the_fakes_frames_have_the_recorded_shapes_or_are_pending() -> None:
+    server = FakeHomeAssistant()
+    async with _session(server) as session:
+        for event_type in (
+            "state_changed",
+            "area_registry_updated",
+            "device_registry_updated",
+            "entity_registry_updated",
+            "label_registry_updated",
+        ):
+            await session.command("subscribe_events", event_type=event_type)
         await session.command("get_states")
+        await session.command("config/entity_registry/get", entity_id=APPLE_TV)
         with pytest.raises(PortDataMalformed):
             await session.command("config/entity_registry/get", entity_id="media_player.nothing")
+        await session.command("config/entity_registry/update", entity_id=APPLE_TV, labels=[])
+        await session.command(
+            "config/device_registry/update", device_id=APPLE_TV_DEVICE, area_id=BEDROOM
+        )
+        await session.command("config/label_registry/create", name="Usher ignore")
         server.change_state(HouseState(entity_id=APPLE_TV, state="paused"))
+        server.change_state(_ARRIVAL)
+        server.remove_state(_ARRIVAL.entity_id)
+        server.rename_area(LIVING_ROOM, "Lounge")
         await session.command("config/area_registry/list")
     delivered = server.connections[0].delivered
     by_kind: dict[str, list[dict[str, Any]]] = {
@@ -213,5 +380,17 @@ async def test_the_fakes_frames_have_the_recorded_shapes() -> None:
     }
     for kind, frames in by_kind.items():
         assert frames, f"the premise: the fake delivered a {kind} frame"
-        assert unrecorded_paths(kind, frames) == [], kind
+        assert sorted(unrecorded_paths(kind, frames)) == sorted(PENDING_FRAMES.get(kind, ())), kind
         assert missing_keys(kind, frames) == [], kind
+
+
+def test_every_pending_frame_path_is_still_unrecorded() -> None:
+    shape = recorded()
+    pending = [(kind, entry) for kind, entries in PENDING_FRAMES.items() for entry in entries]
+    assert pending, "the premise: the fake emits a path no capture has recorded"
+    now_recorded = [
+        f"{kind}: {entry}"
+        for kind, entry in pending
+        if entry.rsplit(": ", 1)[1] in shape[kind].get(entry.rsplit(": ", 1)[0], [])
+    ]
+    assert now_recorded == []
