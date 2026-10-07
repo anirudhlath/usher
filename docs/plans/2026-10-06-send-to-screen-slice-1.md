@@ -44,7 +44,7 @@
 - **Every recipe fact is `proven=False` in this slice.** Infuse is `hands_free=False` until spike 1 says otherwise.
 - **`ProblemCode` gains exactly one member:** `players_unavailable` (503). `screen_busy` and `way_not_playable` belong to slice 2.
 - **Committed HA fixtures are shape-recorded and value-synthetic:**
-  - no entity id the spec does not already print;
+  - no real entity id beyond those the spec already prints (an invented id is fine, and must not exist in the house);
   - no MAC outside `02:00:00:…`;
   - no IPv4 outside `192.0.2.0/24`;
   - no token, and no media title from the house.
@@ -8131,7 +8131,7 @@ USHER_HA_URL="$VITE_HA_URL" USHER_HA_TOKEN="$VITE_HA_TOKEN" \
   never a value.** `tests/fakes/home_assistant_rows.py` renders a
   `HouseSnapshot` with every recorded key, and both directions are checked.
 - Synthetic values only: MACs in `02:00:00:…`, IPv4 in `192.0.2.0/24`, and
-  entity ids the spec already prints.
+  entity ids either invented or already printed by the spec.
 - **`FakePlayers.reports_writes = False` is how a test holds a write unreported**;
   publish the next house by hand to release it.
 
