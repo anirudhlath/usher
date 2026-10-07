@@ -271,8 +271,10 @@ than `sync_max_retract_fraction` (default `0.25`) of a source in one run,
 raising and changing nothing. `1.0` disables the ceiling. The ceiling is a
 fraction of what *Usher* holds for that source, not of the source itself.
 
-An item that reappears in a walk is available again at that moment. The sweep
-only ever sets `false`.
+An item that reappears in a walk is available again at that moment. An item
+keeps the start of the latest-begun walk that saw it, so a walk that began
+earlier and reads it again never exposes it to a later full walk's sweep. The
+sweep only ever sets `false`.
 
 **A source is either a library this deployment owns or a *view* of somebody
 else's, and Usher does not model the difference.** Pointing Usher at a server

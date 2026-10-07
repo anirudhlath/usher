@@ -22,13 +22,14 @@ def item(
     episode_id: uuid.UUID | None = None,
     last_seen_at: datetime = RUN_AT,
     added_at: datetime | None = datetime(2024, 3, 1, 18, 22, 11, tzinfo=UTC),
+    container: str = "mkv",
 ) -> MediaItemUpsert:
     return MediaItemUpsert(
         source_id=source_id,
         external_id=external_id,
         title_id=title_id,
         episode_id=episode_id,
-        container="mkv",
+        container=container,
         video_codec="hevc",
         audio_codec="truehd",
         width=3840,
@@ -119,6 +120,28 @@ class MediaItemRepositoryContract:
         stored = await repository.get_by_external_id(source_id, "movie-1")
         assert stored is not None
         assert stored.last_seen_at == RUN_AT
+
+    async def test_an_older_sighting_never_rewinds_a_newer_one(
+        self, repository: MediaItemRepository, source_id: uuid.UUID
+    ) -> None:
+        """A walk that began earlier and reads an item again leaves the later walk's stamp.
+
+        Moved back behind the later walk's start, the item would be retracted by that
+        walk's sweep while it is still on the source. What the older sighting read is
+        written all the same: a resumed walk carries an old start but the freshest read.
+        """
+        await repository.upsert_many([item(source_id, "movie-1", last_seen_at=RUN_AT)])
+        await repository.upsert_many(
+            [item(source_id, "movie-1", last_seen_at=EARLIER, container="mp4")]
+        )
+        stored = await repository.get_by_external_id(source_id, "movie-1")
+        assert stored is not None
+        assert stored.last_seen_at == RUN_AT
+        assert stored.container == "mp4", "the older sighting's read was refused with its stamp"
+        swept = await repository.mark_unseen_unavailable(
+            source_id, seen_since=RUN_AT, max_retract_fraction=1.0
+        )
+        assert swept.retracted == 0
 
     async def test_upsert_many_never_downgrades_a_matched_item_to_unmatched(
         self, repository: MediaItemRepository, source_id: uuid.UUID, title_id: uuid.UUID

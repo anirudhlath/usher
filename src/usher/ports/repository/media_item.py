@@ -58,7 +58,10 @@ class MediaItemRepository(ABC):
 
     @abstractmethod
     async def upsert_many(self, rows: Sequence[MediaItemUpsert]) -> BulkWriteResult:
-        """Insert or update media items, keyed on `(source_id, external_id)`."""
+        """Insert or update media items, keyed on `(source_id, external_id)`.
+
+        A stored `last_seen_at` is never moved back by an older one.
+        """
 
     @abstractmethod
     async def mark_unseen_unavailable(

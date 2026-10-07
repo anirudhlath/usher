@@ -62,6 +62,10 @@ _COLUMNS = (
     "last_seen_at",
 )
 
+# `last_seen_at` only moves forward: a walk that began earlier and reads an item again
+# would otherwise stamp it behind a later full walk's start, and that walk's sweep
+# would retract it. Every other column takes the latest write, since a resumed walk
+# carries an old start but the freshest read.
 _UPSERT = """
 WITH deduped AS (
     SELECT DISTINCT ON (source_id, external_id) *
@@ -90,7 +94,7 @@ WITH deduped AS (
         file_size_bytes = excluded.file_size_bytes,
         runtime_seconds = excluded.runtime_seconds,
         added_at = COALESCE(excluded.added_at, media_items.added_at),
-        last_seen_at = excluded.last_seen_at,
+        last_seen_at = GREATEST(media_items.last_seen_at, excluded.last_seen_at),
         available = true
     RETURNING (xmax = 0) AS inserted
 )

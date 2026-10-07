@@ -913,6 +913,57 @@ async def test_the_sweep_window_is_the_runs_own_start_instant(
     assert run.started_at < datetime.now(UTC) + timedelta(seconds=1)
 
 
+async def test_a_full_walk_retracts_nothing_a_walk_begun_before_it_read_again() -> None:
+    """A delta begins first and reads every item only once a full walk has committed them.
+
+    Stamped with the delta's earlier start, each item would sit behind the full walk's
+    own, and that walk's sweep would retract all five while they are still on the source.
+    """
+    fixture = _Fixture(batch_size=1, max_retract_fraction=1.0)
+    names = [f"m{index}" for index in range(5)]
+    delta_waits, full_has_read, full_may_end = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def delta_listing(since: AwareDatetime | None = None) -> AsyncGenerator[SourceItem]:
+        delta_waits.set()
+        await full_has_read.wait()
+        for name in names:
+            yield _item(name)
+
+    async def full_listing(since: AwareDatetime | None = None) -> AsyncGenerator[SourceItem]:
+        for name in names:
+            yield _item(name)
+        await full_may_end.wait()
+
+    delta_adapter = FakeSourceAdapter(fixture.source)
+    full_adapter = FakeSourceAdapter(fixture.source)
+    delta_adapter.list_items = delta_listing  # type: ignore[method-assign]
+    full_adapter.list_items = full_listing  # type: ignore[method-assign]
+    delta = asyncio.create_task(
+        fixture.service.reconcile(fixture.source, SyncRunKind.DELTA, delta_adapter, plan=False)
+    )
+    async with asyncio.timeout(5):
+        await delta_waits.wait()
+    full = asyncio.create_task(
+        fixture.service.reconcile(fixture.source, SyncRunKind.FULL, full_adapter, plan=False)
+    )
+    async with asyncio.timeout(5):
+        while (
+            committed := await fixture.runs.latest_run(fixture.source.id, SyncRunKind.FULL)
+        ) is None or committed.items_seen < len(names):
+            await asyncio.sleep(0)
+        full_has_read.set()
+        delta_run = await delta
+        full_may_end.set()
+        full_run = await full
+    assert delta_run.started_at < full_run.started_at, "the premise: the delta began first"
+    assert (delta_run.status, delta_run.items_seen) == (SyncRunStatus.COMPLETED, len(names))
+    assert full_run.status is SyncRunStatus.COMPLETED
+    assert full_run.items_retracted == 0
+    for name in names:
+        stored = await fixture.media_items.get_by_external_id(fixture.source.id, name)
+        assert stored is not None and stored.available is True, f"{name} was retracted"
+
+
 # -- what a walk tells a client --------------------------------------------
 
 
