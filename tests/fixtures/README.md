@@ -100,6 +100,25 @@ indistinguishable to the code under test and costs nothing, so it is always
 preferred. If a case ever genuinely needs a well-known id — none does today —
 say so at that case, with the reason.
 
+## Home Assistant
+
+`homeassistant/shape.json` is the one committed capture, because it holds no
+value at all: `scripts/capture_ha_shape.py` records each key path of HA's
+websocket answers and the type names seen there. The rows every adapter test
+reads are rendered from a `HouseSnapshot` by `tests/fakes/home_assistant_rows.py`,
+and `tests/unit/test_fixtures_homeassistant.py` holds them to the shape both
+ways — no invented path, no missing key — and fails if a value or an entity id
+reaches the shape. MACs are under `02:00:00` and hosts in `192.0.2.0/24`.
+
+The label registry is unrecorded: the house had no labels when it was
+captured, so `label_row` carries HA core's keys, the shape's `labels` entry is
+empty, and an entity row's `labels[]` items are exempted by name (`_PENDING`)
+until a capture after the first confirm fills both.
+
+    set -a; . ~/code/ha-home-panel/.env.local; set +a
+    USHER_HA_URL="$VITE_HA_URL" USHER_HA_TOKEN="$VITE_HA_TOKEN" \
+      uv run python scripts/capture_ha_shape.py --listen 30 > /var/tmp/ha-shape.json
+
 ## Regenerating
 
 Never paste a live capture in. Both capture scripts replace every leaf value

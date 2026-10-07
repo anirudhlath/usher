@@ -1,0 +1,566 @@
+{
+  "areas": {
+    "aliases": [
+      "list"
+    ],
+    "area_id": [
+      "str"
+    ],
+    "created_at": [
+      "float"
+    ],
+    "floor_id": [
+      "NoneType"
+    ],
+    "humidity_entity_id": [
+      "NoneType"
+    ],
+    "icon": [
+      "NoneType",
+      "str"
+    ],
+    "labels": [
+      "list"
+    ],
+    "modified_at": [
+      "float"
+    ],
+    "name": [
+      "str"
+    ],
+    "picture": [
+      "NoneType"
+    ],
+    "temperature_entity_id": [
+      "NoneType"
+    ]
+  },
+  "auth_ok": {
+    "ha_version": [
+      "str"
+    ],
+    "type": [
+      "str"
+    ]
+  },
+  "auth_required": {
+    "ha_version": [
+      "str"
+    ],
+    "type": [
+      "str"
+    ]
+  },
+  "devices": {
+    "area_id": [
+      "NoneType",
+      "str"
+    ],
+    "config_entries": [
+      "list"
+    ],
+    "config_entries[]": [
+      "str"
+    ],
+    "config_entries_subentries": [
+      "dict"
+    ],
+    "configuration_url": [
+      "NoneType",
+      "str"
+    ],
+    "connections": [
+      "list"
+    ],
+    "connections[]": [
+      "list"
+    ],
+    "connections[][]": [
+      "str"
+    ],
+    "created_at": [
+      "float"
+    ],
+    "disabled_by": [
+      "NoneType"
+    ],
+    "entry_type": [
+      "NoneType",
+      "str"
+    ],
+    "hw_version": [
+      "NoneType",
+      "str"
+    ],
+    "id": [
+      "str"
+    ],
+    "identifiers": [
+      "list"
+    ],
+    "identifiers[]": [
+      "list"
+    ],
+    "identifiers[][]": [
+      "str"
+    ],
+    "labels": [
+      "list"
+    ],
+    "manufacturer": [
+      "NoneType",
+      "str"
+    ],
+    "model": [
+      "NoneType",
+      "str"
+    ],
+    "model_id": [
+      "NoneType",
+      "str"
+    ],
+    "modified_at": [
+      "float"
+    ],
+    "name": [
+      "str"
+    ],
+    "name_by_user": [
+      "NoneType",
+      "str"
+    ],
+    "primary_config_entry": [
+      "str"
+    ],
+    "serial_number": [
+      "NoneType",
+      "str"
+    ],
+    "sw_version": [
+      "NoneType",
+      "str"
+    ],
+    "via_device_id": [
+      "NoneType",
+      "str"
+    ]
+  },
+  "entities": {
+    "area_id": [
+      "NoneType",
+      "str"
+    ],
+    "categories": [
+      "dict"
+    ],
+    "config_entry_id": [
+      "NoneType",
+      "str"
+    ],
+    "config_subentry_id": [
+      "NoneType"
+    ],
+    "created_at": [
+      "float"
+    ],
+    "device_id": [
+      "NoneType",
+      "str"
+    ],
+    "disabled_by": [
+      "NoneType",
+      "str"
+    ],
+    "entity_category": [
+      "NoneType",
+      "str"
+    ],
+    "entity_id": [
+      "str"
+    ],
+    "has_entity_name": [
+      "bool"
+    ],
+    "hidden_by": [
+      "NoneType"
+    ],
+    "icon": [
+      "NoneType"
+    ],
+    "id": [
+      "str"
+    ],
+    "labels": [
+      "list"
+    ],
+    "modified_at": [
+      "float"
+    ],
+    "name": [
+      "NoneType",
+      "str"
+    ],
+    "options": [
+      "dict"
+    ],
+    "original_name": [
+      "NoneType",
+      "str"
+    ],
+    "platform": [
+      "str"
+    ],
+    "translation_key": [
+      "NoneType",
+      "str"
+    ],
+    "unique_id": [
+      "str"
+    ]
+  },
+  "entity": {
+    "aliases": [
+      "list"
+    ],
+    "aliases[]": [
+      "NoneType"
+    ],
+    "area_id": [
+      "NoneType",
+      "str"
+    ],
+    "capabilities": [
+      "NoneType",
+      "dict"
+    ],
+    "categories": [
+      "dict"
+    ],
+    "config_entry_id": [
+      "NoneType",
+      "str"
+    ],
+    "config_subentry_id": [
+      "NoneType"
+    ],
+    "created_at": [
+      "float"
+    ],
+    "device_class": [
+      "NoneType",
+      "str"
+    ],
+    "device_id": [
+      "NoneType",
+      "str"
+    ],
+    "disabled_by": [
+      "NoneType",
+      "str"
+    ],
+    "entity_category": [
+      "NoneType",
+      "str"
+    ],
+    "entity_id": [
+      "str"
+    ],
+    "has_entity_name": [
+      "bool"
+    ],
+    "hidden_by": [
+      "NoneType"
+    ],
+    "icon": [
+      "NoneType"
+    ],
+    "id": [
+      "str"
+    ],
+    "labels": [
+      "list"
+    ],
+    "modified_at": [
+      "float"
+    ],
+    "name": [
+      "NoneType",
+      "str"
+    ],
+    "options": [
+      "dict"
+    ],
+    "original_device_class": [
+      "NoneType",
+      "str"
+    ],
+    "original_icon": [
+      "NoneType",
+      "str"
+    ],
+    "original_name": [
+      "NoneType",
+      "str"
+    ],
+    "platform": [
+      "str"
+    ],
+    "translation_key": [
+      "NoneType",
+      "str"
+    ],
+    "unique_id": [
+      "str"
+    ]
+  },
+  "event": {
+    "event": [
+      "dict"
+    ],
+    "event.context": [
+      "dict"
+    ],
+    "event.context.id": [
+      "str"
+    ],
+    "event.context.parent_id": [
+      "NoneType"
+    ],
+    "event.context.user_id": [
+      "NoneType"
+    ],
+    "event.data": [
+      "dict"
+    ],
+    "event.data.entity_id": [
+      "str"
+    ],
+    "event.data.new_state": [
+      "dict"
+    ],
+    "event.data.new_state.attributes": [
+      "dict"
+    ],
+    "event.data.new_state.context": [
+      "dict"
+    ],
+    "event.data.new_state.entity_id": [
+      "str"
+    ],
+    "event.data.new_state.last_changed": [
+      "str"
+    ],
+    "event.data.new_state.last_reported": [
+      "str"
+    ],
+    "event.data.new_state.last_updated": [
+      "str"
+    ],
+    "event.data.new_state.state": [
+      "str"
+    ],
+    "event.data.old_state": [
+      "dict"
+    ],
+    "event.data.old_state.attributes": [
+      "dict"
+    ],
+    "event.data.old_state.context": [
+      "dict"
+    ],
+    "event.data.old_state.entity_id": [
+      "str"
+    ],
+    "event.data.old_state.last_changed": [
+      "str"
+    ],
+    "event.data.old_state.last_reported": [
+      "str"
+    ],
+    "event.data.old_state.last_updated": [
+      "str"
+    ],
+    "event.data.old_state.state": [
+      "str"
+    ],
+    "event.event_type": [
+      "str"
+    ],
+    "event.origin": [
+      "str"
+    ],
+    "event.time_fired": [
+      "str"
+    ],
+    "id": [
+      "int"
+    ],
+    "type": [
+      "str"
+    ]
+  },
+  "labels": {},
+  "refusal": {
+    "error": [
+      "dict"
+    ],
+    "error.code": [
+      "str"
+    ],
+    "error.message": [
+      "str"
+    ],
+    "id": [
+      "int"
+    ],
+    "success": [
+      "bool"
+    ],
+    "type": [
+      "str"
+    ]
+  },
+  "result": {
+    "id": [
+      "int"
+    ],
+    "result": [
+      "NoneType",
+      "list"
+    ],
+    "result[]": [
+      "dict"
+    ],
+    "success": [
+      "bool"
+    ],
+    "type": [
+      "str"
+    ]
+  },
+  "states": {
+    "attributes": [
+      "dict"
+    ],
+    "attributes.active_queue": [
+      "str"
+    ],
+    "attributes.app_id": [
+      "str"
+    ],
+    "attributes.app_name": [
+      "str"
+    ],
+    "attributes.assumed_state": [
+      "bool"
+    ],
+    "attributes.device_class": [
+      "str"
+    ],
+    "attributes.entity_picture": [
+      "str"
+    ],
+    "attributes.entity_picture_local": [
+      "NoneType"
+    ],
+    "attributes.friendly_name": [
+      "str"
+    ],
+    "attributes.group_members": [
+      "list"
+    ],
+    "attributes.group_members[]": [
+      "str"
+    ],
+    "attributes.icon": [
+      "str"
+    ],
+    "attributes.is_volume_muted": [
+      "bool"
+    ],
+    "attributes.mass_player_type": [
+      "str"
+    ],
+    "attributes.media_album_name": [
+      "str"
+    ],
+    "attributes.media_artist": [
+      "str"
+    ],
+    "attributes.media_content_id": [
+      "str"
+    ],
+    "attributes.media_content_type": [
+      "str"
+    ],
+    "attributes.media_duration": [
+      "int"
+    ],
+    "attributes.media_playlist": [
+      "str"
+    ],
+    "attributes.media_position": [
+      "int"
+    ],
+    "attributes.media_position_updated_at": [
+      "str"
+    ],
+    "attributes.media_title": [
+      "str"
+    ],
+    "attributes.queue_size": [
+      "int"
+    ],
+    "attributes.repeat": [
+      "str"
+    ],
+    "attributes.restored": [
+      "bool"
+    ],
+    "attributes.shuffle": [
+      "bool"
+    ],
+    "attributes.source": [
+      "str"
+    ],
+    "attributes.source_list": [
+      "list"
+    ],
+    "attributes.source_list[]": [
+      "str"
+    ],
+    "attributes.supported_features": [
+      "int"
+    ],
+    "attributes.volume_level": [
+      "float"
+    ],
+    "context": [
+      "dict"
+    ],
+    "context.id": [
+      "str"
+    ],
+    "context.parent_id": [
+      "NoneType"
+    ],
+    "context.user_id": [
+      "NoneType"
+    ],
+    "entity_id": [
+      "str"
+    ],
+    "last_changed": [
+      "str"
+    ],
+    "last_reported": [
+      "str"
+    ],
+    "last_updated": [
+      "str"
+    ],
+    "state": [
+      "str"
+    ]
+  }
+}
