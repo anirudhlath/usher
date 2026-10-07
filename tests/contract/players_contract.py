@@ -35,6 +35,14 @@ def _area(house: HouseSnapshot, entity_id: str) -> str | None:
     return house.area_of(entity)
 
 
+def _roles(house: HouseSnapshot) -> dict[str, DeviceRole | None]:
+    return {one.entity_id: one.role for one in house.entities}
+
+
+def _placed(house: HouseSnapshot) -> dict[str, str | None]:
+    return {one.device_id: one.area_id for one in house.devices}
+
+
 def _reading(house: HouseSnapshot, entity_id: str) -> str | None:
     state = house.state(entity_id)
     return state.state if state is not None else None
@@ -53,7 +61,8 @@ class PlayersContract:
             lambda house: _role(house, SHIELD) is DeviceRole.USE, timeout=1.0
         )
         assert _role(house, SHIELD) is DeviceRole.USE
-        assert _role(house, APPLE_TV) is DeviceRole.USE, "no other player moved"
+        expected = _roles(this_house()) | {SHIELD: DeviceRole.USE}
+        assert _roles(house) == expected, "no other player moved"
 
     async def test_a_new_role_replaces_the_old_one(self, harness: PlayersHarness) -> None:
         assert _role(harness.players.snapshot(), APPLE_TV) is DeviceRole.USE, "the premise"
@@ -62,6 +71,8 @@ class PlayersContract:
             lambda house: _role(house, APPLE_TV) is not DeviceRole.USE, timeout=1.0
         )
         assert _role(house, APPLE_TV) is DeviceRole.IGNORE
+        expected = _roles(this_house()) | {APPLE_TV: DeviceRole.IGNORE}
+        assert _roles(house) == expected, "no other player moved"
 
     async def test_a_device_is_placed_and_reported_back(self, harness: PlayersHarness) -> None:
         assert _area(harness.players.snapshot(), SHIELD) is None, "the premise"
@@ -70,6 +81,8 @@ class PlayersContract:
             lambda house: _area(house, SHIELD) is not None, timeout=1.0
         )
         assert _area(house, SHIELD) == BEDROOM
+        expected = _placed(this_house()) | {SHIELD_DEVICE: BEDROOM}
+        assert _placed(house) == expected, "no other device moved"
 
     async def test_a_change_at_the_registry_reaches_the_snapshot(
         self, harness: PlayersHarness
