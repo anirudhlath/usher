@@ -3967,6 +3967,23 @@ def test_a_malformed_state_change_raises_for_the_caller_to_count(data: object) -
         state_change(data)
 ```
 
+Add one more case, `test_every_type_the_shape_records_at_a_read_key_reads`, so the mapping is held to every type a live HA sends, not only to the ones `this_house` renders. Write a table `_READ_KEYS` of every key the mapping reads, by shape kind:
+- `areas`: `area_id`, `name`;
+- `devices`: `id`, `name_by_user`, `name`, `model`, `manufacturer`, `area_id`;
+- `entities`: `entity_id`, `platform`, `device_id`, `area_id`, `name`, `original_name`, `disabled_by`, `labels`;
+- `states`: `entity_id`, `state`, and the `attributes.` paths `friendly_name`, `app_id`, `app_name`, `media_title`, `media_duration`, `media_position`, `media_position_updated_at`.
+
+For each `(kind, key)` and each type name `recorded()[kind][key]` lists, set the Apple TV's row (its device's row for `devices`, the first area's for `areas`) to a value of that type, and assert that the list reader drops nothing. Keep the row's own value where it already has that type, and otherwise use:
+- `None`;
+- `"sample"` (an ISO instant for `media_position_updated_at`);
+- `1`, `1.5`, `True`, `[]` or `{}`.
+
+State two premises before asserting:
+- `_READ_KEYS`' paths are all in the shape;
+- the pairs exercised include `("devices", "model", "NoneType")`, `("devices", "manufacturer", "NoneType")`, `("entities", "device_id", "NoneType")` and `("entities", "area_id", "str")`, which `this_house` never renders.
+
+Plant `model=_text(found, "model")` in `to_device`, and expect this case alone to fail.
+
 - [ ] **Step 2: Run them to verify they fail**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_adapters_homeassistant_mapping.py`
