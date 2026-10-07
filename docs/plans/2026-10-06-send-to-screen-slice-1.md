@@ -7854,11 +7854,14 @@ by default ([08](08-operations.md)).
   players_unavailable`, and the write may still land.
 - **`/ways` ranks every available copy on every device through every matching
   recipe**, grouped by screen. Hands-free ways come first by quality
-  (resolution, then HDR, then audio, then container), then ways that need a
-  press at the TV, then ways that cannot play, each with its `refusal`. On an
-  equal score a `proven` recipe ranks first; every recipe is `proven: false`
-  until a send has shown it. The first playable way of each screen is `best`,
-  and every other playable way says what it `gives_up` against it. A way's
+  (resolution, then HDR, then audio — lossless object audio, lossless, lossy
+  multichannel, stereo — then container), then ways that need a press at the
+  TV, then ways that cannot play, each with its `refusal`. On an equal score a
+  `proven` recipe ranks first; every recipe is `proven: false` until a send
+  has shown it. The first playable way of each screen is `best`, and every
+  other playable way says what it `gives_up` against it, naming only the
+  shortfalls its copy's facts show; `facts_known: false` marks a way whose
+  copy lacks a fact its recipe checks. A way's
   `id` is stable over screen, player, recipe and copy. `?screen=` takes an
   area id; one that is not a screen is `422 validation_failed`.
 - **`/ways` mints no ticket and calls no source**, unlike `/play`.
