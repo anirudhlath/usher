@@ -54,7 +54,7 @@ implementation talks to one nameable external service (`emby/` →
 5. **`api/` maps domain models to response DTOs.** Wire format is versioned
    independently of internal models.
 
-Import discipline is enforced in CI by `import-linter`: **Thirteen contracts**.
+Import discipline is enforced in CI by `import-linter`: **Fourteen contracts**.
 `usher.api.routers` may not name `usher.composition`,
 `usher.services.curation` or `usher.ports.llm`; it reaches the wiring through
 `usher.api.deps`. `usher.config` imports nothing above `usher.domain`.

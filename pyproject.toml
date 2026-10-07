@@ -250,6 +250,23 @@ forbidden_modules = [
     "usher.adapters.tmdb",
 ]
 
+# The websocket transport is shared the way `adapters/http.py` is, so an edge back into
+# an adapter is a cycle that resolves quietly. Every adapter package is listed;
+# `test_both_shared_helper_contracts_forbid_every_adapter_package` keeps it so.
+[[tool.importlinter.contracts]]
+name = "the shared websocket helper imports no concrete adapter"
+type = "forbidden"
+source_modules = ["usher.adapters.websocket"]
+forbidden_modules = [
+    "usher.adapters.bulk",
+    "usher.adapters.embedding",
+    "usher.adapters.emby",
+    "usher.adapters.images",
+    "usher.adapters.llm",
+    "usher.adapters.search",
+    "usher.adapters.tmdb",
+]
+
 # An import between two submodules of `usher.ports.repository` is invisible to every
 # top-level contract. `independence` forbids either direction between any pair,
 # indirect chains included. `_results` is absent: every aggregate may import it.
