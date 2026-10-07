@@ -4310,6 +4310,7 @@ git commit -m "homeassistant: read HA's registry and state rows, a bad row dropp
 **Files:**
 - Create: `src/usher/adapters/homeassistant/session.py`
 - Create: `tests/fakes/home_assistant.py`
+- Modify: `tests/unit/test_fixtures_homeassistant.py` (add `tests/fakes/home_assistant.py` to `_COMMITTED`: Task 6's text scan derives every fake naming `home_assistant_rows` and fails until it is listed)
 - Test: `tests/unit/test_adapters_homeassistant_session.py`
 
 **Interfaces:**
@@ -8965,10 +8966,10 @@ behaviour is PRD 07's `## Players`; the design is
 
 ```bash
 uv run pytest tests/unit -k "house or recipes or screens or ways or players or home_assistant"
-# Read-only. Prints key paths and type names, never a value.
-set -a; . ~/code/ha-home-panel/.env.local; set +a
-USHER_HA_URL="$VITE_HA_URL" USHER_HA_TOKEN="$VITE_HA_TOKEN" \
-  uv run python scripts/capture_ha_shape.py --listen 30 > /var/tmp/ha-shape.json
+# Read-only: key paths and type names, never a value. Capture while a player plays.
+set -a; . ./.env; set +a
+uv run python scripts/capture_ha_shape.py --listen 30 \
+  --merge tests/fixtures/homeassistant/shape.json > /var/tmp/ha-shape.json
 ```
 
 ## Writing to HA
@@ -9140,12 +9141,13 @@ Pick a title the dev catalog holds a copy of, and run `curl -s "localhost:8765/t
 
 - [ ] **Step 6: Record the label registry's shape, and drop the exemption**
 
-Re-run the capture with the owner's ordinary token, now that the house has labels:
+Re-run the capture with the owner's ordinary token, now that the house has labels. Check first that a player reads `playing`, as in Task 6 Step 2, and merge over the committed shape so no path recorded before is lost:
 
 ```bash
 set -a; . ~/code/ha-home-panel/.env.local; set +a
 USHER_HA_URL="$VITE_HA_URL" USHER_HA_TOKEN="$VITE_HA_TOKEN" \
-  uv run python scripts/capture_ha_shape.py --listen 30 > /var/tmp/ha-shape-labels.json
+  uv run python scripts/capture_ha_shape.py --listen 30 \
+  --merge tests/fixtures/homeassistant/shape.json > /var/tmp/ha-shape-labels.json
 ```
 
 Run Task 6's leak checks against it, then `cp` it over `tests/fixtures/homeassistant/shape.json`. Then:
