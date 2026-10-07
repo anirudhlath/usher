@@ -1,5 +1,6 @@
 """Behaviour every `Players` implementation must satisfy, over `this_house()`."""
 
+import asyncio
 from abc import ABC, abstractmethod
 
 import pytest
@@ -63,6 +64,9 @@ class PlayersContract:
         assert _role(house, SHIELD) is DeviceRole.USE
         expected = _roles(this_house()) | {SHIELD: DeviceRole.USE}
         assert _roles(house) == expected, "no other player moved"
+        assert house == this_house(shield=DeviceRole.USE), (
+            "the write lost a reading or changed a row besides the role"
+        )
 
     async def test_a_new_role_replaces_the_old_one(self, harness: PlayersHarness) -> None:
         assert _role(harness.players.snapshot(), APPLE_TV) is DeviceRole.USE, "the premise"
@@ -73,6 +77,9 @@ class PlayersContract:
         assert _role(house, APPLE_TV) is DeviceRole.IGNORE
         expected = _roles(this_house()) | {APPLE_TV: DeviceRole.IGNORE}
         assert _roles(house) == expected, "no other player moved"
+        assert house == this_house(apple_tv=DeviceRole.IGNORE), (
+            "the write lost a reading or changed a row besides the role"
+        )
 
     async def test_a_device_is_placed_and_reported_back(self, harness: PlayersHarness) -> None:
         assert _area(harness.players.snapshot(), SHIELD) is None, "the premise"
@@ -81,8 +88,13 @@ class PlayersContract:
             lambda house: _area(house, SHIELD) is not None, timeout=1.0
         )
         assert _area(house, SHIELD) == BEDROOM
+        placed = _placed(house)
+        assert placed[SHIELD_DEVICE] == BEDROOM, "the device itself moved"
         expected = _placed(this_house()) | {SHIELD_DEVICE: BEDROOM}
-        assert _placed(house) == expected, "no other device moved"
+        assert placed == expected, "no other device moved"
+        assert house.with_registries(devices=this_house().devices) == this_house(), (
+            "the write lost a reading or changed a row besides the devices"
+        )
 
     async def test_a_change_at_the_registry_reaches_the_snapshot(
         self, harness: PlayersHarness
@@ -105,6 +117,11 @@ class PlayersContract:
     ) -> None:
         with pytest.raises(PortUnavailable, match=r"within 0\.05s"):
             await harness.players.wait_until(lambda house: False, timeout=0.05)
+
+    async def test_a_callers_deadline_cancels_the_wait(self, harness: PlayersHarness) -> None:
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(0.05):
+                await harness.players.wait_until(lambda house: False, timeout=10.0)
 
     async def test_a_role_for_a_player_that_does_not_exist_is_refused(
         self, harness: PlayersHarness

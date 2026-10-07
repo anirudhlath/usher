@@ -74,8 +74,8 @@ async def test_a_refusing_fake_raises_what_it_was_given_and_writes_nothing(
     with pytest.raises(PortAuthFailed) as raised:
         await write(players)
     assert raised.value is refusal
-    assert players.writes == []
-    assert players.snapshot() == this_house()
+    assert players.snapshot() == this_house(), "a refused write changed the house"
+    assert players.writes == [], "a refused write was recorded"
 
 
 @each_write

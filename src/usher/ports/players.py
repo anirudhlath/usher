@@ -32,8 +32,9 @@ class Players(ABC):
     async def wait_until(
         self, predicate: Callable[[HouseSnapshot], bool], *, timeout: float
     ) -> HouseSnapshot:
-        """The first reading `predicate` accepts, the current one included.
+        """The current reading if `predicate` accepts it, else a later one.
 
-        `PortUnavailable` naming `timeout` when none arrives in time. A write is
-        done when the registry reports it, not when it was sent.
+        Readings published in one turn of the loop are seen only as the last of
+        them. `PortUnavailable` naming `timeout` when none arrives in time. A write
+        is done when the registry reports it, not when it was sent.
         """
