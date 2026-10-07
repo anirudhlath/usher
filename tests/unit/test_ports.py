@@ -31,6 +31,7 @@ from usher.ports.images import ImageBlobStore, ImageFetcher
 from usher.ports.jobs import JobQueue
 from usher.ports.llm import LLMClient, LLMPurpose, LLMUsage
 from usher.ports.metadata import MetadataCandidate, MetadataProvider
+from usher.ports.players import Players
 from usher.ports.repository import (
     BackupRepository,
     BulkCatalogRepository,
@@ -119,6 +120,7 @@ ALL_PORTS: list[type[ABC]] = [
     Row,
     RowProvider,
     ScheduledJob,
+    Players,
 ]
 
 
