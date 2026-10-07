@@ -108,22 +108,34 @@ websocket answers and the type names seen there. The rows every adapter test
 reads are rendered from a `HouseSnapshot` by `tests/fakes/home_assistant_rows.py`,
 and `tests/unit/test_fixtures_homeassistant.py` holds them to the shape both
 ways — no invented path, no missing key — and fails if a value or an entity id
-reaches the shape. MACs are under `02:00:00` and hosts in `192.0.2.0/24`.
+reaches the shape in place of a type name or a key. MACs are under `02:00:00`
+and hosts in `192.0.2.0/24`, in the rows and in every committed HA file's text.
 
 The label registry is unrecorded: the house had no labels when it was
 captured, so `label_row` carries HA core's keys, the shape's `labels` entry is
 empty, and an entity row's `labels[]` items are exempted by name (`_PENDING`)
 until a capture after the first confirm fills both.
 
-    set -a; . ~/code/ha-home-panel/.env.local; set +a
-    USHER_HA_URL="$VITE_HA_URL" USHER_HA_TOKEN="$VITE_HA_TOKEN" \
-      uv run python scripts/capture_ha_shape.py --listen 30 > /var/tmp/ha-shape.json
+To capture again, start something playing on a player first: the `media_*`
+attribute paths exist only while one plays. Merge over the committed shape so
+no path is lost, and check that no value leaked before copying it into place.
+`.env` supplies `USHER_HA_URL` and `USHER_HA_TOKEN`; the script only reads.
+
+    set -a; . ./.env; set +a
+    uv run python scripts/capture_ha_shape.py --listen 30 \
+      --merge tests/fixtures/homeassistant/shape.json > /var/tmp/ha-shape.json
+    jq '[.. | strings] | unique' /var/tmp/ha-shape.json  # type names only
+    grep -c 'media_player\.' /var/tmp/ha-shape.json     # 0
+    cp /var/tmp/ha-shape.json tests/fixtures/homeassistant/shape.json
+    uv run pytest tests/unit/test_fixtures_homeassistant.py
 
 ## Regenerating
 
-Never paste a live capture in. Both capture scripts replace every leaf value
-with the *name of its type*, so their output is a shape to diff against, not
-a fixture to commit; each says so in its own module docstring.
+Never paste a TMDb or Emby capture in. `scripts/capture_tmdb_fixture.py` and
+`scripts/capture_emby_fixture.py` replace every leaf value with the *name of
+its type*, so their output is a shape to diff against, not a fixture to
+commit; each says so in its own module docstring. Home Assistant's shape,
+above, is the exception: it is committed because it is nothing but a shape.
 
 ```bash
 set -a; . ./.env; set +a

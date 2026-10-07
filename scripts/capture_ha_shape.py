@@ -64,7 +64,10 @@ def _walk(value: object, depth: int, path: str, found: dict[str, set[str]]) -> N
 
 
 def merged(rows: Iterable[object], depth: int) -> dict[str, list[str]]:
-    """The union of every row's paths, sorted, so a missing-or-null key shows both types."""
+    """The union of every row's paths and type names, sorted.
+
+    A key that is null in some row adds `NoneType`; a key missing from a row adds nothing.
+    """
     found: dict[str, set[str]] = {}
     for row in rows:
         for path, names in paths(row, depth).items():
