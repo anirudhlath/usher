@@ -1,8 +1,12 @@
 """Reading HA's rows: the round trip, HA's own precedence, and a bad row never stopping a list."""
 
+import ast
+import inspect
+import sys
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
+from types import FrameType
 from typing import Any
 
 import pytest
@@ -10,6 +14,7 @@ import pytest
 from tests.fakes.home_assistant_rows import LABEL_NAMES as FAKE_LABEL_NAMES
 from tests.fakes.home_assistant_rows import HouseRows, device_row, recorded, rows_of
 from tests.fakes.house import APPLE_TV, APPLE_TV_DEVICE, POSITION_UPDATED_AT, this_house
+from usher.adapters.homeassistant import mapping
 from usher.adapters.homeassistant.mapping import (
     LABEL_NAMES,
     MalformedRow,
@@ -293,8 +298,9 @@ _ATTRIBUTES_READ = (
     "media_position",
     "media_position_updated_at",
 )
-#: The paths each kind's list reader reads from the Apple TV's rendered row of that kind,
-#: `attributes.` ones nested; the case below asserts it equals what a `_Recording` sees read.
+#: The paths each kind's list reader reads from `_target`'s row of that kind: the first area's,
+#: the Apple TV's device's, or the Apple TV's own. `attributes.` ones are nested. The case below
+#: asserts it equals what a `_Recording` sees read.
 _READ_KEYS: dict[str, tuple[str, ...]] = {
     "areas": ("area_id", "name"),
     "devices": ("id", "name_by_user", "name", "model", "manufacturer", "area_id"),
@@ -326,6 +332,28 @@ _READ_ELSEWHERE: dict[str, frozenset[str]] = {
     "state_change": frozenset(
         {"entity_id", "new_state", *(f"new_state.{path}" for path in _READ_KEYS["states"])}
     ),
+}
+#: Parameters of mapping.py's own functions that take no key, by function.
+_NOT_KEYS: dict[str, frozenset[str]] = {
+    # The list's name, for an error message.
+    "_rows": frozenset({"what"}),
+}
+#: One spelling of each form `_keys_named` reads a key from, and one it skips.
+_FORMS = """
+K: Final = "by-constant"
+def _rows(answer, read, what): ...
+def _reader(row, key): ...
+_reader(row, "by-helper")
+_rows(row, read, "skipped")
+row.get("by-get")
+row["by-subscript"]
+anything(row, key="by-keyword")
+row.get(K)
+"""
+#: Public functions in mapping.py that read no row, each with what it takes instead.
+_PURE = {
+    "role_of": "an entry's labels, already read from its row",
+    "labels_with_role": "an entry's labels, already read from its row, and a role",
 }
 #: Types `this_house` never renders at these keys, and a live HA sends.
 _GAPS = {
@@ -373,7 +401,7 @@ def _target(rows: HouseRows, kind: str) -> dict[str, Any]:
 
 
 def _paths_read(kind: str) -> set[str]:
-    """What `kind`'s list reader reads from the Apple TV's rendered row of that kind."""
+    """What `kind`'s reader reads from `_target`'s row: the first area's, else the Apple TV's."""
     read: set[str] = set()
     lists: dict[str, list[object]] = {one: [] for one in _READ_KEYS}
     lists[kind] = [_Recording(_target(_rows(), kind), read)]
@@ -388,6 +416,74 @@ def _misread(read: Mapping[str, set[str]], listed: Mapping[str, Iterable[str]]) 
         [f"{kind}: +{path}" for kind in read for path in read[kind] - set(listed[kind])]
         + [f"{kind}: -{path}" for kind in listed for path in set(listed[kind]) - read[kind]]
     )
+
+
+def _string(node: ast.expr, constants: Mapping[str, str]) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return constants.get(node.id) if isinstance(node, ast.Name) else None
+
+
+def _key_arguments(node: ast.AST, params: Mapping[str, list[str]]) -> list[ast.expr]:
+    if isinstance(node, ast.Subscript):
+        return [node.slice]
+    if not isinstance(node, ast.Call):
+        return []
+    found = [keyword.value for keyword in node.keywords if keyword.arg == "key"]
+    if isinstance(node.func, ast.Attribute) and node.func.attr == "get":
+        return found + node.args[:1]
+    if isinstance(node.func, ast.Name) and node.func.id in params:
+        skipped = _NOT_KEYS.get(node.func.id, frozenset())
+        given = [
+            *zip(params[node.func.id], node.args, strict=False),
+            *((keyword.arg, keyword.value) for keyword in node.keywords if keyword.arg != "key"),
+        ]
+        found += [value for name, value in given if name not in skipped]
+    return found
+
+
+def _keys_named(source: str) -> list[tuple[str, int]]:
+    """Each key `source` names, with its line: a string constant, or a module constant's name.
+
+    A key is an argument to one of the module's own functions (less `_NOT_KEYS`), the first
+    argument of a `.get`, a subscript, or a `key=` keyword to anything.
+    """
+    tree = ast.parse(source)
+    constants: dict[str, str] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign | ast.AnnAssign) and isinstance(node.value, ast.Constant):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if isinstance(node.value.value, str):
+                value = node.value.value
+                constants.update({one.id: value for one in targets if isinstance(one, ast.Name)})
+    params = {
+        node.name: [arg.arg for arg in (*node.args.posonlyargs, *node.args.args)]
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+    }
+    return [
+        (key, argument.lineno)
+        for node in ast.walk(tree)
+        for argument in _key_arguments(node, params)
+        if (key := _string(argument, constants)) is not None
+    ]
+
+
+def _functions_entered(run: Callable[[], object]) -> set[str]:
+    """The names of mapping.py's functions `run` enters, off the interpreter's profile hook."""
+    entered: set[str] = set()
+
+    def profile(frame: FrameType, event: str, arg: object) -> None:
+        if event == "call" and frame.f_code.co_filename == mapping.__file__:
+            entered.add(frame.f_code.co_name)
+
+    previous = sys.getprofile()
+    sys.setprofile(profile)
+    try:
+        run()
+    finally:
+        sys.setprofile(previous)
+    return entered
 
 
 def _sample(path: str, type_name: str) -> object:
@@ -449,3 +545,32 @@ def test_each_reader_beside_the_lists_reads_only_its_own_paths() -> None:
     changed = state_change(_Recording(event, read["state_change"]))
     assert changed is not None and changed.state is not None, "the premise: the state was read"
     assert _misread(read, _READ_ELSEWHERE) == []
+
+
+def test_every_key_the_mapping_names_is_a_listed_path() -> None:
+    """A read no rendered row reaches, behind a short-circuit or a branch, still names its key."""
+    forms = {key for key, _ in _keys_named(_FORMS)}
+    assert forms == {"by-constant", "by-helper", "by-get", "by-subscript", "by-keyword"}, (
+        "the premise: the scan reads every form, and skips a `_NOT_KEYS` parameter"
+    )
+    listed = {
+        path.rsplit(".", 1)[-1]
+        for table in (_READ_KEYS, _READ_ELSEWHERE)
+        for paths in table.values()
+        for path in paths
+    }
+    named = _keys_named(inspect.getsource(mapping))
+    assert sorted(listed - {key for key, _ in named}) == [], "the premise: it names every one"
+    assert [f"{key} (line {line})" for key, line in named if key not in listed] == []
+
+
+def test_every_public_function_that_reads_a_row_is_held_to_its_paths() -> None:
+    public = {
+        name
+        for name, function in inspect.getmembers(mapping, inspect.isfunction)
+        if function.__module__ == mapping.__name__ and not name.startswith("_")
+    }
+    assert set(_PURE) | set(_READ_ELSEWHERE) <= public, "the premise: each exemption is public"
+    entered = _functions_entered(lambda: [_paths_read(kind) for kind in _READ_KEYS])
+    assert {"registries_from_rows", "states_from_rows"} <= entered, "the premise: both lists ran"
+    assert sorted(public - entered - set(_READ_ELSEWHERE) - set(_PURE)) == []
