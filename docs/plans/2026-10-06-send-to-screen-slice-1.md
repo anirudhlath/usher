@@ -14,7 +14,7 @@
 - import-linter.
 - The Console's settings catalogue and generated schema in `web/`.
 
-**Spec:** `docs/specs/2026-10-06-send-to-screen-design.md`. This plan covers slice 1 of its five slices. Read the spec beside this plan. The plan departs from the spec in eleven places, and each departure is called out where it happens:
+**Spec:** `docs/specs/2026-10-06-send-to-screen-design.md`. This plan covers slice 1 of its five slices. Read the spec beside this plan. The plan departs from the spec in twelve places, and each departure is called out where it happens:
 
 1. **`proven`, not `measured`.** The prose hook (`.claude/hooks/guard_prose.py`) refuses the word "measured" in Python prose. A field whose own docstring cannot name it invites drift, so the recipe field and the API field are both `proven`, against the default `assumed` (Task 3).
 2. **The port has no `call_service` yet.** Slice 2 adds it, with the dispatcher that uses it (Task 9).
@@ -27,6 +27,7 @@
 9. **Container sets carry MP4's sibling names, and HDR is not tied to a container.** Infuse admits `m4v` and `mov` beside the spec's MKV and MP4, and AirPlay and Cast admit `m4v`, because a source can name an MP4 file by its family (`mov,mp4,m4a,…`, Task 5). `DirectPlay` cannot tie an HDR format to a container, so AirPlay's "Dolby Vision in MP4" admits Dolby Vision in any of its containers. Every fact is `assumed` either way (Task 3).
 10. **Provenance is per recipe, not per fact.** One `proven` flag covers all of a recipe's facts, since slice 1 proves none of them. How a recipe resumes, its stage predicates and its stage deadlines arrive with slice 2, which reads them (Task 3).
 11. **HDR is as fine as `HdrFormat` allows, and Infuse has no audio limit.** `HdrFormat` has HDR10, Dolby Vision and HLG, so a recipe cannot name HDR10+ or a Dolby Vision profile: Infuse admits every Dolby Vision file and Cast refuses every one, profile 8.1 included. The ranking has no HDR10+ step either, and places HLG between HDR10 and SDR, where the spec does not rank it. The spec's "TrueHD Atmos, DTS-HD" for Infuse names the best it plays, not the only audio it accepts, so Infuse's audio has no limit at all. Every fact is `assumed` either way (Tasks 3 and 5).
+12. **A candidate needs a recipe matching its integration and its model**, not its integration alone. The spec keys recipes by model family, so a Cast speaker such as a Nest is never offered as a player (Task 4).
 
 ## Global Constraints
 
@@ -1319,6 +1320,8 @@ git commit -m "players: three recipes for this house, every fact assumed until p
 ---
 
 ### Task 4: The projection
+
+Departure 12: a candidate needs a recipe matching its integration and its model.
 
 **Files:**
 - Create: `src/usher/domain/screens.py`
