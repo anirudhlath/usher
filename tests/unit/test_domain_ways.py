@@ -18,6 +18,7 @@ from usher.domain.source import MediaItem
 from usher.domain.ways import (
     _AUDIO_RANK,
     _TIER_SPAN,
+    _UNKNOWN_AUDIO_RANK,
     Resolution,
     _audio_rank,
     _codec,
@@ -263,6 +264,25 @@ def test_a_fact_its_profile_does_not_constrain_is_not_needed(missing: str, const
 def test_audio_outside_the_profile_is_refused_by_name() -> None:
     item = _variant(HDR10_MP4, "truehd-mp4", audio_codec="truehd")
     assert refusal(item, RECIPE["apple_tv.airplay"]) == "TRUEHD OVER AIRPLAY"
+
+
+def test_a_profile_listing_pcm_admits_a_copy_in_a_pcm_sample_format() -> None:
+    airplay = RECIPE["apple_tv.airplay"]
+    pcm_only = replace(airplay.direct_play, audio_codecs=frozenset({"pcm"}))
+    with_pcm = replace(airplay, key="test.pcm", direct_play=pcm_only)
+    aac = _variant(PCM_MOV, "aac-mov", audio_codec="aac")
+    _tall_enough("apple_tv.airplay", PCM_MOV)
+    assert PCM_MOV.audio_codec == "pcm_s24le", "the premise: the copy names a sample format"
+    assert refusal(aac, with_pcm) == "AAC OVER AIRPLAY", "the premise: the profile constrains audio"
+    assert refusal(PCM_MOV, with_pcm) is None
+
+
+def test_every_shipped_profile_names_its_audio_codecs_by_family() -> None:
+    named = {
+        (recipe.key, codec) for recipe in RECIPES for codec in recipe.direct_play.audio_codecs or ()
+    }
+    assert named, "the premise: some shipped profile names its audio"
+    assert {(key, codec) for key, codec in named if _codec(codec) != codec} == set()
 
 
 def test_a_copy_taller_than_the_profile_is_refused_by_height() -> None:
@@ -514,8 +534,11 @@ def test_every_audio_rank_fits_inside_one_tier() -> None:
     assert {_audio_rank(_codec(name)) for name in spellings} == {_AUDIO_RANK["pcm"]}, (
         "the premise: every PCM spelling reads PCM's rank from the table"
     )
-    assert min(_AUDIO_RANK.values()) >= 0
-    assert {codec: rank for codec, rank in _AUDIO_RANK.items() if rank >= _TIER_SPAN} == {}
+    assert {_audio_rank(_codec(name)) for name in (None, "vorbis")} == {_UNKNOWN_AUDIO_RANK}, (
+        "the premise: a missing or unlisted codec takes the named default"
+    )
+    ranks = {**_AUDIO_RANK, "unlisted": _UNKNOWN_AUDIO_RANK}
+    assert {codec: rank for codec, rank in ranks.items() if not 0 <= rank < _TIER_SPAN} == {}
 
 
 @pytest.mark.parametrize(

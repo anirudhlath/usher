@@ -52,6 +52,8 @@ _AUDIO_RANK: Final[dict[str, int]] = {
     "opus": 1,
     "mp3": 1,
 }
+# The rank of a codec the table does not list, or of none at all.
+_UNKNOWN_AUDIO_RANK: Final = 0
 _LOSSLESS_OBJECT_AUDIO: Final = frozenset({"truehd"})
 _LOSSLESS_AUDIO: Final = frozenset({"flac", "pcm"})
 # Above every codec rank, so the audio score is the tier first and the codec within it.
@@ -105,7 +107,7 @@ def _codec(codec: str | None) -> str:
 
 
 def _audio_rank(name: str) -> int:
-    return _AUDIO_RANK.get(name, 0)
+    return _AUDIO_RANK.get(name, _UNKNOWN_AUDIO_RANK)
 
 
 def _lossless_tier(name: str) -> _AudioTier:

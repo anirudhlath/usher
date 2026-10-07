@@ -20,7 +20,11 @@ class Handover(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class DirectPlay:
-    """What plays without transcoding. `None` constrains nothing about that fact."""
+    """What plays without transcoding. `None` constrains nothing about that fact.
+
+    Audio codecs are named by family, as a copy's codec is folded before the
+    check: PCM is `pcm`, never a sample format such as `pcm_s16le`.
+    """
 
     containers: frozenset[str] | None
     video_codecs: frozenset[str] | None
