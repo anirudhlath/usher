@@ -528,6 +528,10 @@ class ReconcileService:
                 async for item in items:
                     await queue.put(_Listed(item))
         except Exception as exc:
+            # Nothing reads the queue once the reader is cancelled, so an error the
+            # listing's close raised must not take the cancellation's place.
+            if (task := asyncio.current_task()) is not None and task.cancelling():
+                raise asyncio.CancelledError from exc
             await queue.put(_Listed(error=exc))
             return
         await queue.put(_Listed())
@@ -658,6 +662,10 @@ class ReconcileService:
                     async for page in pages:
                         await queue.put(_Fetched(unit.unit_key, page))
             except Exception as exc:
+                # Nothing reads the queue once the walker is cancelled, so an error the
+                # listing's close raised must not take the cancellation's place.
+                if (task := asyncio.current_task()) is not None and task.cancelling():
+                    raise asyncio.CancelledError from exc
                 await queue.put(_Fetched(unit.unit_key, error=exc))
                 return
             await queue.put(_Fetched(unit.unit_key))

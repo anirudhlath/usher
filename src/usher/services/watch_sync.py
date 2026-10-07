@@ -421,6 +421,10 @@ class WatchStateSyncService:
                 async for state in states:
                     await queue.put(_Read(state))
         except Exception as exc:
+            # Nothing reads the queue once the reader is cancelled, so an error the
+            # listing's close raised must not take the cancellation's place.
+            if (task := asyncio.current_task()) is not None and task.cancelling():
+                raise asyncio.CancelledError from exc
             await queue.put(_Read(error=exc))
             return
         await queue.put(_Read())

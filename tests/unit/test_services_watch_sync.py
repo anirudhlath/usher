@@ -1965,6 +1965,49 @@ async def test_a_walk_that_fails_on_its_own_side_closes_the_listing_its_reader_h
     assert asyncio.all_tasks() - {asyncio.current_task()} == set(), "a task outlived the walk"
 
 
+class _CloseRaisingSourceAdapter(_StallingSourceAdapter):
+    """A stalling source whose walk raises as it is closed, however it ends."""
+
+    async def _walk_states(
+        self, since: AwareDatetime | None, start_index: int
+    ) -> AsyncGenerator[SourceWatchState]:
+        try:
+            async for state in super()._walk_states(since, start_index):
+                yield state
+        finally:
+            raise RuntimeError("the listing's close failed")
+
+
+async def test_a_walk_that_fails_on_its_own_side_ends_though_its_listings_close_raises() -> None:
+    """The stalled reader, cancelled, stays cancelled when its listing's close raises.
+
+    The batch's commit waits until the listing stalls with two states queued behind it,
+    then raises. A reader that put the close's error on that full queue would wait on a
+    queue nothing reads, and the walk, awaiting the reader, would never end.
+    """
+    fixture = _Fixture(batch_size=2)
+    adapter = fixture.adapter = _CloseRaisingSourceAdapter(fixture.source, stall_after=4)
+    await fixture.given_completed_walk()
+    for index in range(6):
+        await fixture.given_matched(f"movie-{index}")
+    commit = fixture.service._commit
+
+    async def _commit_failing_once_the_listing_stalls() -> None:
+        if fixture.commits:
+            await adapter.stalled.wait()
+            raise ConnectionError("the database went away")
+        await commit()
+
+    fixture.service._commit = _commit_failing_once_the_listing_stalls
+    with pytest.raises(ConnectionError, match="the database went away"):
+        async with asyncio.timeout(5):
+            await fixture.service.sync(fixture.source, adapter, user_id=fixture.user_id)
+    assert fixture.commits == 1, "the premise: the run's start committed, and its batch did not"
+    assert adapter.cancelled.is_set(), "the premise: the reader was cancelled at its stall"
+    assert adapter.closed.is_set(), "the premise: the listing was closed"
+    assert asyncio.all_tasks() - {asyncio.current_task()} == set(), "a task outlived the walk"
+
+
 async def test_a_cancelled_watch_walk_closes_its_run_and_stays_cancelled() -> None:
     fixture = _Fixture()
     adapter = fixture.adapter = _StallingSourceAdapter(fixture.source, stall_after=0)

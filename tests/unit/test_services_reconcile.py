@@ -1564,6 +1564,53 @@ async def test_a_failing_unit_cancels_the_walkers_still_fetching() -> None:
     assert walkers == []
 
 
+async def test_a_failing_unit_ends_the_walk_though_a_walkers_close_raises() -> None:
+    """A walker cancelled on a full queue stays cancelled when its listing's close raises.
+
+    Films fails at once. Saving it failed suspends, as a real save does, so Shows' walker
+    fills the queue meanwhile. A walker that put the close's error there would wait on a
+    queue nothing reads, and the walk, awaiting its walkers, would never end.
+    """
+    fixture = _Fixture(walkers=2)
+    _shelve(fixture, "Films", range(3))
+    _shelve(fixture, "Shows", range(10, 12))
+    fixture.adapter.fail_unit_after("Films", 0)
+    yielded = 0
+
+    async def endless() -> AsyncGenerator[UnitPage]:
+        nonlocal yielded
+        try:
+            for index in range(100):
+                yielded += 1
+                yield UnitPage((_item(f"m{100 + index}"),), resume_at=index + 1)
+        finally:
+            raise RuntimeError("the listing's close failed")
+
+    list_unit = fixture.adapter.list_unit
+
+    def listing(
+        key: str, *, start_index: int = 0, checkpoint: str | None = None
+    ) -> AsyncGenerator[UnitPage]:
+        if key == "library:Shows":
+            return endless()
+        return list_unit(key, start_index=start_index, checkpoint=checkpoint)
+
+    fixture.adapter.list_unit = listing  # type: ignore[method-assign]
+    save_unit = fixture.runs.save_unit
+
+    async def _saved_after_a_round_trip(unit: SyncRunUnit) -> None:
+        await asyncio.sleep(0.005)
+        await save_unit(unit)
+
+    fixture.runs.save_unit = _saved_after_a_round_trip  # type: ignore[method-assign]
+    async with asyncio.timeout(5):
+        run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    # A full queue of two, and one page waiting to join it.
+    assert yielded == 2 + 1, "the premise: Shows' walker was cancelled on a full queue"
+    assert run.status is SyncRunStatus.FAILED
+    assert "library Films went away" in (run.error or "")
+
+
 async def test_a_bug_in_a_walker_is_raised_not_recorded() -> None:
     """A walker hands the writer whatever it raised, so a bug ends the walk loudly.
 
@@ -2727,6 +2774,42 @@ async def test_a_truncated_single_walk_closes_its_listing() -> None:
     assert run.error_code == CEILING_ERROR_CODE, "the premise: the walk stopped at its ceiling"
     assert len(listings) == 1, "the premise: one listing, opened by this walk"
     assert closed == ["closed"]
+
+
+async def test_a_truncated_single_walk_ends_though_its_listings_close_raises() -> None:
+    """The reader, cancelled on a full queue, stays cancelled when its listing's close raises.
+
+    Each commit suspends, as a real one does, so the reader fills the queue again while
+    the last batch commits. A reader that put the close's error there would wait on a
+    queue nothing reads, and the walk, awaiting the reader, would never end.
+    """
+    fixture = _Fixture(batch_size=2)
+    yielded = 0
+
+    async def endless(since: AwareDatetime | None = None) -> AsyncGenerator[SourceItem]:
+        nonlocal yielded
+        try:
+            for index in range(100):
+                yielded += 1
+                yield _item(f"m{index}")
+        finally:
+            raise RuntimeError("the listing's close failed")
+
+    fixture.adapter.list_items = endless  # type: ignore[method-assign]
+    commit = fixture.service._commit
+
+    async def _commit_after_a_round_trip() -> None:
+        await asyncio.sleep(0.005)
+        await commit()
+
+    fixture.service._commit = _commit_after_a_round_trip
+    async with asyncio.timeout(5):
+        run = await fixture.service.reconcile(
+            fixture.source, SyncRunKind.FULL, fixture.adapter, plan=False, max_items=3
+        )
+    # The four items the walk took, a full queue of two, and one waiting to join it.
+    assert yielded == 4 + 2 + 1, "the premise: the reader was cancelled on a full queue"
+    assert (run.status, run.error_code) == (SyncRunStatus.FAILED, CEILING_ERROR_CODE)
 
 
 @pytest.mark.parametrize("heartbeat_at", [NOW - STALE_AFTER, None])
