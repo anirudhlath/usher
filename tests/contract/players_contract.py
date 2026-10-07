@@ -2,6 +2,7 @@
 
 import asyncio
 from abc import ABC, abstractmethod
+from dataclasses import replace
 
 import pytest
 
@@ -92,8 +93,12 @@ class PlayersContract:
         assert placed[SHIELD_DEVICE] == BEDROOM, "the device itself moved"
         expected = _placed(this_house()) | {SHIELD_DEVICE: BEDROOM}
         assert placed == expected, "no other device moved"
-        assert house.with_registries(devices=this_house().devices) == this_house(), (
-            "the write lost a reading or changed a row besides the devices"
+        moved = tuple(
+            replace(one, area_id=BEDROOM) if one.device_id == SHIELD_DEVICE else one
+            for one in this_house().devices
+        )
+        assert house == this_house().with_registries(devices=moved), (
+            "the write lost a reading or changed a row besides the device's area"
         )
 
     async def test_a_change_at_the_registry_reaches_the_snapshot(

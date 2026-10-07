@@ -259,9 +259,9 @@ def test_players_declares_exactly_these_four_methods() -> None:
     dispatcher that uses it. Adding it, or any other write, is that decision made
     visibly; doing it without editing this case is a failing test.
     """
-    assert Players.__abstractmethods__ == frozenset(
-        {"snapshot", "set_role", "set_device_area", "wait_until"}
-    )
+    four = frozenset({"snapshot", "set_role", "set_device_area", "wait_until"})
+    assert Players.__abstractmethods__ == four
+    assert {name for name in dir(Players) if not name.startswith("_")} == four
 
 
 def test_a_scheduled_job_declares_exactly_these_four_members() -> None:
