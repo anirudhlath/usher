@@ -107,9 +107,11 @@ value at all: `scripts/capture_ha_shape.py` records each key path of HA's
 websocket answers and the type names seen there. The rows every adapter test
 reads are rendered from a `HouseSnapshot` by `tests/fakes/home_assistant_rows.py`,
 and `tests/unit/test_fixtures_homeassistant.py` holds them to the shape both
-ways — no invented path, no missing key — and fails if a value or an entity id
-reaches the shape in place of a type name or a key. MACs are under `02:00:00`
-and hosts in `192.0.2.0/24`, in the rows and in every committed HA file's text.
+ways — no invented path, no missing key. It fails if anything but a type name
+sits where a type name goes, if a key is not a lowercase name (a ULID or a hex
+id is not), or if a path contains a player's entity id. MACs are under
+`02:00:00` and hosts in `192.0.2.0/24`, in the rows, and in the text of the
+fixture, fakes and script the scan derives.
 
 The label registry is unrecorded: the house had no labels when it was
 captured, so `label_row` carries HA core's keys, the shape's `labels` entry is
