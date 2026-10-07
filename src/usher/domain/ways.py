@@ -45,6 +45,7 @@ _AUDIO_RANK: Final[dict[str, int]] = {
     "truehd": 5,
     "dts": 4,
     "flac": 4,
+    "pcm": 4,
     "eac3": 3,
     "ac3": 2,
     "aac": 1,
@@ -52,10 +53,10 @@ _AUDIO_RANK: Final[dict[str, int]] = {
     "mp3": 1,
 }
 _LOSSLESS_OBJECT_AUDIO: Final = frozenset({"truehd"})
-_LOSSLESS_AUDIO: Final = frozenset({"flac"})
+_LOSSLESS_AUDIO: Final = frozenset({"flac", "pcm"})
 # Above every codec rank, so the audio score is the tier first and the codec within it.
 _TIER_SPAN: Final = 10
-_CHANNEL_WORDS: Final[dict[int, str]] = {1: "MONO", 2: "STEREO", 6: "5.1"}
+_CHANNEL_WORDS: Final[dict[int, str]] = {1: "MONO", 2: "STEREO", 6: "5.1", 7: "6.1", 8: "7.1"}
 _CONTAINER_RANK: Final[dict[str, int]] = {"mkv": 2, "mp4": 1, "m4v": 1, "mov": 1}
 _CONTAINER_LABELS: Final[dict[int, str]] = {2: "MKV", 1: "MP4"}
 # ffprobe's family name for Matroska; WebM keeps its own, since not every profile takes it.
@@ -98,17 +99,19 @@ def _hdr_rank(hdr: HdrFormat | None) -> int:
 
 
 def _codec(codec: str | None) -> str:
-    return (codec or "").lower()
+    """A codec's name in lowercase, every PCM sample format named `pcm`."""
+    name = (codec or "").lower()
+    return "pcm" if name.startswith("pcm") else name
 
 
 def _audio_rank(name: str) -> int:
-    return 4 if name.startswith("pcm") else _AUDIO_RANK.get(name, 0)
+    return _AUDIO_RANK.get(name, 0)
 
 
 def _lossless_tier(name: str) -> _AudioTier:
     if name in _LOSSLESS_OBJECT_AUDIO:
         return _AudioTier.LOSSLESS_OBJECT
-    if name in _LOSSLESS_AUDIO or name.startswith("pcm"):
+    if name in _LOSSLESS_AUDIO:
         return _AudioTier.LOSSLESS
     return _AudioTier.NONE
 
@@ -128,11 +131,6 @@ def _audio_class(codec: str | None) -> tuple[int, int]:
     """What the codec alone is worth, its channels aside: lossless first, then its rank."""
     name = _codec(codec)
     return int(_lossless_tier(name)), _audio_rank(name)
-
-
-def _audio_label(codec: str | None) -> str:
-    name = _codec(codec)
-    return "PCM" if name.startswith("pcm") else name.upper()
 
 
 def _video_known(item: MediaItem) -> bool:
@@ -239,9 +237,10 @@ def way_id(area_id: str, entity_id: str, recipe_key: str, media_item_id: uuid.UU
 def gives_up(way: Way, best: Way) -> tuple[str, ...]:
     """What `way` is known to lose against `best`, in the words a screen prints.
 
-    A fact its copy does not carry is never named a loss; `facts_known` carries
-    that doubt. The audio codec and its channels are named apart, so a better
-    codec in stereo says `STEREO` and nothing about the codec.
+    A fact its copy does not carry, zero channels included, is never named a
+    loss; `facts_known` carries that doubt. The audio codec and its channels
+    are named apart, so a better codec in stereo says `STEREO` and nothing
+    about the codec.
     """
     mine, theirs = way.quality, best.quality
     words: list[str] = []
@@ -251,9 +250,9 @@ def gives_up(way: Way, best: Way) -> tuple[str, ...]:
     if theirs.hdr is not None and hdr_lost and _video_known(way.file):
         words.append(f"NO {HDR_LABELS[theirs.hdr]}")
     if mine.audio_codec and _audio_class(mine.audio_codec) < _audio_class(theirs.audio_codec):
-        words.append(f"NO {_audio_label(theirs.audio_codec)}")
+        words.append(f"NO {_codec(theirs.audio_codec).upper()}")
     channels = mine.audio_channels
-    if channels is not None and channels < (theirs.audio_channels or 0):
+    if channels and channels < (theirs.audio_channels or 0):
         words.append(_CHANNEL_WORDS.get(channels, f"{channels}CH"))
     container = _container_rank(theirs.container)
     if _parts(mine.container) and _container_rank(mine.container) < container:

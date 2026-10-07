@@ -16,7 +16,11 @@ from usher.domain.recipes import RECIPES, Recipe
 from usher.domain.screens import Screen, ScreenDevice, project
 from usher.domain.source import MediaItem
 from usher.domain.ways import (
+    _AUDIO_RANK,
+    _TIER_SPAN,
     Resolution,
+    _audio_rank,
+    _codec,
     facts_known,
     gives_up,
     quality_of,
@@ -418,6 +422,7 @@ def test_gives_up_names_every_known_shortfall_against_the_best() -> None:
         pytest.param({"audio_channels": 2}, ("STEREO",), id="two_channels"),
         pytest.param({"audio_channels": 1}, ("MONO",), id="one_channel"),
         pytest.param({"audio_channels": None}, (), id="channels_unknown"),
+        pytest.param({"audio_channels": 0}, (), id="zero_channels"),
         pytest.param({"container": "mp4"}, ("NO MKV",), id="lesser_container"),
         pytest.param({"container": None}, (), id="container_unknown"),
     ],
@@ -432,6 +437,60 @@ def test_a_way_gives_up_only_what_its_copy_is_known_to_lack(
         "the premise: every fact known ranks first"
     )
     assert other.gives_up == expected
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        pytest.param({"width": None, "height": None, "hdr_format": None}, id="codec_only"),
+        pytest.param({"video_codec": None, "height": None, "hdr_format": None}, id="width_only"),
+        pytest.param({"video_codec": None, "width": None, "hdr_format": None}, id="height_only"),
+        pytest.param(
+            {"video_codec": None, "width": None, "height": None, "hdr_format": HdrFormat.HLG},
+            id="hdr_only",
+        ),
+    ],
+)
+def test_any_one_video_fact_makes_a_missing_hdr_a_known_loss(changes: dict[str, Any]) -> None:
+    """Over Infuse, which admits HLG and a copy with no video codec."""
+    lesser = FULL.evolve(external_id="lesser", **changes)
+    _tall_enough("apple_tv.infuse", FULL, lesser)
+    best, other, *_refused = rank((_living_room(),), (lesser, FULL))
+    assert (best.file.external_id, other.file.external_id, other.playable) == (
+        "full",
+        "lesser",
+        True,
+    ), "the premise: every fact known ranks first, and the lesser copy plays"
+    assert other.gives_up == ("NO HDR10",)
+
+
+@pytest.mark.parametrize(
+    ("channels", "word"),
+    [
+        pytest.param(6, "5.1", id="six"),
+        pytest.param(7, "6.1", id="seven"),
+        pytest.param(8, "7.1", id="eight"),
+        pytest.param(9, "9CH", id="nine"),
+    ],
+)
+def test_a_channel_loss_names_the_layout_a_person_knows(channels: int, word: str) -> None:
+    better = FULL.evolve(external_id="better", audio_channels=12)
+    lesser = FULL.evolve(external_id="lesser", audio_channels=channels)
+    _tall_enough("cast.shield", better, lesser)
+    best, other = rank(_shield_in_the_bedroom()[:1], (lesser, better))
+    assert (best.file.external_id, other.file.external_id) == ("better", "lesser"), (
+        "the premise: more channels rank first"
+    )
+    assert other.gives_up == (word,)
+
+
+def test_every_audio_rank_stays_below_the_tier_span() -> None:
+    """The audio score packs a tier and a codec rank into one number: no rank may reach a tier."""
+    spellings = ("pcm_s16le", "pcm_s24le", "PCM_F32LE")
+    assert {_audio_rank(_codec(name)) for name in spellings} == {_AUDIO_RANK["pcm"]}, (
+        "the premise: every PCM spelling reads PCM's rank from the table"
+    )
+    assert {codec: rank for codec, rank in _AUDIO_RANK.items() if rank >= _TIER_SPAN} == {}
 
 
 @pytest.mark.parametrize(
