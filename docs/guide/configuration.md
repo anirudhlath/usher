@@ -143,7 +143,11 @@ resumes after just as the next page would have. After a page of fewer than 4
 items, which below a page size of 4 is every page, that is at most the last item
 it read: too little to tell a listing that moved from one that held still, so
 the piece reads again from 100 items earlier, or from its start, and logs that
-its listing moved.
+its listing moved. A server that ignores the creation order a sync asks for is
+noticed, with a WARNING, at the first page that shows two items out of that
+order; until then a piece of episodes on it can stop at its first page whose
+last item was created after the next piece's first item, leaving the rest of it
+unread. At a page size of 1 no page holds two items, so no WARNING ever comes.
 
 Every request is work for the media server. If you don't administer it, or a
 sync slows down somebody's playback, set `USHER_SYNC_WALKERS=1` for one request

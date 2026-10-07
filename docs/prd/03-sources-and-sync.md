@@ -103,14 +103,19 @@ when the walk stops:
   pages keep moving, never before the start. A page at the start of the listing
   is never judged, and neither is one after a page of a single item, which
   re-reads nothing. A listing that is not in creation order is judged by its
-  items alone, after one WARNING; an item whose creation time moves behind the
-  walk is read by the next full walk. A resumed unit of a whole-library walk
-  judges its first page the same way, against the creation time of the last
-  item it committed, so items that left its library between attempts are not
-  skipped either. One that stopped after a page of fewer than four items reads
-  again from 100 items earlier, or from its start, and logs that WARNING whether
-  or not its listing moved; a unit committed before that time was recorded is
-  read again from its start. Duplicates are permitted; silent truncation is not.
+  items alone from the first page that shows two items out of that order, after
+  one WARNING. Before that page, a chunk of episodes ends at the first page
+  whose last item was created after the next chunk's first item, which on such a
+  listing can leave the rest of the chunk unread; at a page size of 1 no page
+  holds two items, so the WARNING never comes. An item whose creation time moves
+  behind the walk is read by the next full walk. A resumed unit of a
+  whole-library walk judges its first page the same way, against the creation
+  time of the last item it committed, so items that left its library between
+  attempts are not skipped either. One that stopped after a page of fewer than
+  four items reads again from 100 items earlier, or from its start, and logs
+  that WARNING whether or not its listing moved; a unit committed before that
+  time was recorded is read again from its start. Duplicates are permitted;
+  silent truncation is not.
 - **A walk fails on a listing that 10,000 pages do not finish**, and each unit
   of a whole-library walk is a listing of its own: at the default page size,
   while its listing holds still, that is one of 9,500,050 items or more, and
@@ -239,7 +244,12 @@ Every item walk moves its heartbeat with every commit and at least once a minute
 between commits, and before it starts closes its source's item walks still
 `running` whose heartbeat is 10 minutes old or missing, `failed` with
 `abandoned: its process stopped before it finished`, logging a WARNING that
-counts them; a whole-library walk closed this way is resumed all the same.
+counts them; a whole-library walk closed this way is resumed all the same. A
+process paused that long rather than stopped — its machine suspended, say — is
+closed the same way; when it wakes, its next commit sets its run `running`
+again, and if a new walk has resumed that run meanwhile, both walk it: each unit
+keeps the furthest position either committed, but the run's counts can be
+wrong.
 A run whose sweep was refused is not resumed, and neither is one that stopped
 before its units were stored: a fresh walk starts. A walk's claim reads only
 whole-library walks, so a single walk's run — the gap-closer's, say — never
