@@ -29,6 +29,7 @@ _SEGMENT = re.compile(r"^[a-z][a-z_]*(\[\])*$")
 _ROOT = Path(__file__).resolve().parents[2]
 _COMMITTED = (
     "scripts/capture_ha_shape.py",
+    "tests/fakes/home_assistant.py",
     "tests/fakes/home_assistant_rows.py",
     "tests/fakes/house.py",
     "tests/fixtures/homeassistant/shape.json",
