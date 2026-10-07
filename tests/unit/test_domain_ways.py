@@ -114,6 +114,14 @@ def _assert_read_apart(names: Sequence[str]) -> None:
     assert list(names) not in orders.values(), f"the premise: {names} is in none of {orders}"
 
 
+def _tall_enough(recipe_key: str, *copies: MediaItem) -> None:
+    """The premise of a case whose answer needs no copy refused for its height."""
+    recipe = RECIPE[recipe_key]
+    ceiling = recipe.direct_play.max_height
+    tallest = max(copy.height or 0 for copy in copies)
+    assert tallest <= ceiling, f"the premise: {recipe.name} plays {tallest} lines, up to {ceiling}"
+
+
 def _shield(entity_id: str, name: str, area_id: str) -> ScreenDevice:
     """A confirmed SHIELD built by hand, so a case chooses where its screen lists it."""
     return ScreenDevice(
@@ -149,6 +157,7 @@ def _shield(entity_id: str, name: str, area_id: str) -> ScreenDevice:
 def test_every_recipe_against_every_copy_shape(
     recipe: str, item: MediaItem, expected_refusal: str | None, expected_known: bool
 ) -> None:
+    _tall_enough(recipe, item)
     assert refusal(item, RECIPE[recipe]) == expected_refusal
     assert facts_known(item, RECIPE[recipe]) is expected_known
 
@@ -289,6 +298,7 @@ def test_gives_up_names_resolution_hdr_and_audio_against_the_best() -> None:
     lesser = _copy(
         "lesser", container="mp4", video_codec="h264", audio_codec="aac", width=1920, height=1080
     )
+    _tall_enough("cast.shield", lesser, best_copy)
     best, other = rank((bedroom,), (lesser, best_copy))
     assert best.file.external_id == "best", "the premise: the ranking chose the 4K copy"
     assert gives_up(other, best) == ("1080P", "NO HDR10", "NO TRUEHD")
@@ -350,6 +360,7 @@ def test_equal_ways_fall_to_the_copy_id_whatever_order_the_copies_come_in(revers
     first = HDR10_MP4.evolve(id=uuid.UUID(int=1), external_id="first")
     second = HDR10_MP4.evolve(id=uuid.UUID(int=2), external_id="second")
     assert str(first.id) < str(second.id), "the premise"
+    _tall_enough("cast.shield", first, second)
     files = (second, first) if reverse else (first, second)
     ways = rank(_shield_in_the_bedroom()[:1], files)
     assert [(way.file.external_id, way.best) for way in ways] == [
@@ -361,6 +372,7 @@ def test_equal_ways_fall_to_the_copy_id_whatever_order_the_copies_come_in(revers
 def test_ways_are_grouped_by_screen_and_each_screen_has_its_own_best() -> None:
     screens = _shield_in_the_bedroom()
     assert [screen.name for screen in screens] == ["Bedroom", "Living Room"], "the premise"
+    _tall_enough("cast.shield", HDR10_MP4)
     ways = rank(tuple(reversed(screens)), (HDR10_MP4,))
     assert [(way.screen.area_id, way.best) for way in ways] == [
         (BEDROOM, True),
@@ -393,6 +405,7 @@ def test_players_on_one_screen_tie_as_a_person_reads_and_the_first_is_the_best()
             for index, name in enumerate(_READ_APART)
         ),
     )
+    _tall_enough("cast.shield", HDR10_MP4)
     ways = rank((den,), (HDR10_MP4,))
     assert [(way.device.name, way.best) for way in ways] == [
         ("Écran", True),
