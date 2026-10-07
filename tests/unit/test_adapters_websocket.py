@@ -150,6 +150,7 @@ async def test_a_frame_over_the_bound_is_refused_and_a_wider_bound_admits_it() -
         assert isinstance(cause, ConnectionClosedError), f"the premise: a failure, not {cause!r}"
         sent = cause.sent.code if cause.sent is not None else None
         assert sent == CloseCode.MESSAGE_TOO_BIG, f"the premise: the bound closed it, not {cause!r}"
+        assert cause.rcvd is None, f"the premise: this side refused it, not {cause!r}"
 
         wide = await connect_websocket(
             url, label=LABEL, logger_name=LOGGER, proxy=None, max_size=4 * DEFAULT_MAX_FRAME_BYTES
