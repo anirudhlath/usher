@@ -2658,9 +2658,8 @@ async def _capture(url: str, token: str, listen: float) -> dict[str, list[Any]]:
             answer = await ask({"type": command})
             frames["result"].append(answer)
             frames[kind].extend(answer["result"])
-        players = [row for row in frames["entities"] if row["entity_id"].startswith(_PLAYER)]
-        if players:
-            get = {"type": "config/entity_registry/get", "entity_id": players[0]["entity_id"]}
+        for row in list(frames["entities"]):
+            get = {"type": "config/entity_registry/get", "entity_id": row["entity_id"]}
             frames["entity"].append((await ask(get))["result"])
         refused = await ask({"type": "config/entity_registry/get", "entity_id": _NO_SUCH_PLAYER})
         frames["refusal"].append(refused)
@@ -2717,7 +2716,7 @@ USHER_HA_URL="$VITE_HA_URL" USHER_HA_TOKEN="$VITE_HA_TOKEN" \
 jq 'map_values(length)' /var/tmp/ha-shape.json
 ```
 
-Expected: every kind except `labels` has a non-zero path count, because the house has no labels yet. If `event` is empty, nothing changed during the 30 seconds. Capture again with `--listen 120 --merge /var/tmp/ha-shape.json` into a second file, then move that file over the first. Check that no value leaked before copying it in:
+Expected: every kind except `labels` has a non-zero path count, because the house has no labels yet. `entity` is every registry entry's `get` answer, not only a player's: the row's schema is one for every entity, and this house's players never carry an entity-level area or name, which the fake's entities do. If `event` is empty, nothing changed during the 30 seconds. Capture again with `--listen 120 --merge /var/tmp/ha-shape.json` into a second file, then move that file over the first. Check that no value leaked before copying it in:
 
 ```bash
 jq '[.. | strings] | unique' /var/tmp/ha-shape.json   # only type names: NoneType bool dict float int list str
@@ -2793,8 +2792,9 @@ def test_the_rows_carry_both_roles_a_foreign_label_and_a_player_with_no_area() -
 
 
 def test_the_label_registry_is_unrecorded_until_the_house_has_labels() -> None:
-    """Task 17 records it; then this case goes, and `labels` joins `_RECORDED_KINDS`."""
+    """Task 17 records it; then this case and `_PENDING` go, and `labels` joins `_RECORDED_KINDS`."""
     assert recorded()["labels"] == {}
+    assert [kind for kind in ("entities", "entity") if "labels[]" in recorded()[kind]] == []
     assert {row["label_id"] for row in _ROWS.labels} == {"favourite", "usher", "usher_ignore"}
 
 
@@ -2856,6 +2856,8 @@ _MODIFIED: Final = 1_790_000_600.0
 _CHANGED: Final = "2026-10-06T19:00:00.000000+00:00"
 _ROLE_LABELS: Final = {DeviceRole.USE: "usher", DeviceRole.IGNORE: "usher_ignore"}
 LABEL_NAMES: Final = {"usher": "Usher", "usher_ignore": "Usher ignore", "favourite": "Favourite"}
+#: No capture can record a label until the house has one; Task 17's capture does.
+_PENDING: Final = frozenset({"labels[]: str"})
 
 
 @cache
@@ -2873,16 +2875,17 @@ def recorded() -> dict[str, dict[str, list[str]]]:
 
 
 def unrecorded_paths(kind: str, rows: Sequence[object]) -> list[str]:
-    """Every `path: type` in `rows` that the recorded shape of `kind` never saw."""
+    """Every `path: type` in `rows` that the recorded shape of `kind` never saw, `_PENDING` aside."""
     script = _script()
     seen: dict[str, list[str]] = script.merged(rows, script.DEPTHS[kind])
     shape = recorded()[kind]
-    return [
+    unseen = [
         f"{path}: {name}"
         for path, names in seen.items()
         for name in names
         if name not in shape.get(path, ())
     ]
+    return [found for found in unseen if found not in _PENDING]
 
 
 def missing_keys(kind: str, rows: Sequence[Mapping[str, object]]) -> list[str]:
@@ -3065,11 +3068,12 @@ Expected: 14 passed; mypy and ruff are clean.
 
 If `test_every_rendered_path_and_type_was_recorded` names a path, the live house answered differently from the earlier probe. Fix the renderer to match the recorded shape, never the shape to match the renderer. Two cases are the exception. If `context.user_id: NoneType` or `disabled_by: str` is the only difference, the capture just never saw that type. Run the capture again with `--merge` while the case occurs, or render the type the capture did see. Note which one you did in the commit message.
 
-- [ ] **Step 7: Plant two guards**
+- [ ] **Step 7: Plant three guards**
 
 Each plant follows the cycle in "How to work this plan":
 1. In `area_row`, delete the `"floor_id": None,` line. Expect `test_every_recorded_key_is_rendered[areas]` to fail on `0: floor_id`.
 2. In `_number`, return `float(value)`. Expect `test_every_rendered_path_and_type_was_recorded[states]` to fail on `attributes.media_duration: float`. This premise holds only if the capture recorded `int` alone there; if it recorded both types, state that and skip this plant.
+3. In `unrecorded_paths`, return `unseen`. Expect `test_every_rendered_path_and_type_was_recorded[entities]` and `[entity]` to fail on `labels[]: str`.
 
 - [ ] **Step 8: Document the fixture**
 
@@ -3087,8 +3091,9 @@ ways — no invented path, no missing key — and fails if a value or an entity 
 reaches the shape. MACs are under `02:00:00` and hosts in `192.0.2.0/24`.
 
 The label registry is unrecorded: the house had no labels when it was
-captured, so `label_row` carries HA core's keys and the shape's `labels` entry
-is empty until a capture after the first confirm fills it.
+captured, so `label_row` carries HA core's keys, the shape's `labels` entry is
+empty, and an entity row's `labels[]` items are exempted by name (`_PENDING`)
+until a capture after the first confirm fills both.
 
     set -a; . ~/code/ha-home-panel/.env.local; set +a
     USHER_HA_URL="$VITE_HA_URL" USHER_HA_TOKEN="$VITE_HA_TOKEN" \
@@ -8572,6 +8577,7 @@ USHER_HA_URL="$VITE_HA_URL" USHER_HA_TOKEN="$VITE_HA_TOKEN" \
 
 Run Task 6's leak checks against it, then `cp` it over `tests/fixtures/homeassistant/shape.json`. Then:
 - delete `test_the_label_registry_is_unrecorded_until_the_house_has_labels` from `tests/unit/test_fixtures_homeassistant.py`;
+- delete `_PENDING` from `tests/fakes/home_assistant_rows.py`, and have `unrecorded_paths` return `unseen`;
 - add `labels` to `_RECORDED_KINDS`;
 - delete the `tests/fixtures/README.md` paragraph that begins "The label registry is unrecorded";
 - reword `label_row`'s docstring in `tests/fakes/home_assistant_rows.py` to `"""HA core's label keys, as the shape records them."""`;
