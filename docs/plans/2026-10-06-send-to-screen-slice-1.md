@@ -8131,7 +8131,7 @@ USHER_HA_URL="$VITE_HA_URL" USHER_HA_TOKEN="$VITE_HA_TOKEN" \
   never a value.** `tests/fakes/home_assistant_rows.py` renders a
   `HouseSnapshot` with every recorded key, and both directions are checked.
 - Synthetic values only: MACs in `02:00:00:…`, IPv4 in `192.0.2.0/24`, and
-  entity ids either invented or already printed by the spec.
+  entity ids already printed by the spec, or invented and absent from the house.
 - **`FakePlayers.reports_writes = False` is how a test holds a write unreported**;
   publish the next house by hand to release it.
 
