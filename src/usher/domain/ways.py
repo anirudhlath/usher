@@ -40,7 +40,7 @@ _HDR_RANK: Final[dict[HdrFormat, int]] = {
     HdrFormat.HDR10: 2,
     HdrFormat.HLG: 1,
 }
-# Lossless object audio, lossless, lossy multichannel, stereo-class lossy.
+# A codec's rank within its audio tier.
 _AUDIO_RANK: Final[dict[str, int]] = {
     "truehd": 5,
     "dts": 4,
@@ -51,8 +51,24 @@ _AUDIO_RANK: Final[dict[str, int]] = {
     "opus": 1,
     "mp3": 1,
 }
+_LOSSLESS_OBJECT_AUDIO: Final = frozenset({"truehd"})
+_LOSSLESS_AUDIO: Final = frozenset({"flac"})
+# Above every codec rank, so the audio score is the tier first and the codec within it.
+_TIER_SPAN: Final = 10
+_CHANNEL_WORDS: Final[dict[int, str]] = {1: "MONO", 2: "STEREO", 6: "5.1"}
 _CONTAINER_RANK: Final[dict[str, int]] = {"mkv": 2, "mp4": 1, "m4v": 1, "mov": 1}
+_CONTAINER_LABELS: Final[dict[int, str]] = {2: "MKV", 1: "MP4"}
+# ffprobe's family name for Matroska; WebM keeps its own, since not every profile takes it.
+_CONTAINER_ALIASES: Final[dict[str, str]] = {"matroska": "mkv"}
 _WAY_NAMESPACE: Final = uuid.UUID("5d2c7a8e-3f41-4b9e-9a57-0c6e1d2f4b13")
+
+
+class _AudioTier(IntEnum):
+    NONE = 0
+    STEREO = 1
+    MULTICHANNEL = 2
+    LOSSLESS = 3
+    LOSSLESS_OBJECT = 4
 
 
 def resolution_of(width: int | None, height: int | None) -> Resolution:
@@ -69,16 +85,60 @@ def resolution_of(width: int | None, height: int | None) -> Resolution:
 
 def _parts(container: str | None) -> tuple[str, ...]:
     """`mov,mp4,m4a,3gp` is one container under several names, and each one counts."""
-    return tuple(part.strip().lower() for part in (container or "").split(",") if part.strip())
+    names = (part.strip().lower() for part in (container or "").split(","))
+    return tuple(_CONTAINER_ALIASES.get(name, name) for name in names if name)
+
+
+def _container_rank(container: str | None) -> int:
+    return max((_CONTAINER_RANK.get(part, 0) for part in _parts(container)), default=0)
 
 
 def _hdr_rank(hdr: HdrFormat | None) -> int:
     return _HDR_RANK[hdr] if hdr is not None else 0
 
 
-def _audio_rank(codec: str | None) -> int:
-    name = (codec or "").lower()
+def _codec(codec: str | None) -> str:
+    return (codec or "").lower()
+
+
+def _audio_rank(name: str) -> int:
     return 4 if name.startswith("pcm") else _AUDIO_RANK.get(name, 0)
+
+
+def _lossless_tier(name: str) -> _AudioTier:
+    if name in _LOSSLESS_OBJECT_AUDIO:
+        return _AudioTier.LOSSLESS_OBJECT
+    if name in _LOSSLESS_AUDIO or name.startswith("pcm"):
+        return _AudioTier.LOSSLESS
+    return _AudioTier.NONE
+
+
+def _audio_tier(codec: str | None, channels: int | None) -> _AudioTier:
+    """Lossless by codec; lossy by channels. DTS is lossy: only its core is certain."""
+    name = _codec(codec)
+    if not name:
+        return _AudioTier.NONE
+    lossless = _lossless_tier(name)
+    if lossless is not _AudioTier.NONE:
+        return lossless
+    return _AudioTier.MULTICHANNEL if (channels or 0) > 2 else _AudioTier.STEREO
+
+
+def _audio_class(codec: str | None) -> tuple[int, int]:
+    """What the codec alone is worth, its channels aside: lossless first, then its rank."""
+    name = _codec(codec)
+    return int(_lossless_tier(name)), _audio_rank(name)
+
+
+def _audio_label(codec: str | None) -> str:
+    name = _codec(codec)
+    return "PCM" if name.startswith("pcm") else name.upper()
+
+
+def _video_known(item: MediaItem) -> bool:
+    return bool(item.video_codec) or any(
+        fact is not None for fact in (item.width, item.height, item.hdr_format)
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,16 +151,17 @@ class Quality:
 
     @property
     def score(self) -> tuple[int, int, int, int, int]:
-        """Resolution, then HDR, then audio, then its channels, then the container."""
-        container = max(
-            (_CONTAINER_RANK.get(part, 0) for part in _parts(self.container)), default=0
-        )
+        """Resolution, then HDR, then audio by tier and codec, then its channels, then container.
+
+        The tiers: lossless object audio, lossless, lossy multichannel, then stereo.
+        """
+        tier = _audio_tier(self.audio_codec, self.audio_channels)
         return (
             int(self.resolution),
             _hdr_rank(self.hdr),
-            _audio_rank(self.audio_codec),
+            tier * _TIER_SPAN + _audio_rank(_codec(self.audio_codec)),
             self.audio_channels or 0,
-            container,
+            _container_rank(self.container),
         )
 
 
@@ -176,15 +237,27 @@ def way_id(area_id: str, entity_id: str, recipe_key: str, media_item_id: uuid.UU
 
 
 def gives_up(way: Way, best: Way) -> tuple[str, ...]:
-    """What `way` loses against `best`, in the words a screen prints."""
+    """What `way` is known to lose against `best`, in the words a screen prints.
+
+    A fact its copy does not carry is never named a loss; `facts_known` carries
+    that doubt. The audio codec and its channels are named apart, so a better
+    codec in stereo says `STEREO` and nothing about the codec.
+    """
+    mine, theirs = way.quality, best.quality
     words: list[str] = []
-    if way.quality.resolution < best.quality.resolution:
-        words.append(RESOLUTION_LABELS[way.quality.resolution])
-    if best.quality.hdr is not None and _hdr_rank(way.quality.hdr) < _hdr_rank(best.quality.hdr):
-        words.append(f"NO {HDR_LABELS[best.quality.hdr]}")
-    best_audio = best.quality.audio_codec
-    if best_audio and _audio_rank(way.quality.audio_codec) < _audio_rank(best_audio):
-        words.append(f"NO {best_audio.upper()}")
+    if mine.resolution is not Resolution.UNKNOWN and mine.resolution < theirs.resolution:
+        words.append(RESOLUTION_LABELS[mine.resolution])
+    hdr_lost = _hdr_rank(mine.hdr) < _hdr_rank(theirs.hdr)
+    if theirs.hdr is not None and hdr_lost and _video_known(way.file):
+        words.append(f"NO {HDR_LABELS[theirs.hdr]}")
+    if mine.audio_codec and _audio_class(mine.audio_codec) < _audio_class(theirs.audio_codec):
+        words.append(f"NO {_audio_label(theirs.audio_codec)}")
+    channels = mine.audio_channels
+    if channels is not None and channels < (theirs.audio_channels or 0):
+        words.append(_CHANNEL_WORDS.get(channels, f"{channels}CH"))
+    container = _container_rank(theirs.container)
+    if _parts(mine.container) and _container_rank(mine.container) < container:
+        words.append(f"NO {_CONTAINER_LABELS[container]}")
     if best.recipe.hands_free and not way.recipe.hands_free:
         words.append("NEEDS A PRESS")
     return tuple(words)
