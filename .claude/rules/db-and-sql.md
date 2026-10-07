@@ -106,9 +106,13 @@ Rules for this subsystem; the evidence is in the docstrings named here.
   exact set, so adding one "for consistency" fails there). Tables like `jobs` and
   `title_embeddings` have the *column* and deliberately no trigger — a single
   writer sets it explicitly; `media_items` has neither. Triggers assign `now()`
-  unconditionally, `BEFORE UPDATE`, so a merge's own `updated_at = observed_at`
-  lands on the *insert* path only and two updates in one transaction read back
-  one stamp. Integration fixtures are one transaction — backdate a raw `INSERT`.
+  `BEFORE UPDATE`, unconditionally except on `watch_states`, whose
+  `watch_states_set_updated_at` keeps an update's own `updated_at` when the new
+  `origin` is `'source'` — so a source merge's `observed_at` lands on both paths,
+  and an update leaving `origin = 'source'` that names no `updated_at` keeps the
+  old one: a new writer of source rows stamps its own, as the restore upsert does.
+  Elsewhere two updates in one transaction read back one stamp. Integration
+  fixtures are one transaction — backdate a raw `INSERT`.
 - **SQLAlchemy's bind regex breaks `text()` both ways**: `:param::type` is read
   as a cast and skipped (use `CAST(:id AS uuid)`), while `:name` inside a `--`
   comment declares a *real* bind parameter.

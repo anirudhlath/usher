@@ -130,9 +130,9 @@ class PushApplyService:
         if not states:
             return PushOutcome()
         # `now()`, never the event's own timestamp or a run's instant: PRD 03's "latest
-        # `updated_at` wins" covers the whole record and `watch_states` has a `BEFORE
-        # UPDATE` trigger that stamps the write instant, so an observation stamped
-        # earlier than the row it is repairing writes nothing at all.
+        # wins" covers the whole record and a stored row carries the instant of its last
+        # read or client write, so an observation stamped earlier than the row it is
+        # repairing writes nothing at all.
         observed_at = datetime.now(UTC)
         outcome = await self._watch.apply_states(
             source.id, states, user_id=user_id, observed_at=observed_at

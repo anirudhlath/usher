@@ -152,8 +152,8 @@ async def _given_stored_history(
 ) -> None:
     """A row as a walk plus a backfill would have left it.
 
-    Written with raw SQL because the `BEFORE UPDATE` trigger owns `updated_at` on
-    every other path. `clock_timestamp()`, never `now()`: `now()` is frozen at the
+    Written with raw SQL and stamped with the instant Postgres wrote it.
+    `clock_timestamp()`, never `now()`: `now()` is frozen at the
     transaction's start and this whole suite is one transaction, so a row stamped
     with it is *not* later than an instant taken during the test and the refusal this
     file exists to detect would not happen.

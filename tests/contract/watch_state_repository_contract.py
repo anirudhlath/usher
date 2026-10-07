@@ -243,7 +243,7 @@ class WatchStateRepositoryContract:
     async def test_a_merge_does_not_overwrite_a_newer_api_write(
         self, repository: WatchStateRepository, user_id: uuid.UUID, title_id: uuid.UUID
     ) -> None:
-        """PRD 03: "latest `updated_at` wins".
+        """PRD 03: "latest wins".
 
         A nightly walk started at 03:00 must not stomp a resume position a client set at
         03:20 -- and it would, because the walk's own data is an hour old by the time it
@@ -490,8 +490,8 @@ class WatchStateRepositoryContract:
     ) -> None:
         """`set_from_client` is the other side of `merge_from_source`'s conflict rule.
 
-        `trg_watch_states_set_updated_at` stamps the write instant
-        unconditionally, so a client write is automatically newer than any walk
+        `trg_watch_states_set_updated_at` stamps a client write with its write
+        instant, so a client write is automatically newer than any walk
         whose `observed_at` is in the past -- and `WALK_AT` is safely in the past
         of whenever this suite runs, which is what makes the ordering true without
         freezing or faking a clock. It fails against an implementation that writes

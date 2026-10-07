@@ -108,6 +108,11 @@ Versioning is `0.x` while the wire contract may still move —
   source's item walks that are `running` with a heartbeat 10 minutes old or
   none, `failed` with `abandoned: its process stopped before it finished`, and
   logs a WARNING that counts them.
+- **A watch merge that read newer state is no longer refused because an older
+  read committed first.** The `watch_states` trigger keeps a source merge's own
+  `updated_at` — its read's instant, which for a walk is the instant the walk
+  began — instead of stamping the commit's (migration `m10h`); a client write
+  and a restore still stamp `now()`.
 - **An embedding model that fails the embedder's norm check now fails every
   batch, not only the first.** The first batch used to park one `index` job and
   let every later vector through unchecked.

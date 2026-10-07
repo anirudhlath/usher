@@ -602,10 +602,10 @@ async def test_apply_states_reports_merges_built_not_rows_changed(fixture: _Fixt
     """`items_matched` on a `SyncRun` is the number of merges *built*.
 
     `merge_from_source` returns rows *changed*, and the two differ whenever PRD 03's
-    "latest `updated_at` wins" refuses one -- a client set a resume position thirty
-    seconds ago and a walk that started an hour ago must not stomp it. Returning the
-    repository's count in `items_matched`'s place silently changes what every stored
-    `sync_runs` row means and what PRD 10's dashboard plots.
+    "latest wins" refuses one -- a client set a resume position thirty seconds ago and
+    a walk that started an hour ago must not stomp it. Returning the repository's count
+    in `items_matched`'s place silently changes what every stored `sync_runs` row means
+    and what PRD 10's dashboard plots.
     """
     await fixture.given_matched("movie-1")
     fixture.watch_states.refuse_next_merge()
@@ -735,12 +735,11 @@ async def test_a_backfill_right_after_a_walk_is_not_rejected_as_stale(
 ) -> None:
     """`observed_at` is the instant the backfill read the source, never the run's.
 
-    PRD 03's "latest `updated_at` wins" applies to the whole record, so a backfill
-    carrying an instant at or before the row's stored `updated_at` writes nothing -- and
-    against Postgres, where a `BEFORE UPDATE` trigger stamps the *write* instant, "at or
-    before" is every instant the walk could hand it. The backfill would then never
-    converge and nothing in this file would say so; the paired integration case is what
-    actually closes it.
+    PRD 03's "latest wins" applies to the whole record, so a backfill carrying an instant
+    at or before the row's stored `updated_at` writes nothing -- and a row a client wrote
+    since the walk began holds a later instant than any the walk could hand it. The
+    backfill would then never converge and nothing in this file would say so; the paired
+    integration case is what actually closes it.
     """
     await fixture.given_matched("movie-1")
     fixture.adapter.seed_state(

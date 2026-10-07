@@ -4,6 +4,7 @@ import asyncio
 import functools
 import re
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import pytest
@@ -26,12 +27,13 @@ from usher.domain.ids import new_id
 
 
 async def test_migration_creates_the_updated_at_triggers(postgres_url: str) -> None:
-    """The three `set_updated_at` triggers are invisible to `Base.metadata.create_all`.
+    """The seven `updated_at` triggers are invisible to `Base.metadata.create_all`.
 
     They are hand-written `op.execute()` calls in the migration, and they are what
     guarantees `updated_at` reflects every write regardless of how it was made --
-    including the `ON CONFLICT DO UPDATE` bulk paths -- but only if something actually
-    runs the migration that creates them, which is what `postgres_url` does.
+    including the `ON CONFLICT DO UPDATE` bulk paths, and on `watch_states` every write
+    but a source's, which names its own -- but only if something actually runs the
+    migration that creates them, which is what `postgres_url` does.
     """
     engine = build_engine(postgres_url)
     async with engine.connect() as conn:
@@ -549,6 +551,19 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         at_m10g_run_columns = await column_set(url, "sync_runs")
         assert "planned" not in at_m10g_run_columns, "planned should not exist below m10h"
         assert "heartbeat_at" in at_m10g_run_columns, "the premise: `sync_runs` stands at `m10g`"
+        at_m10g_functions = await _function_set(url)
+        assert "watch_states_set_updated_at" not in at_m10g_functions, (
+            "watch_states_set_updated_at should not exist below m10h"
+        )
+        assert "set_updated_at" in at_m10g_functions, "the premise: the scan sees functions"
+        assert await _trigger_definition(url, "trg_watch_states_set_updated_at") == (
+            "CREATE TRIGGER trg_watch_states_set_updated_at BEFORE UPDATE "
+            "ON public.watch_states FOR EACH ROW EXECUTE FUNCTION set_updated_at()"
+        )
+        # And by what its function does, which the definition does not say.
+        assert await _update_stamps(url) == {"source": "now()", "api": "now()"}, (
+            "below m10h the trigger stamps every update of watch_states with now()"
+        )
 
         # **A named stop at `m10f`, holding `m10g`'s.**
         await asyncio.to_thread(functools.partial(run_alembic, url, "m10f", direction="down"))
@@ -726,6 +741,12 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         assert "ix_watch_states_user_recent" in after
         assert "ix_media_items_recently_added" in after
         assert "ix_watch_states_user_played" not in after
+        # `m10h`'s trigger after its own downgrade and upgrade, which the index set cannot see.
+        assert await _trigger_definition(url, "trg_watch_states_set_updated_at") == (
+            "CREATE TRIGGER trg_watch_states_set_updated_at BEFORE UPDATE "
+            "ON public.watch_states FOR EACH ROW EXECUTE FUNCTION watch_states_set_updated_at()"
+        )
+        assert await _update_stamps(url) == {"source": "its own", "api": "now()"}
     finally:
         await drop_database(admin, scratch)
 
@@ -821,5 +842,97 @@ async def _constraint_set(url: str, table: str) -> set[str]:
                 {"table": table},
             )
             return {row[0] for row in rows}
+    finally:
+        await engine.dispose()
+
+
+async def _function_set(url: str) -> set[str]:
+    """The `public` schema's function names, which none of the other readers sees."""
+    engine = build_engine(url)
+    try:
+        async with engine.connect() as conn:
+            rows = await conn.execute(
+                text(
+                    "SELECT p.proname FROM pg_proc p "
+                    "JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public'"
+                )
+            )
+            return {row[0] for row in rows}
+    finally:
+        await engine.dispose()
+
+
+async def _trigger_definition(url: str, trigger: str) -> str:
+    """One trigger as `pg_get_triggerdef` renders it: timing, events, columns and function.
+
+    A trigger re-created `BEFORE INSERT OR UPDATE` or `BEFORE UPDATE OF origin` runs the same
+    function under the same name, and answers `_update_stamps` exactly as the real one does.
+    """
+    engine = build_engine(url)
+    try:
+        async with engine.connect() as conn:
+            rows = await conn.execute(
+                text("SELECT pg_get_triggerdef(t.oid) FROM pg_trigger t WHERE t.tgname = :trigger"),
+                {"trigger": trigger},
+            )
+            return str(rows.scalar_one())
+    finally:
+        await engine.dispose()
+
+
+async def _update_stamps(url: str) -> dict[str, str]:
+    """What an update of `watch_states` leaves in `updated_at`, by the `origin` it writes.
+
+    `"now()"`, `"its own"` -- the instant the `UPDATE` itself named -- or else the
+    stored value. Autogenerate is blind to triggers and functions, so this reads a body's
+    behaviour where the catalog gives only a name. The seeded row carries a third
+    instant, so a body that kept the old row's stamp passes for neither answer, and the
+    transaction is rolled back, leaving no row for a later `downgrade()` to meet.
+    """
+    seeded = datetime(2026, 7, 30, 3, tzinfo=UTC)
+    own = seeded + timedelta(days=1)
+    user_id, title_id, state_id = new_id(), new_id(), new_id()
+    engine = build_engine(url)
+    try:
+        async with engine.connect() as conn:
+            transaction = await conn.begin()
+            try:
+                await conn.execute(
+                    text("INSERT INTO users (id, name) VALUES (:id, :name)"),
+                    {"id": user_id, "name": f"stamp-{user_id}"},
+                )
+                await conn.execute(
+                    text(
+                        "INSERT INTO titles (id, kind, name, sort_name) "
+                        "VALUES (:id, 'movie', 'Stamp Case', 'stamp case')"
+                    ),
+                    {"id": title_id},
+                )
+                await conn.execute(
+                    text(
+                        "INSERT INTO watch_states (id, user_id, title_id, position_seconds, "
+                        "played, play_count, origin, updated_at) "
+                        "VALUES (:id, :user_id, :title_id, 0, false, 0, 'api', :seeded)"
+                    ),
+                    {"id": state_id, "user_id": user_id, "title_id": title_id, "seeded": seeded},
+                )
+                now = (await conn.execute(text("SELECT now()"))).scalar_one()
+                stamps: dict[str, str] = {}
+                for origin in ("source", "api"):
+                    stored = (
+                        await conn.execute(
+                            text(
+                                "UPDATE watch_states SET updated_at = :own, origin = :origin "
+                                "WHERE id = :id RETURNING updated_at"
+                            ),
+                            {"own": own, "origin": origin, "id": state_id},
+                        )
+                    ).scalar_one()
+                    stamps[origin] = (
+                        "now()" if stored == now else "its own" if stored == own else str(stored)
+                    )
+                return stamps
+            finally:
+                await transaction.rollback()
     finally:
         await engine.dispose()

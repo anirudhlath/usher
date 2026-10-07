@@ -196,12 +196,13 @@ job is enqueued at `BACKFILL` for that remote search.
   pair with the episode winning: passing both raises `PortDataMalformed` and
   aborts a batch of thousands. `resolve_external_ids`' title branch needs
   `episode_id IS NULL`.
-- **A history backfill must carry its own fresh `observed_at`, and both test
-  layers are blind to why.** The trigger stamps the *write* instant, so a backfill
-  carrying the walk's instant is refused by the row it exists to repair; the fake
-  accepts what Postgres refuses and `now()` is frozen per transaction.
-  **Skipping `resolve_seasons`/`resolve_episodes`** is the same shape: unit cases
-  stay green — a dict has no foreign keys — and the FK fails on walk two.
+- **A history backfill must carry its own fresh `observed_at`.** It is a newer
+  read than the walk, and a row a client wrote since the walk began refuses the
+  walk's older instant. Only the integration layer is blind to it: a test
+  transaction's frozen `now()` stamps that write before the walk began, so stage
+  it with a `clock_timestamp()` seed. **Skipping `resolve_seasons`/
+  `resolve_episodes`** is the mirror case: unit cases stay green — a dict has no
+  foreign keys — and the FK fails on walk two.
 
 ## Scale
 

@@ -176,12 +176,11 @@ async def _given_stored_history(
 ) -> None:
     """A row as a backfill would have left it, written with raw SQL.
 
-    Not through `merge_from_source`: the point of every case below is what
-    happens to a row whose `updated_at` is its *write* instant, and only an
-    `INSERT` can set that column directly -- the `BEFORE UPDATE` trigger
-    owns it on every other path. `clock_timestamp()`, never `now()`, because
-    `now()` is frozen at the transaction's start and the whole suite runs
-    inside one transaction.
+    Not through `merge_from_source`, which stores the `observed_at` it is
+    handed: the point of every case below is what happens to a row whose
+    `updated_at` is its *write* instant. `clock_timestamp()`, never `now()`,
+    because `now()` is frozen at the transaction's start and the whole suite
+    runs inside one transaction.
     """
     await session.execute(
         text(
@@ -329,15 +328,13 @@ async def test_a_backfill_writes_over_a_row_the_walk_just_wrote(
     source: Source,
     user_id: uuid.UUID,
 ) -> None:
-    """The conflict rule against the backfill, which the fakes cannot stage.
+    """The conflict rule against the backfill, on the real statement.
 
-    The stored row carries `clock_timestamp()` as its `updated_at` -- the
-    write instant, which is what the `BEFORE UPDATE` trigger leaves on every
-    row a walk merges. A backfill carrying anything at or before that
-    instant writes nothing at all, the row keeps matching `played AND
-    play_count = 0`, and the recovery never converges. Against
-    `FakeWatchStateRepository`, whose `updated_at` is whatever
-    `observed_at` it was handed, the same code passes.
+    The stored row carries `clock_timestamp()` as its `updated_at` -- its
+    write instant, as a client write made since the walk began carries. A
+    backfill carrying anything at or before that instant -- the walk's own,
+    say -- writes nothing at all, the row keeps matching `played AND
+    play_count = 0`, and the recovery never converges.
     """
     adapter = _LossyAdapter(source)
     title_id = await _given_matched_movie(session, media_items, source, "movie-1")

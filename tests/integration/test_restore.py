@@ -5,6 +5,7 @@ import gzip
 import json
 import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -1251,6 +1252,94 @@ async def test_a_watch_state_the_target_already_holds_adopts_the_artifacts_value
     # And exactly one row, so the upsert conflicted rather than inserting a
     # second watch state beside the first.
     assert await _watch_states(sessions) == 1
+
+
+@pytest.mark.parametrize(("position", "written"), [(1_800, 1), (600, 0)], ids=["moves", "matches"])
+async def test_a_restored_source_row_stamps_now_only_when_it_writes(
+    session: AsyncSession, artifact_path: Path, position: int, written: int
+) -> None:
+    """A restore is a write made now, whatever `origin` it adopts.
+
+    The upsert's update adopts the artifact's `origin` but takes no `updated_at` from the
+    artifact, and `watch_states_set_updated_at` keeps the `updated_at` of an update whose
+    origin is the source: without the upsert's own stamp the restored row keeps the
+    instant its last writer left, and a walk already under way when the restore ran writes
+    over it. The stamp stays out of the `IS DISTINCT FROM` guard, so a row the artifact
+    already matches is neither written nor stamped. The suite's rolled-back `session`, so
+    `SELECT now()` reads the restore's own instant.
+    """
+    household, title_id = new_id(), new_id()
+    backdated = datetime(2026, 8, 1, 3, tzinfo=UTC)
+    movie = _title(kind="movie", imdb_id=HELD_IMDB_ID)
+    held = _watch_state(title=movie)
+    carried = _watch_state(title=movie, position=position)
+    assert (carried["position_seconds"] != held["position_seconds"]) == bool(written), (
+        "the premise: the artifact disagrees with the stored row exactly when it writes"
+    )
+    assert carried["origin"] == "source", "the premise: the origin the trigger keeps a stamp for"
+    await session.execute(
+        text("INSERT INTO users (id, name, is_default) VALUES (:id, :name, true)"),
+        {"id": household, "name": HOUSEHOLD_NAME},
+    )
+    await session.execute(
+        text(
+            "INSERT INTO titles (id, kind, name, sort_name, imdb_id) "
+            "VALUES (:id, 'movie', :name, :sort, :imdb)"
+        ),
+        {
+            "id": title_id,
+            "name": "Restore Case: The Quiet Vacuum",
+            "sort": "restore case: quiet vacuum, the",
+            "imdb": HELD_IMDB_ID,
+        },
+    )
+    # A raw `INSERT`, which the `BEFORE UPDATE` trigger never sees, so the stamp stays.
+    await session.execute(
+        text(
+            "INSERT INTO watch_states (id, user_id, title_id, position_seconds, "
+            "runtime_seconds, played, play_count, last_played_at, origin, updated_at) "
+            "VALUES (:id, :user_id, :title_id, :position, :runtime, :played, :play_count, "
+            ":last_played_at, :origin, :updated_at)"
+        ),
+        {
+            "id": new_id(),
+            "user_id": household,
+            "title_id": title_id,
+            "position": held["position_seconds"],
+            "runtime": held["runtime_seconds"],
+            "played": held["played"],
+            "play_count": held["play_count"],
+            "last_played_at": datetime.fromisoformat(held["last_played_at"]),
+            "origin": held["origin"],
+            "updated_at": backdated,
+        },
+    )
+    seeded = (
+        await session.execute(
+            text("SELECT updated_at FROM watch_states WHERE title_id = :t"), {"t": title_id}
+        )
+    ).scalar_one()
+    assert seeded == backdated, "the premise: the stored row carries the backdated stamp"
+    _write_artifact(
+        artifact_path,
+        [("users", _user()), ("watch_states", carried)],
+        schema_revision=code_head_revision(),
+    )
+
+    report = await _service(session).restore(artifact_path)
+
+    assert report.committed and report.written["watch_states"] == written, report.refused
+    stored = (
+        await session.execute(
+            text("SELECT position_seconds, updated_at FROM watch_states WHERE title_id = :t"),
+            {"t": title_id},
+        )
+    ).one()
+    now = (await session.execute(text("SELECT now()"))).scalar_one()
+    assert now not in {backdated, datetime.fromisoformat(carried["updated_at"])}, (
+        "the premise: neither the stored stamp nor the artifact's is the restore's"
+    )
+    assert (stored.position_seconds, stored.updated_at) == (position, now if written else seeded)
 
 
 async def test_a_row_provider_setting_the_target_holds_adopts_the_artifacts_choice(

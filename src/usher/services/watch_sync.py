@@ -63,8 +63,8 @@ class MergeOutcome:
     """What one batch of inbound watch state did.
 
     `merged` is what a merge was *built* for, not the rows the repository
-    changed -- the two differ whenever PRD 03's "latest `updated_at` wins"
-    refuses one, and `SyncRun.items_matched` has always meant the first.
+    changed -- the two differ whenever PRD 03's "latest wins" refuses one,
+    and `SyncRun.items_matched` has always meant the first.
     Returning the repository's count in its place would silently change what
     every existing `sync_runs` row means and what PRD 10's dashboard plots.
 

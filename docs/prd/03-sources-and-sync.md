@@ -524,7 +524,10 @@ instead, with no API call, filling [05](05-search-and-similarity.md)'s
   - Reporting an item unplayed is the first call alone, with `Played` false.
 
   Both writes are idempotent, so the retry after a partial failure is safe.
-- **Conflicts:** latest `updated_at` wins.
+- **Conflicts:** latest wins: a walk's read carries the instant the walk began,
+  a push's or a backfill's the instant it finished reading, a client's write the
+  instant it was made, and whichever commits first, an older read never
+  overwrites a newer write or read.
 
 Watch state attaches to the canonical Title, so adding a second source later
 unifies it instead of fragmenting it.

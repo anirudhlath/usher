@@ -447,6 +447,11 @@ computed from**, and a demand read recomputes when the household's current max
 **`IS DISTINCT FROM`** it — so a newer state, a deleted state and a cleared
 history all trigger a recompute.
 
+**A walk stamps every state it merges with the instant it began**, so a centroid
+computed once the max has reached that instant — after the walk's first batch,
+or after any write stamped later — misses the rest of the walk's merges until
+the max moves again.
+
 **Genre affinity is not stored.** Within one request on the route, or one unit
 of work in the CLI and the worker, it memoises two reads:
 
