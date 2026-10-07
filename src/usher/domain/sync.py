@@ -95,20 +95,28 @@ class SyncRun(DomainModel):
     error_code: str | None = None
     started_at: AwareDatetime = Field(default_factory=lambda: datetime.now(UTC))
     finished_at: AwareDatetime | None = None
-    #: Moved on every commit by a whole-library walk's writer, and by the watch lane.
-    #: A running walk whose heartbeat has gone stale is a dead one. An item walk with
-    #: none never planned; a watch-state run with none predates heartbeats.
+    #: Moved by every walk when it starts, with every commit and between commits. A
+    #: running walk whose heartbeat has gone stale is a dead one; a row with none
+    #: predates heartbeats, and is never live.
     heartbeat_at: AwareDatetime | None = None
+    #: A whole-library walk's: the rows a walk's claim and `live_walk` read.
+    planned: bool = False
 
 
 #: How long a walk's heartbeat may stand still before the walk is taken for dead.
 STALE_AFTER = timedelta(minutes=10)
 
+#: What a walk closed by its own cancellation says.
+CANCELLED_ERROR = "cancelled: the walk was stopped before it finished"
+
+#: What a run closed by a later run of its lane says, its own process having stopped.
+ABANDONED_ERROR = "abandoned: its process stopped before it finished"
+
 
 def is_live(run: SyncRun, now: datetime) -> bool:
     """Whether `run` is a live walk: `running`, with a heartbeat under `STALE_AFTER` old.
 
-    A row with no heartbeat never is: a single walk's, or one from before heartbeats.
+    Every walk moves its heartbeat, so a row with none predates heartbeats, and never is.
     """
     return (
         run.status is SyncRunStatus.RUNNING
@@ -129,6 +137,9 @@ class SyncRunUnit(DomainModel):
     stage: WalkStage
     label: str
     position: int = Field(default=0, ge=0)
+    # The adapter's own note of where `position` stands, written only with a position
+    # at least as far.
+    checkpoint: str | None = None
     expected_items: int | None = Field(default=None, ge=0)
     items_seen: int = Field(default=0, ge=0)
     status: SyncRunUnitStatus = SyncRunUnitStatus.PENDING

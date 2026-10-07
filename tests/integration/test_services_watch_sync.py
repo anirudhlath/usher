@@ -6,7 +6,7 @@ For the three things its port fakes structurally cannot express.
 import dataclasses
 import uuid
 from collections.abc import AsyncGenerator, Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -24,7 +24,7 @@ from usher.db.repositories.watch_state import PostgresWatchStateRepository
 from usher.domain.enums import SourceKind, TitleKind
 from usher.domain.ids import new_id
 from usher.domain.source import Source
-from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus
+from usher.domain.sync import ABANDONED_ERROR, SyncRun, SyncRunKind, SyncRunStatus
 from usher.domain.title import Title
 from usher.ports.ingest import MediaItemUpsert
 from usher.ports.source import SourceItem, SourceItemKind, SourceWatchState
@@ -119,6 +119,7 @@ def service(
         # each test isolated. What is under test is the ordering of the
         # writes and the SQL they produce, not their durability.
         commit=session.flush,
+        rollback=session.rollback,
         batch_size=1_000,
     )
 
@@ -175,12 +176,11 @@ async def _given_stored_history(
 ) -> None:
     """A row as a backfill would have left it, written with raw SQL.
 
-    Not through `merge_from_source`: the point of every case below is what
-    happens to a row whose `updated_at` is its *write* instant, and only an
-    `INSERT` can set that column directly -- the `BEFORE UPDATE` trigger
-    owns it on every other path. `clock_timestamp()`, never `now()`, because
-    `now()` is frozen at the transaction's start and the whole suite runs
-    inside one transaction.
+    Not through `merge_from_source`, which stores the `observed_at` it is
+    handed: the point of every case below is what happens to a row whose
+    `updated_at` is its *write* instant. `clock_timestamp()`, never `now()`,
+    because `now()` is frozen at the transaction's start and the whole suite
+    runs inside one transaction.
     """
     await session.execute(
         text(
@@ -328,15 +328,13 @@ async def test_a_backfill_writes_over_a_row_the_walk_just_wrote(
     source: Source,
     user_id: uuid.UUID,
 ) -> None:
-    """The conflict rule against the backfill, which the fakes cannot stage.
+    """The conflict rule against the backfill, on the real statement.
 
-    The stored row carries `clock_timestamp()` as its `updated_at` -- the
-    write instant, which is what the `BEFORE UPDATE` trigger leaves on every
-    row a walk merges. A backfill carrying anything at or before that
-    instant writes nothing at all, the row keeps matching `played AND
-    play_count = 0`, and the recovery never converges. Against
-    `FakeWatchStateRepository`, whose `updated_at` is whatever
-    `observed_at` it was handed, the same code passes.
+    The stored row carries `clock_timestamp()` as its `updated_at` -- its
+    write instant, as a client write made since the walk began carries. A
+    backfill carrying anything at or before that instant -- the walk's own,
+    say -- writes nothing at all, the row keeps matching `played AND
+    play_count = 0`, and the recovery never converges.
     """
     adapter = _LossyAdapter(source)
     title_id = await _given_matched_movie(session, media_items, source, "movie-1")
@@ -479,43 +477,70 @@ async def test_a_batch_of_states_costs_a_bounded_number_of_statements(
     assert small == large, f"{small} statements for 20 states, {large} for 200"
 
 
-async def test_an_unfinished_first_walk_is_closed_and_a_fresh_one_runs(
+@pytest.mark.parametrize(
+    "heartbeat_at", [None, RUN_AT + timedelta(hours=1)], ids=["no-heartbeat", "stale-heartbeat"]
+)
+async def test_a_dead_watch_run_is_closed_and_the_next_reads_from_its_cursor_at_zero(
     session: AsyncSession,
     service: WatchStateSyncService,
     media_items: PostgresMediaItemRepository,
     watch_states: PostgresWatchStateRepository,
     source: Source,
     user_id: uuid.UUID,
+    heartbeat_at: datetime | None,
 ) -> None:
-    """Against Postgres, whose `save` keeps the greater `position`.
+    """Against Postgres, whose `save` keeps the greater `position`: no row is reclaimed.
 
-    Resetting the old row in place would leave 300,000 in it, so it is closed and
-    the fresh run starts at 0.
+    The dead delta is closed `failed` by the real statement, and the next run, in a row
+    of its own, reads at `StartIndex` 0 from the dead run's cursor, older than the
+    lane's, so a state saved between the two is read.
     """
     runs = PostgresSyncRunRepository(session)
-    abandoned = SyncRun(
+    completed = SyncRun(
         source_id=source.id,
         kind=SyncRunKind.WATCH_STATE,
+        status=SyncRunStatus.COMPLETED,
+        started_at=RUN_AT,
+        finished_at=RUN_AT,
+    )
+    dead = SyncRun(
+        source_id=source.id,
+        kind=SyncRunKind.WATCH_STATE,
+        cursor_at=RUN_AT - timedelta(days=1),
         position=300_000,
         items_seen=300_000,
-        started_at=RUN_AT,
+        heartbeat_at=heartbeat_at,
+        started_at=RUN_AT + timedelta(hours=1),
     )
-    await runs.add(abandoned)
+    for one in (completed, dead):
+        await runs.add(one)
+    lane = await runs.latest_completed_cursor(source.id, SyncRunKind.WATCH_STATE)
+    assert dead.cursor_at is not None and lane is not None and dead.cursor_at < lane, (
+        "the premise: the dead run read from before the lane's cursor"
+    )
     watched = await _given_matched_movie(session, media_items, source, "movie-1")
     adapter = FakeSourceAdapter(source)
-    adapter.seed(_item("movie-1"), CHANGED_AT)
+    adapter.seed(_item("movie-1"), RUN_AT - timedelta(hours=12))
     adapter.seed_state(SourceWatchState(external_id="movie-1", position_seconds=0, played=True))
 
     run = await service.sync(source, adapter, user_id=user_id)
 
     assert adapter.resumed_from == [0]
-    assert run.id != abandoned.id
-    assert (run.status, run.position) == (SyncRunStatus.COMPLETED, 1)
-    closed = await runs.get(abandoned.id)
-    assert closed is not None
-    assert (closed.status, closed.error) == (
-        SyncRunStatus.FAILED,
-        "superseded: a first watch walk restarts",
+    assert run.id not in (completed.id, dead.id), "a row was reclaimed"
+    assert (run.status, run.cursor_at, run.position) == (
+        SyncRunStatus.COMPLETED,
+        dead.cursor_at,
+        1,
     )
+    assert len(await runs.list_for_source(source.id)) == 3
+    closed = await runs.get(dead.id)
+    assert closed is not None
+    assert (closed.status, closed.error, closed.error_code, closed.position) == (
+        SyncRunStatus.FAILED,
+        ABANDONED_ERROR,
+        None,
+        300_000,
+    )
+    assert closed.finished_at is not None and closed.finished_at > dead.started_at
     stored = await watch_states.get_for_title(user_id, watched)
     assert stored is not None and stored.played is True

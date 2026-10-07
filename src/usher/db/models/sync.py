@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -29,12 +30,11 @@ class SyncRunRow(Base):
 
     A history, not a checkpoint -- contrast `ImportRunRow`, one row per dataset.
 
-    **`position` half-excepts that**, and only for the `watch_state` kind: such
-    a run advances `position` per committed batch, and a delta reuses its own
-    row across attempts, so while it is unfinished its row is read back as a
-    checkpoint. The table is still a history -- one row per *walk* rather than
-    one per attempt at it -- and the other kinds leave the column at 0 and
-    restart from `cursor_at`.
+    `position` is the `watch_state` kind's alone: such a run advances it per
+    committed batch, counting the states it has committed, and nothing reads it
+    back, since a watch run is never resumed. The other kinds leave it at 0. The
+    table is one row per *walk* rather than one per attempt at it: a resumed
+    whole-library walk continues its own row.
 
     No `set_updated_at` trigger and no `updated_at` column: a run's
     interesting timestamps are `started_at` and `finished_at`, and both are
@@ -56,7 +56,7 @@ class SyncRunRow(Base):
         enum_column(SyncRunStatus, length=16), nullable=False, server_default=text("'running'")
     )
     cursor_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # The walk's resume point: a **page offset**, not an ordering key.
+    # How many states a watch-state run has committed; 0 for every other kind.
     position: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
 
     items_seen: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
@@ -73,9 +73,11 @@ class SyncRunRow(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # Nullable with no server default: a run written before a writer heartbeat
-    # existed has none, and that absence is what marks it a walk without a plan.
+    # Nullable with no server default: every walk moves it, and a run written
+    # before heartbeats existed has none.
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # A whole-library walk's flag: the rows a walk's claim and `live_walk` read.
+    planned: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
 
     __table_args__ = (
         # "The cursor for the next delta walk" is a single-row lookup: the newest
@@ -110,6 +112,9 @@ class SyncRunUnitRow(Base):
     label: Mapped[str] = mapped_column(Text, nullable=False)
     # Where the unit resumes, in the adapter's offsets.
     position: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    # The adapter's own opaque note of where `position` stands, moved only with a
+    # position at least as far.
+    checkpoint: Mapped[str | None] = mapped_column(Text, nullable=True)
     expected_items: Mapped[int | None] = mapped_column(Integer)
     items_seen: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     status: Mapped[SyncRunUnitStatus] = mapped_column(

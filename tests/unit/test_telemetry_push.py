@@ -97,6 +97,9 @@ def _applier(events: FakeEventPublisher) -> PushApplyService:
     async def _commit() -> None:
         return None
 
+    async def _rollback() -> None:
+        return None
+
     return PushApplyService(
         IngestService(
             matcher=MatchService(titles=titles, matching=matching, queue=queue),
@@ -111,6 +114,7 @@ def _applier(events: FakeEventPublisher) -> PushApplyService:
             runs=FakeSyncRunRepository(),
             queue=queue,
             commit=_commit,
+            rollback=_rollback,
         ),
         events,
         _commit,

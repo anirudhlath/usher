@@ -992,10 +992,14 @@ def _printed(out: str) -> list[list[str]]:
     ]
 
 
-def test_a_failed_watch_run_after_the_seed_fails_the_command_however_the_rest_ends(
+def test_a_watch_run_failed_by_the_hook_is_no_failure_once_the_run_after_the_walk_completes(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The hook's run fails; the walk, and the run after it in a row of its own, complete."""
+    """The hook's run fails; the walk, and the run after it in a row of its own, complete.
+
+    The run after the walk reads back to the instant the walk began, so it covers the
+    hook's run: the command exits 0, raising nothing.
+    """
     hooked = _run(SyncRunKind.WATCH_STATE, SyncRunStatus.FAILED, error="source is unreachable")
     after = _run(SyncRunKind.WATCH_STATE, SyncRunStatus.COMPLETED)
     assert after.id != hooked.id, "the premise: the run after the walk is a row of its own"
@@ -1006,30 +1010,29 @@ def test_a_failed_watch_run_after_the_seed_fails_the_command_however_the_rest_en
         seeded=hooked,
     )
 
-    with pytest.raises(SystemExit) as exit_info:
-        usher_cli.main(["sync"])
+    usher_cli.main(["sync"])
 
     assert _printed(capsys.readouterr().out) == [
         ["watch_state", "failed"],
         ["full", "completed"],
         ["watch_state", "completed"],
     ], "the premise: the hook's run failed, then the walk and the run after it completed"
-    assert exit_info.value.code == (
-        "1 sync run(s) failed: watch_state; see the lines above and `usher sync-status`"
-    )
 
 
-def test_a_watch_row_failed_by_the_hook_and_again_after_the_walk_is_counted_once(
+def test_watch_runs_failed_by_the_hook_and_after_the_walk_are_one_failure(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The run after the walk resumed the row the hook's run failed, and failed it again."""
+    """The hook's run fails, and so does the run after the walk, a row of its own.
+
+    The exit names the one failure that is the source's last word, not both.
+    """
     hooked = _run(SyncRunKind.WATCH_STATE, SyncRunStatus.FAILED, error="source is unreachable")
-    resumed = hooked.evolve(error="source is still unreachable")
-    assert resumed.id == hooked.id, "the premise: the run after the walk is the hook's row"
+    after = _run(SyncRunKind.WATCH_STATE, SyncRunStatus.FAILED, error="still unreachable")
+    assert after.id != hooked.id, "the premise: the run after the walk is a row of its own"
     _sync_against(
         monkeypatch,
         walk=_run(SyncRunKind.FULL, SyncRunStatus.COMPLETED),
-        watch=resumed,
+        watch=after,
         seeded=hooked,
     )
 
@@ -1046,27 +1049,37 @@ def test_a_watch_row_failed_by_the_hook_and_again_after_the_walk_is_counted_once
     )
 
 
-def test_a_watch_row_failed_by_the_hook_and_completed_after_the_walk_is_no_failure(
+def test_one_sources_failed_watch_run_survives_the_next_sources_clean_sync(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The row ended completed, and so did the walk: the command exits 0, raising nothing."""
-    hooked = _run(SyncRunKind.WATCH_STATE, SyncRunStatus.FAILED, error="source is unreachable")
-    completed = hooked.evolve(status=SyncRunStatus.COMPLETED, error=None)
-    assert completed.id == hooked.id, "the premise: the run after the walk is the hook's row"
-    _sync_against(
+    """What the run after a walk drops is its own source's, never an earlier source's.
+
+    The first source's run after the walk fails; the second source's walk and watch run
+    complete, and the exit still names that one failure.
+    """
+    adapters = _sync_against(
         monkeypatch,
         walk=_run(SyncRunKind.FULL, SyncRunStatus.COMPLETED),
-        watch=completed,
-        seeded=hooked,
+        watch=_run(SyncRunKind.WATCH_STATE, SyncRunStatus.FAILED, error="source is unreachable"),
+        second=(
+            _run(SyncRunKind.FULL, SyncRunStatus.COMPLETED),
+            _run(SyncRunKind.WATCH_STATE, SyncRunStatus.COMPLETED),
+        ),
     )
 
-    usher_cli.main(["sync"])
+    with pytest.raises(SystemExit) as exit_info:
+        usher_cli.main(["sync"])
 
-    assert _printed(capsys.readouterr().out) == [
-        ["watch_state", "failed"],
-        ["full", "completed"],
-        ["watch_state", "completed"],
-    ]
+    output = capsys.readouterr().out
+    assert [one.closed for one in adapters] == [1, 1], (
+        "the premise: both sources were opened and both adapters released"
+    )
+    assert "Second Emby: watch_state completed" in output, (
+        "the premise: the second source's watch run completed after the first's failed"
+    )
+    assert exit_info.value.code == (
+        "1 sync run(s) failed: watch_state; see the lines above and `usher sync-status`"
+    )
 
 
 class _AnsweringWatch(WatchStateSyncService):
@@ -1107,7 +1120,7 @@ def _seed_hook(watch: WatchStateSyncService, failed: list[SyncRun]) -> AfterSeed
 async def test_a_failed_watch_run_after_the_seed_is_kept_for_the_exit_line(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Printed, and kept, so the command exits non-zero however the runs after it end."""
+    """Printed, and kept until the run after the walk takes the source's last word."""
     run = _run(SyncRunKind.WATCH_STATE, SyncRunStatus.FAILED, error="source is unreachable")
     failed: list[SyncRun] = []
 

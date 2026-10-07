@@ -49,17 +49,19 @@ class _Adapter:
     def __init__(self, items: list[SourceItem]) -> None:
         self._items = items
 
-    def list_items(self, since: datetime | None = None) -> AsyncIterator[SourceItem]:
+    def list_items(self, since: datetime | None = None) -> AsyncGenerator[SourceItem]:
         return self._walk()
 
-    async def _walk(self) -> AsyncIterator[SourceItem]:
+    async def _walk(self) -> AsyncGenerator[SourceItem]:
         for item in self._items:
             yield item
 
     async def plan_walk(self) -> WalkPlan:
         return WHOLE_LIBRARY
 
-    def list_unit(self, key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage]:
+    def list_unit(
+        self, key: str, *, start_index: int = 0, checkpoint: str | None = None
+    ) -> AsyncGenerator[UnitPage]:
         return pages_of(self._walk(), start_index=start_index)
 
 

@@ -7,14 +7,21 @@ from datetime import datetime
 from typing import Any, cast
 
 from pydantic import AwareDatetime
-from sqlalchemy import CursorResult, func, select, text, update
+from sqlalchemy import CursorResult, Text, case, func, literal, or_, select, text, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from usher.db.models.sync import SyncRunRow, SyncRunUnitRow
-from usher.db.repositories._errors import constraint_name, is_row_refusal
+from usher.db.repositories._errors import constraint_name, is_row_refusal, refusals_as_conflict
 from usher.domain.ids import new_id
-from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus, SyncRunUnit, SyncRunUnitStatus
+from usher.domain.sync import (
+    STALE_AFTER,
+    SyncRun,
+    SyncRunKind,
+    SyncRunStatus,
+    SyncRunUnit,
+    SyncRunUnitStatus,
+)
 from usher.ports.errors import RepositoryConflict, RepositoryNotFound
 from usher.ports.repository import CachedPayload, RawPayloadStore, SyncRunRepository
 
@@ -39,6 +46,23 @@ ORDER BY started_at DESC
 LIMIT 1
 """
 
+# The `failed` runs no completed run covers: none started at or after one and read the same
+# way, both with no cursor or both with one and its own at or before the failed run's. The
+# comparison is NULL when only one has a cursor, so a cursor covers only a cursor.
+# The probe climbs from the failure's start and stops at the first covering run, normally the next.
+_UNCOVERED_FAILED_CURSORS = """
+SELECT f.cursor_at FROM sync_runs AS f
+WHERE f.source_id = :source_id AND f.kind = :kind AND f.status = 'failed'
+  AND (
+      SELECT c.id FROM sync_runs AS c
+      WHERE c.source_id = f.source_id AND c.kind = f.kind AND c.status = 'completed'
+        AND c.started_at >= f.started_at
+        AND ((c.cursor_at IS NULL AND f.cursor_at IS NULL) OR c.cursor_at <= f.cursor_at)
+      ORDER BY c.started_at
+      LIMIT 1
+  ) IS NULL
+"""
+
 # The newest run of a kind, whatever its status. `latest_incomplete_run` tests the status on
 # the one row this returns; see the port for why it never filters on it.
 _NEWEST = """
@@ -48,10 +72,10 @@ ORDER BY started_at DESC, id DESC
 LIMIT 1
 """
 
-# `_NEWEST` among the runs that carry a heartbeat: on the item lanes, the planned walks.
+# `_NEWEST` among the planned runs, the whole-library walks.
 _NEWEST_PLANNED = """
 SELECT * FROM sync_runs
-WHERE source_id = :source_id AND kind = :kind AND heartbeat_at IS NOT NULL
+WHERE source_id = :source_id AND kind = :kind AND planned
 ORDER BY started_at DESC, id DESC
 LIMIT 1
 """
@@ -121,10 +145,8 @@ class PostgresSyncRunRepository(SyncRunRepository):
     async def save(self, run: SyncRun) -> None:
         stored = run.model_dump()
         values: dict[str, Any] = {name: stored[name] for name in _MUTABLE}
-        # **`position` may advance and may never regress.** It is a checkpoint rather
-        # than a value, so the honest merge of two attempts' opinions about it is the
-        # further one: a slow attempt saving the page it started from over a faster
-        # one's progress is the #41 loop with a checkpoint column added.
+        # **`position` may advance and may never regress**: a stale save never pulls
+        # committed progress back, whichever attempt wrote it.
         values["position"] = func.greatest(SyncRunRow.position, run.position)
         try:
             # Inside the SAVEPOINT, not before it: these statements autoflush,
@@ -161,6 +183,33 @@ class PostgresSyncRunRepository(SyncRunRepository):
                 constraint=constraint_name(exc),
             ) from exc
 
+    async def close_abandoned(
+        self, source_id: uuid.UUID, kinds: Sequence[SyncRunKind], *, now: datetime, error: str
+    ) -> int:
+        if not kinds:
+            return 0
+        # `error` is the caller's text, so a refused row is possible, and it must not
+        # abort the caller's transaction.
+        async with refusals_as_conflict(
+            self._session, f"closing source {source_id}'s abandoned runs was refused"
+        ):
+            result = await self._session.execute(
+                update(SyncRunRow)
+                .where(
+                    SyncRunRow.source_id == source_id,
+                    SyncRunRow.kind.in_(list(kinds)),
+                    SyncRunRow.status == SyncRunStatus.RUNNING,
+                    # `is_live`'s complement: no heartbeat, or one at least `STALE_AFTER` old.
+                    or_(
+                        SyncRunRow.heartbeat_at.is_(None),
+                        SyncRunRow.heartbeat_at <= now - STALE_AFTER,
+                    ),
+                )
+                .values(status=SyncRunStatus.FAILED, error=error, error_code=None, finished_at=now)
+                .execution_options(synchronize_session="fetch")
+            )
+            return cast("CursorResult[Any]", result).rowcount
+
     async def get(self, run_id: uuid.UUID) -> SyncRun | None:
         with self._session.no_autoflush:
             row = await self._session.get(SyncRunRow, run_id)
@@ -176,6 +225,15 @@ class PostgresSyncRunRepository(SyncRunRepository):
                 )
             ).scalar_one_or_none()
         return found
+
+    async def uncovered_failed_cursors(
+        self, source_id: uuid.UUID, kind: SyncRunKind
+    ) -> set[AwareDatetime | None]:
+        with self._session.no_autoflush:
+            found = await self._session.execute(
+                text(_UNCOVERED_FAILED_CURSORS), {"source_id": source_id, "kind": kind.value}
+            )
+        return set(found.scalars())
 
     async def latest_run(self, source_id: uuid.UUID, kind: SyncRunKind) -> SyncRun | None:
         return await self._newest(_NEWEST, source_id, kind)
@@ -222,9 +280,18 @@ class PostgresSyncRunRepository(SyncRunRepository):
     async def save_unit(self, unit: SyncRunUnit) -> None:
         stored = unit.model_dump()
         values: dict[str, Any] = {name: stored[name] for name in _UNIT_MUTABLE}
-        # `save`'s two rules, for `save`'s reasons: the checkpoint only rises, and a
+        # `save`'s two rules, for `save`'s reasons: the position only rises, and a
         # completed unit refuses the whole write.
         values["position"] = func.greatest(SyncRunUnitRow.position, unit.position)
+        # The note moves only with a position at least as far as the stored one, so
+        # the two always describe the same place.
+        values["checkpoint"] = case(
+            (
+                literal(unit.position) >= SyncRunUnitRow.position,
+                literal(unit.checkpoint, Text()),
+            ),
+            else_=SyncRunUnitRow.checkpoint,
+        )
         try:
             async with self._session.begin_nested():
                 result = await self._session.execute(

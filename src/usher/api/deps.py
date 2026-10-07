@@ -478,6 +478,7 @@ def get_reconcile_service(
         runs=runs,
         events=events,
         commit=session.commit,
+        rollback=session.rollback,
         batch_size=settings.sync_batch_size,
         max_retract_fraction=settings.sync_max_retract_fraction,
         walkers=settings.sync_walkers,
@@ -498,6 +499,7 @@ def get_watch_state_sync_service(
         runs=runs,
         queue=queue,
         commit=session.commit,
+        rollback=session.rollback,
         batch_size=settings.sync_batch_size,
     )
 

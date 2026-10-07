@@ -16,8 +16,10 @@ from opentelemetry.sdk.metrics.export import HistogramDataPoint, InMemoryMetricR
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-from pydantic import SecretStr
+from pydantic import AwareDatetime, SecretStr
 
+from tests.fakes.emby_harness import instant_sleep
+from tests.fakes.emby_server import FakeEmbyServer
 from tests.fakes.episode_repository import FakeEpisodeRepository
 from tests.fakes.event_publisher import FakeEventPublisher
 from tests.fakes.job_queue import FakeJobQueue
@@ -31,6 +33,8 @@ from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
 from usher.domain.source import Source
 from usher.domain.sync import (
+    ABANDONED_ERROR,
+    CANCELLED_ERROR,
     STALE_AFTER,
     SyncRun,
     SyncRunKind,
@@ -38,6 +42,7 @@ from usher.domain.sync import (
     SyncRunUnit,
     SyncRunUnitStatus,
     WalkStage,
+    is_live,
 )
 from usher.ports.credentials import SourceCredentials
 from usher.ports.errors import PortDataMalformed, PortUnavailable, UsherPortError
@@ -120,6 +125,7 @@ class _Fixture:
         self.runs = FakeSyncRunRepository()
         self.events = FakeEventPublisher()
         self.commits = 0
+        self.rollbacks = 0
         # The adapter's own list, so its `fetched` entries and the `completed`
         # entries `_commit` adds are ordered against each other.
         self.journal = self.adapter.journal
@@ -141,6 +147,7 @@ class _Fixture:
             runs=self.runs,
             events=self.events,
             commit=self._commit,
+            rollback=self._rollback,
             batch_size=batch_size,
             max_retract_fraction=max_retract_fraction,
             walkers=walkers,
@@ -163,6 +170,9 @@ class _Fixture:
             if unit.status is SyncRunUnitStatus.COMPLETED and key not in self._completed:
                 self._completed.add(key)
                 self.journal.append(("completed", unit.unit_key))
+
+    async def _rollback(self) -> None:
+        self.rollbacks += 1
 
 
 @pytest.fixture
@@ -569,8 +579,11 @@ async def test_a_delta_an_operator_asked_for_is_not_bounded_by_the_gap_closers_c
     full = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
     assert full.status is SyncRunStatus.COMPLETED and full.items_seen == 12
 
-    bounded = await fixture.service.reconcile(
-        fixture.source, SyncRunKind.DELTA, fixture.adapter, max_items=5
+    # Under a deadline: the walk stops with its reader blocked on a full queue, and a
+    # reader left running would hang the case rather than fail it.
+    bounded = await asyncio.wait_for(
+        fixture.service.reconcile(fixture.source, SyncRunKind.DELTA, fixture.adapter, max_items=5),
+        5.0,
     )
     assert bounded.status is SyncRunStatus.FAILED
     assert bounded.items_seen == 5, "the lane's delta stops at its ceiling"
@@ -634,8 +647,9 @@ async def test_a_walk_stopped_at_the_gap_ceiling_keeps_every_batch_it_committed(
     await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
     before = fixture.commits
 
-    run = await fixture.service.reconcile(
-        fixture.source, SyncRunKind.DELTA, fixture.adapter, max_items=7
+    run = await asyncio.wait_for(
+        fixture.service.reconcile(fixture.source, SyncRunKind.DELTA, fixture.adapter, max_items=7),
+        5.0,
     )
 
     assert run.items_seen == 7
@@ -658,8 +672,9 @@ async def test_a_walk_stopped_at_the_gap_ceiling_sweeps_nothing() -> None:
         fixture.adapter.seed(_item(f"m{index}"), T0)
     await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
 
-    run = await fixture.service.reconcile(
-        fixture.source, SyncRunKind.FULL, fixture.adapter, max_items=16
+    run = await asyncio.wait_for(
+        fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter, max_items=16),
+        5.0,
     )
 
     assert run.status is SyncRunStatus.FAILED
@@ -692,8 +707,11 @@ async def test_a_walk_stopped_at_the_gap_ceiling_tells_the_operator_what_to_run(
     lines: list[str] = []
     sink = logger.add(lines.append, level="WARNING", format="{level.name}|{message}")
     try:
-        run = await fixture.service.reconcile(
-            fixture.source, SyncRunKind.DELTA, fixture.adapter, max_items=7
+        run = await asyncio.wait_for(
+            fixture.service.reconcile(
+                fixture.source, SyncRunKind.DELTA, fixture.adapter, max_items=7
+            ),
+            5.0,
         )
     finally:
         logger.remove(sink)
@@ -737,8 +755,9 @@ async def test_the_gap_ceilings_error_is_distinguishable_from_the_dead_mans_swit
     for index in range(10):
         fixture.adapter.seed(_item(f"m{index}"), LATER)
     await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
-    bounded = await fixture.service.reconcile(
-        fixture.source, SyncRunKind.DELTA, fixture.adapter, max_items=4
+    bounded = await asyncio.wait_for(
+        fixture.service.reconcile(fixture.source, SyncRunKind.DELTA, fixture.adapter, max_items=4),
+        5.0,
     )
     ceiling_error = bounded.error or ""
 
@@ -894,6 +913,57 @@ async def test_the_sweep_window_is_the_runs_own_start_instant(
     assert run.started_at < datetime.now(UTC) + timedelta(seconds=1)
 
 
+async def test_a_full_walk_retracts_nothing_a_walk_begun_before_it_read_again() -> None:
+    """A delta begins first and reads every item only once a full walk has committed them.
+
+    Stamped with the delta's earlier start, each item would sit behind the full walk's
+    own, and that walk's sweep would retract all five while they are still on the source.
+    """
+    fixture = _Fixture(batch_size=1, max_retract_fraction=1.0)
+    names = [f"m{index}" for index in range(5)]
+    delta_waits, full_has_read, full_may_end = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def delta_listing(since: AwareDatetime | None = None) -> AsyncGenerator[SourceItem]:
+        delta_waits.set()
+        await full_has_read.wait()
+        for name in names:
+            yield _item(name)
+
+    async def full_listing(since: AwareDatetime | None = None) -> AsyncGenerator[SourceItem]:
+        for name in names:
+            yield _item(name)
+        await full_may_end.wait()
+
+    delta_adapter = FakeSourceAdapter(fixture.source)
+    full_adapter = FakeSourceAdapter(fixture.source)
+    delta_adapter.list_items = delta_listing  # type: ignore[method-assign]
+    full_adapter.list_items = full_listing  # type: ignore[method-assign]
+    delta = asyncio.create_task(
+        fixture.service.reconcile(fixture.source, SyncRunKind.DELTA, delta_adapter, plan=False)
+    )
+    async with asyncio.timeout(5):
+        await delta_waits.wait()
+    full = asyncio.create_task(
+        fixture.service.reconcile(fixture.source, SyncRunKind.FULL, full_adapter, plan=False)
+    )
+    async with asyncio.timeout(5):
+        while (
+            committed := await fixture.runs.latest_run(fixture.source.id, SyncRunKind.FULL)
+        ) is None or committed.items_seen < len(names):
+            await asyncio.sleep(0)
+        full_has_read.set()
+        delta_run = await delta
+        full_may_end.set()
+        full_run = await full
+    assert delta_run.started_at < full_run.started_at, "the premise: the delta began first"
+    assert (delta_run.status, delta_run.items_seen) == (SyncRunStatus.COMPLETED, len(names))
+    assert full_run.status is SyncRunStatus.COMPLETED
+    assert full_run.items_retracted == 0
+    for name in names:
+        stored = await fixture.media_items.get_by_external_id(fixture.source.id, name)
+        assert stored is not None and stored.available is True, f"{name} was retracted"
+
+
 # -- what a walk tells a client --------------------------------------------
 
 
@@ -970,8 +1040,9 @@ async def test_a_bounded_walk_records_its_kind_in_a_column_rather_than_as_a_pref
         fixture.adapter.seed(_item(f"m{index}"), LATER)
     await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
 
-    run = await fixture.service.reconcile(
-        fixture.source, SyncRunKind.DELTA, fixture.adapter, max_items=4
+    run = await asyncio.wait_for(
+        fixture.service.reconcile(fixture.source, SyncRunKind.DELTA, fixture.adapter, max_items=4),
+        5.0,
     )
 
     assert run.status is SyncRunStatus.FAILED
@@ -1175,6 +1246,51 @@ async def test_a_failing_unit_fails_the_run_and_keeps_every_units_committed_posi
     assert await fixture.media_items.get_by_external_id(fixture.source.id, shows[2]) is None
 
 
+async def test_a_unit_commits_its_last_held_pages_checkpoint() -> None:
+    fixture = _Fixture(batch_size=2)
+    _shelve(fixture, "Films", range(3))
+
+    async def noted(
+        key: str, *, start_index: int = 0, checkpoint: str | None = None
+    ) -> AsyncGenerator[UnitPage]:
+        for index in range(2):
+            yield UnitPage((_item(f"m{index}"),), resume_at=index + 1, checkpoint=f"note-{index}")
+        raise PortUnavailable("the page after them failed")
+
+    fixture.adapter.list_unit = noted  # type: ignore[method-assign]
+    run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+
+    (films,) = [u for u in await fixture.runs.units_for(run.id) if u.unit_key == "library:Films"]
+    assert (films.position, films.checkpoint, films.status) == (
+        2,
+        "note-1",
+        SyncRunUnitStatus.FAILED,
+    )
+
+
+async def test_a_unit_that_ends_on_a_batch_boundary_keeps_its_last_pages_checkpoint() -> None:
+    """Its end commits no page, and that commit must not wipe the note the batch left."""
+    fixture = _Fixture(batch_size=2)
+    _shelve(fixture, "Films", range(2))
+
+    async def noted(
+        key: str, *, start_index: int = 0, checkpoint: str | None = None
+    ) -> AsyncGenerator[UnitPage]:
+        for index in range(2):
+            yield UnitPage((_item(f"m{index}"),), resume_at=index + 1, checkpoint=f"note-{index}")
+
+    fixture.adapter.list_unit = noted  # type: ignore[method-assign]
+    run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+
+    assert _progress(fixture) == [2, 2], "the premise: the end rode a commit of its own"
+    [films] = await fixture.runs.units_for(run.id)
+    assert (films.position, films.checkpoint, films.status) == (
+        2,
+        "note-1",
+        SyncRunUnitStatus.COMPLETED,
+    )
+
+
 async def test_the_run_and_its_first_heartbeat_are_committed_before_the_plan_is_made() -> None:
     """A walk that dies while planning still leaves a row saying when it was last alive."""
     fixture = _Fixture()
@@ -1276,20 +1392,27 @@ async def test_every_commit_of_a_planned_walk_moves_the_heartbeat() -> None:
 
 
 async def test_a_writer_waiting_on_its_walkers_still_heartbeats() -> None:
-    """A page under retry can take minutes, and the run must not look dead meanwhile."""
-    fixture = _Fixture(heartbeat_seconds=0.01)
+    """A page under retry can take minutes, and the run must not look dead meanwhile.
+
+    Each beat falls due as the timer passes the heartbeat. A heartbeat of a hundredth
+    of a second only sets how often the waiting writer looks.
+    """
+    timer = _Timer()
+    fixture = _Fixture(heartbeat_seconds=0.01, timer=timer)
     _shelve(fixture, "Films", range(2))
     release = fixture.adapter.hold("Films")
     walk = asyncio.create_task(
         fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
     )
     try:
-        async with asyncio.timeout(5):
-            while fixture.commits < 5:
-                await asyncio.sleep(0.01)
+        await _until(lambda: bool(fixture.adapter.unit_starts))
+        start = len(fixture.checkpoints)
+        for beat in range(1, 4):
+            timer.now += 0.015
+            await _until_checkpoints(fixture, start + beat)
         assert fixture.journal == [], "the premise: nothing was fetched while the writer waited"
-        beats = [beat for _, beat in fixture.checkpoints[2:5] if beat is not None]
-        assert len(beats) == 3
+        beats = [beat for _, beat in fixture.checkpoints[start:] if beat is not None]
+        assert len(beats) == 3, "one beat for each heartbeat the timer passed, and no more"
         assert beats == sorted(set(beats)), "a beat that did not move the heartbeat"
     finally:
         release.set()
@@ -1300,19 +1423,26 @@ async def test_a_writer_waiting_on_its_walkers_still_heartbeats() -> None:
 async def test_pages_that_keep_arriving_below_a_batch_still_let_the_heartbeat_move() -> None:
     """A beat falls due a fixed time after the last commit, not after a silence.
 
-    Forty pages of one item, a hundredth of a second apart, never fill a batch, so a
-    writer that beat only when nothing arrived would not beat once in the walk.
+    Forty pages of one item, each two-fifths of a heartbeat after the last on the
+    timer, never fill a batch, so a writer that beat only when nothing arrived would
+    not beat once in the walk. No page waits on wall time.
     """
-    fixture = _Fixture(heartbeat_seconds=0.1)
+    heartbeat = 60.0
+    timer = _Timer()
+    fixture = _Fixture(heartbeat_seconds=heartbeat, timer=timer)
     _shelve(fixture, "Films", range(1))
 
-    async def _trickle(key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage]:
+    async def _trickle(
+        key: str, *, start_index: int = 0, checkpoint: str | None = None
+    ) -> AsyncGenerator[UnitPage]:
         for index in range(40):
-            await asyncio.sleep(0.01)
+            timer.now += 0.4 * heartbeat
             yield UnitPage((_item(f"t{index}"),), resume_at=index + 1)
 
     fixture.adapter.list_unit = _trickle  # type: ignore[method-assign]
-    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    await asyncio.wait_for(
+        fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter), 5.0
+    )
     carried = [seen for seen, _ in fixture.checkpoints if seen]
     assert carried[0] == 40, "the premise: the unit's forty items rode one commit"
     beats = [beat for seen, beat in fixture.checkpoints[2:] if seen == 0]
@@ -1384,7 +1514,7 @@ async def test_a_delta_with_a_cursor_keeps_the_single_walk() -> None:
     await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
     delta = await fixture.service.reconcile(fixture.source, SyncRunKind.DELTA, fixture.adapter)
     assert delta.cursor_at is not None, "the premise: the full walk gave the delta its cursor"
-    assert delta.heartbeat_at is None
+    assert delta.planned is False
     assert await fixture.runs.units_for(delta.id) == []
 
 
@@ -1396,7 +1526,7 @@ async def test_a_bounded_walk_keeps_the_single_walk_even_with_no_cursor() -> Non
     )
     assert run.cursor_at is None, "the premise: a cursorless delta, which would otherwise plan"
     assert run.status is SyncRunStatus.COMPLETED
-    assert run.heartbeat_at is None
+    assert run.planned is False
     assert await fixture.runs.units_for(run.id) == []
 
 
@@ -1409,7 +1539,7 @@ async def test_a_walk_told_not_to_plan_keeps_the_single_walk() -> None:
     )
     assert run.status is SyncRunStatus.COMPLETED
     assert run.items_seen == 2
-    assert run.heartbeat_at is None
+    assert run.planned is False
     assert await fixture.runs.units_for(run.id) == []
 
 
@@ -1434,6 +1564,53 @@ async def test_a_failing_unit_cancels_the_walkers_still_fetching() -> None:
     assert walkers == []
 
 
+async def test_a_failing_unit_ends_the_walk_though_a_walkers_close_raises() -> None:
+    """A walker cancelled on a full queue stays cancelled when its listing's close raises.
+
+    Films fails at once. Saving it failed suspends, as a real save does, so Shows' walker
+    fills the queue meanwhile. A walker that put the close's error there would wait on a
+    queue nothing reads, and the walk, awaiting its walkers, would never end.
+    """
+    fixture = _Fixture(walkers=2)
+    _shelve(fixture, "Films", range(3))
+    _shelve(fixture, "Shows", range(10, 12))
+    fixture.adapter.fail_unit_after("Films", 0)
+    yielded = 0
+
+    async def endless() -> AsyncGenerator[UnitPage]:
+        nonlocal yielded
+        try:
+            for index in range(100):
+                yielded += 1
+                yield UnitPage((_item(f"m{100 + index}"),), resume_at=index + 1)
+        finally:
+            raise RuntimeError("the listing's close failed")
+
+    list_unit = fixture.adapter.list_unit
+
+    def listing(
+        key: str, *, start_index: int = 0, checkpoint: str | None = None
+    ) -> AsyncGenerator[UnitPage]:
+        if key == "library:Shows":
+            return endless()
+        return list_unit(key, start_index=start_index, checkpoint=checkpoint)
+
+    fixture.adapter.list_unit = listing  # type: ignore[method-assign]
+    save_unit = fixture.runs.save_unit
+
+    async def _saved_after_a_round_trip(unit: SyncRunUnit) -> None:
+        await asyncio.sleep(0.005)
+        await save_unit(unit)
+
+    fixture.runs.save_unit = _saved_after_a_round_trip  # type: ignore[method-assign]
+    async with asyncio.timeout(5):
+        run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    # A full queue of two, and one page waiting to join it.
+    assert yielded == 2 + 1, "the premise: Shows' walker was cancelled on a full queue"
+    assert run.status is SyncRunStatus.FAILED
+    assert "library Films went away" in (run.error or "")
+
+
 async def test_a_bug_in_a_walker_is_raised_not_recorded() -> None:
     """A walker hands the writer whatever it raised, so a bug ends the walk loudly.
 
@@ -1443,7 +1620,9 @@ async def test_a_bug_in_a_walker_is_raised_not_recorded() -> None:
     fixture = _Fixture()
     _shelve(fixture, "Films", range(2))
 
-    def _broken(key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage]:
+    def _broken(
+        key: str, *, start_index: int = 0, checkpoint: str | None = None
+    ) -> AsyncGenerator[UnitPage]:
         raise ZeroDivisionError("a bug, not an outage")
 
     fixture.adapter.list_unit = _broken  # type: ignore[method-assign]
@@ -1465,7 +1644,7 @@ def test_a_service_whose_heartbeat_is_not_positive_is_refused(heartbeat_seconds:
         _Fixture(heartbeat_seconds=heartbeat_seconds)
 
 
-# -- an unfinished whole-library walk: resumed, refused or superseded --------
+# -- an unfinished whole-library walk: resumed, refused or closed ------------
 
 NOW = datetime(2026, 10, 1, 12, tzinfo=UTC)
 
@@ -1489,10 +1668,12 @@ async def _given_walk(
     units: Sequence[tuple[str, SyncRunUnitStatus, int]] = (),
     error: str | None = None,
     finished_at: datetime | None = None,
+    planned: bool = True,
 ) -> SyncRun:
-    """An unfinished whole-library walk, as a killed or a failed attempt left it.
+    """An unfinished walk, as a killed or a failed attempt left it.
 
-    Each unit is `(library, status, position)`, planned in `TITLES`.
+    A whole-library walk's unless `planned` is false. Each unit is `(library, status,
+    position)`, planned in `TITLES`.
     """
     run = SyncRun(
         source_id=fixture.source.id,
@@ -1502,6 +1683,7 @@ async def _given_walk(
         heartbeat_at=heartbeat_at,
         started_at=T0,
         finished_at=finished_at,
+        planned=planned,
     )
     await fixture.runs.add(run)
     if units:
@@ -1557,12 +1739,19 @@ async def test_a_failed_whole_library_walk_resumes_in_place_from_each_units_posi
 
 @pytest.mark.parametrize(
     ("age", "refused"),
-    [(timedelta(minutes=10) - timedelta(seconds=1), True), (timedelta(minutes=10), False)],
+    [
+        (timedelta(minutes=10) - timedelta(seconds=1), True),
+        (timedelta(minutes=10) - timedelta(microseconds=1), True),
+        (timedelta(minutes=10), False),
+    ],
 )
 async def test_a_running_walk_is_refused_until_its_heartbeat_is_ten_minutes_old(
     age: timedelta, refused: bool
 ) -> None:
-    """A killed walk's row still says `running`; only its heartbeat tells it from a live one."""
+    """A killed walk's row still says `running`; only its heartbeat tells it from a live one.
+
+    Ten minutes old, it is closed, and that close is committed before the claim's commit.
+    """
     fixture = _Fixture(clock=_Clock(NOW))
     _shelve(fixture, "Films", range(3))
     walking = await _given_walk(
@@ -1579,7 +1768,8 @@ async def test_a_running_walk_is_refused_until_its_heartbeat_is_ten_minutes_old(
         return
     run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
     assert (run.id, run.status) == (walking.id, SyncRunStatus.COMPLETED)
-    assert fixture.checkpoints[0] == (0, NOW), "the claim's commit kept the dead walk's heartbeat"
+    assert fixture.checkpoints[0] == (0, NOW - age), "the close was not committed first"
+    assert fixture.checkpoints[1] == (0, NOW), "the claim's commit kept the dead walk's heartbeat"
     assert fixture.adapter.unit_starts == [("library:Films", 2)]
 
 
@@ -1708,7 +1898,7 @@ async def test_a_resumed_walk_reads_running_again_so_a_second_walk_is_refused() 
     assert (run.id, run.status) == (failed.id, SyncRunStatus.COMPLETED)
 
 
-async def test_a_walk_killed_while_planning_is_superseded_once_its_heartbeat_is_stale() -> None:
+async def test_a_walk_killed_while_planning_is_closed_once_its_heartbeat_is_stale() -> None:
     """Its run and heartbeat were committed and its units never were.
 
     Refused while the heartbeat is fresh, as a walk still planning must be; then closed
@@ -1730,17 +1920,14 @@ async def test_a_walk_killed_while_planning_is_superseded_once_its_heartbeat_is_
     assert [unit.unit_key for unit in await fixture.runs.units_for(run.id)] == ["library:Films"]
     closed = await fixture.runs.get(planning.id)
     assert closed is not None
-    assert (closed.status, closed.error) == (
-        SyncRunStatus.FAILED,
-        "superseded: a whole-library walk restarts",
-    )
+    assert (closed.status, closed.error) == (SyncRunStatus.FAILED, ABANDONED_ERROR)
 
 
-async def test_a_cursorless_delta_killed_while_planning_is_superseded() -> None:
+async def test_a_cursorless_delta_killed_while_planning_is_closed() -> None:
     """A delta with no cursor walks the plan, and its row carries a heartbeat from its insert.
 
-    Killed before its plan was stored, the row has no units, so only that heartbeat
-    tells it from a single walk's row, which is left alone.
+    Killed before its plan was stored, the row has no units to resume, so the next walk
+    closes it and starts afresh.
     """
     fixture = _Fixture(clock=_Clock(NOW))
     _shelve(fixture, "Films", range(2))
@@ -1751,34 +1938,43 @@ async def test_a_cursorless_delta_killed_while_planning_is_superseded() -> None:
     assert run.id != planning.id
     closed = await fixture.runs.get(planning.id)
     assert closed is not None
-    assert (closed.status, closed.error) == (
-        SyncRunStatus.FAILED,
-        "superseded: a whole-library walk restarts",
-    ), "a cursorless delta killed while planning was left running"
+    assert (closed.status, closed.error) == (SyncRunStatus.FAILED, ABANDONED_ERROR), (
+        "a cursorless delta killed while planning was left running"
+    )
 
 
-async def test_a_full_walk_left_running_from_before_units_is_superseded() -> None:
-    """No units and no heartbeat: an older release's walk, which nothing can resume."""
-    fixture = _Fixture()
+@pytest.mark.parametrize("kind", [SyncRunKind.FULL, SyncRunKind.DELTA])
+async def test_a_full_walk_an_older_release_left_running_is_closed_by_the_next_walk(
+    kind: SyncRunKind,
+) -> None:
+    """`running`, with no heartbeat and so not planned: `m10h` reads a walk from before both so.
+
+    The next item walk of its source, of either kind, closes it and starts afresh, since
+    it has no plan to resume.
+    """
+    fixture = _Fixture(clock=_Clock(NOW))
     _shelve(fixture, "Films", range(2))
-    legacy = await _given_walk(fixture, heartbeat_at=None)
+    legacy = await _given_walk(fixture, heartbeat_at=None, planned=False)
 
-    run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    run = await fixture.service.reconcile(fixture.source, kind, fixture.adapter)
 
     assert run.id != legacy.id
     assert run.status is SyncRunStatus.COMPLETED
     closed = await fixture.runs.get(legacy.id)
     assert closed is not None
-    assert (closed.status, closed.error, closed.error_code) == (
+    assert (closed.status, closed.error, closed.error_code, closed.finished_at) == (
         SyncRunStatus.FAILED,
-        "superseded: a whole-library walk restarts",
+        ABANDONED_ERROR,
         None,
+        NOW,
     )
-    assert closed.finished_at is not None
 
 
-async def test_a_superseded_walk_that_had_already_failed_keeps_its_own_error() -> None:
-    """Closed already, so it is not relabelled: its error says why that walk failed."""
+async def test_a_failed_walk_with_no_plan_keeps_its_own_error() -> None:
+    """Closed already, so it is not relabelled: its error says why that walk failed.
+
+    It has no units to resume, so a fresh walk starts and leaves it as it was.
+    """
     fixture = _Fixture()
     _shelve(fixture, "Films", range(2))
     failed = await _given_walk(
@@ -1792,21 +1988,27 @@ async def test_a_superseded_walk_that_had_already_failed_keeps_its_own_error() -
     assert await fixture.runs.get(failed.id) == failed
 
 
-async def test_an_unfinished_delta_with_no_plan_is_left_alone() -> None:
-    """A single walk's row: a whole-library walk neither resumes nor closes it."""
-    fixture = _Fixture()
+@pytest.mark.parametrize("kind", [SyncRunKind.FULL, SyncRunKind.DELTA])
+async def test_a_live_single_walk_neither_refuses_a_whole_library_walk_nor_is_resumed(
+    kind: SyncRunKind,
+) -> None:
+    """A walk's claim reads only planned walks, so a single walk's row is passed over.
+
+    Read as a claim, the row is live and would refuse the walk. It is left as it was.
+    """
+    fixture = _Fixture(clock=_Clock(NOW))
     _shelve(fixture, "Films", range(2))
-    delta = await _given_walk(fixture, heartbeat_at=None, kind=SyncRunKind.DELTA)
-    run = await fixture.service.reconcile(fixture.source, SyncRunKind.DELTA, fixture.adapter)
-    assert run.id != delta.id
+    single = await _given_walk(fixture, heartbeat_at=NOW, kind=kind, planned=False)
+    run = await fixture.service.reconcile(fixture.source, kind, fixture.adapter)
+    assert run.id != single.id
     assert [unit.unit_key for unit in await fixture.runs.units_for(run.id)] == ["library:Films"], (
-        "the premise: a cursorless delta walks the plan"
+        "the premise: a walk of the plan"
     )
-    assert await fixture.runs.get(delta.id) == delta
+    assert await fixture.runs.get(single.id) == single
 
 
 async def test_a_live_planned_delta_still_refuses_a_second_after_the_gap_closer_walks() -> None:
-    """The gap-closer's single walk adds a newer delta row, with no heartbeat and no units.
+    """The gap-closer's single walk adds a newer delta row, unplanned and with no units.
 
     A delta's claim reads only planned walks, so that row neither hides the live walk
     nor lets a second one start beside it.
@@ -1823,9 +2025,10 @@ async def test_a_live_planned_delta_still_refuses_a_second_after_the_gap_closer_
         fixture.source, SyncRunKind.DELTA, fixture.adapter, max_items=1, plan=False
     )
     assert gap.started_at > live.started_at, "the premise: the gap-closer's row is the newer"
-    assert (gap.status, gap.heartbeat_at) == (SyncRunStatus.FAILED, None), (
+    assert (gap.status, gap.planned) == (SyncRunStatus.FAILED, False), (
         "the premise: the gap-closer left an unfinished single walk's row"
     )
+    assert gap.heartbeat_at is not None, "the premise: only `planned` keeps the row out"
 
     with pytest.raises(WalkRefused):
         await fixture.service.reconcile(fixture.source, SyncRunKind.DELTA, fixture.adapter)
@@ -1850,9 +2053,10 @@ async def test_a_failed_planned_delta_still_resumes_in_place_after_the_gap_close
         fixture.source, SyncRunKind.DELTA, fixture.adapter, max_items=1, plan=False
     )
     assert gap.started_at > failed.started_at, "the premise: the gap-closer's row is the newer"
-    assert (gap.status, gap.heartbeat_at) == (SyncRunStatus.FAILED, None), (
+    assert (gap.status, gap.planned) == (SyncRunStatus.FAILED, False), (
         "the premise: the gap-closer left an unfinished single walk's row"
     )
+    assert gap.heartbeat_at is not None, "the premise: only `planned` keeps the row out"
     fixture.adapter.unit_starts.clear()
 
     run = await fixture.service.reconcile(fixture.source, SyncRunKind.DELTA, fixture.adapter)
@@ -1896,8 +2100,94 @@ async def test_a_resumed_unit_that_yields_nothing_completes() -> None:
     run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
     assert (run.id, run.status, run.items_seen) == (failed.id, SyncRunStatus.COMPLETED, 0)
     assert fixture.adapter.unit_starts == [("library:Films", 3)]
+    assert fixture.adapter.unit_checkpoints == [None], "it was stored with no checkpoint"
     [unit] = await fixture.runs.units_for(run.id)
     assert (unit.status, unit.position) == (SyncRunUnitStatus.COMPLETED, 3)
+
+
+async def test_a_resumed_unit_is_handed_its_committed_checkpoint() -> None:
+    fixture = _Fixture()
+    run = await _given_walk(
+        fixture,
+        heartbeat_at=None,
+        status=SyncRunStatus.FAILED,
+        units=[("Films", SyncRunUnitStatus.FAILED, 2)],
+        finished_at=T0,
+    )
+    (films,) = await fixture.runs.units_for(run.id)
+    await fixture.runs.save_unit(films.evolve(checkpoint="note-1"))
+    handed: list[tuple[int, str | None]] = []
+
+    async def noting(
+        key: str, *, start_index: int = 0, checkpoint: str | None = None
+    ) -> AsyncGenerator[UnitPage]:
+        handed.append((start_index, checkpoint))
+        return
+        yield
+
+    fixture.adapter.list_unit = noting  # type: ignore[method-assign]
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+
+    assert handed == [(2, "note-1")]
+
+
+async def test_an_emby_unit_resumes_judged_by_the_checkpoint_its_walk_stored() -> None:
+    """The real adapter's note, through the writer and the store, judges the resume.
+
+    Three hundred films a second apart, in pages of 100. The first attempt commits
+    Films at `StartIndex=150` with `m199`'s creation time, then fails asking at 200.
+    Eighty films then leave the library: resumed at 150 unjudged, the walk would read
+    `m230` on and never `m200` to `m229`.
+    """
+    fixture = _Fixture(batch_size=100, walkers=1)
+    server = FakeEmbyServer()
+    server.add_view("films", "Films")
+    for index in range(300):
+        film = _item(f"m{index:03d}", added_at=T0 + timedelta(seconds=index))
+        server.add_item(film, T0)
+        server.place(film.external_id, "films")
+    emby = EmbyAdapter(
+        fixture.source,
+        SourceCredentials(username=server.username, password=SecretStr(server.password)),
+        client=httpx.AsyncClient(transport=server.transport(), base_url=fixture.source.base_url),
+        page_size=100,
+        sleep=instant_sleep,
+    )
+    created = T0 + timedelta(seconds=199) - datetime(1970, 1, 1, tzinfo=UTC)
+    lines: list[str] = []
+    try:
+        server.fail_after = 200
+        first = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, emby)
+        assert first.status is SyncRunStatus.FAILED, "the premise: the first attempt failed"
+        (films,) = [
+            u for u in await fixture.runs.units_for(first.id) if u.unit_key == "titles:films"
+        ]
+        assert (films.position, films.checkpoint, films.status) == (
+            150,
+            str(created // timedelta(microseconds=1)),
+            SyncRunUnitStatus.FAILED,
+        )
+        for index in range(80):
+            server.remove_item(f"m{index:03d}")
+        server.fail_after = None
+        handle = logger.add(lines.append, level="WARNING", format="{message}")
+        try:
+            second = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, emby)
+        finally:
+            logger.remove(handle)
+    finally:
+        await emby.aclose()
+    assert (second.id, second.status) == (first.id, SyncRunStatus.COMPLETED)
+    assert [line.rstrip("\n") for line in lines] == [
+        "Living Room Emby's listing moved past the overlap before StartIndex=150; "
+        "reading again from StartIndex=50"
+    ]
+    missing = [
+        f"m{index:03d}"
+        for index in range(80, 300)
+        if await fixture.media_items.get_by_external_id(fixture.source.id, f"m{index:03d}") is None
+    ]
+    assert missing == []
 
 
 async def test_a_cursored_delta_walks_beside_a_live_whole_library_walk() -> None:
@@ -2221,3 +2511,510 @@ async def test_a_unit_that_fails_records_no_duration(meter_reader: InMemoryMetri
         "the premise: Shorts was claimed, after Films"
     )
     assert _unit_durations(meter_reader) == {(fixture.source.name, "titles"): (1, 90.0)}
+
+
+# -- a cancelled walk --------------------------------------------------------
+
+
+async def _until(condition: Callable[[], bool]) -> None:
+    """Yield to the loop until `condition` holds, failing rather than hanging."""
+    for _ in range(10_000):
+        if condition():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("the condition never held")
+
+
+async def _until_async(condition: Callable[[], bool]) -> None:
+    """`_until`, sleeping between checks, for a writer that wakes on wall time to look."""
+    for _ in range(1_000):
+        if condition():
+            return
+        await asyncio.sleep(0.005)
+    raise AssertionError("the condition never held")
+
+
+async def _until_checkpoints(fixture: _Fixture, count: int) -> None:
+    """`_until_async` for the fixture's commits to have recorded `count` checkpoints."""
+    await _until_async(lambda: len(fixture.checkpoints) >= count)
+
+
+async def test_a_cancelled_single_walk_closes_its_run_and_stays_cancelled(
+    fixture: _Fixture,
+) -> None:
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter, plan=False)
+    listing = asyncio.Event()
+
+    async def stalled(since: AwareDatetime | None = None) -> AsyncGenerator[SourceItem]:
+        listing.set()
+        await asyncio.Event().wait()
+        yield _item("m1")
+
+    fixture.adapter.list_items = stalled  # type: ignore[method-assign]
+    task = asyncio.create_task(
+        fixture.service.reconcile(fixture.source, SyncRunKind.DELTA, fixture.adapter)
+    )
+    async with asyncio.timeout(5):
+        await listing.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        async with asyncio.timeout(5):
+            await task
+
+    stored = await fixture.runs.latest_run(fixture.source.id, SyncRunKind.DELTA)
+    assert stored is not None
+    assert (stored.status, stored.error) == (SyncRunStatus.FAILED, CANCELLED_ERROR)
+    assert fixture.rollbacks == 1
+
+
+async def test_a_cancelled_planned_walk_is_resumed_at_once(fixture: _Fixture) -> None:
+    _shelve(fixture, "Films", range(3))
+    release = fixture.adapter.hold("Films")
+    task = asyncio.create_task(
+        fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    )
+    await _until(lambda: bool(fixture.adapter.unit_starts))
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        async with asyncio.timeout(5):
+            await task
+    cancelled = await fixture.runs.latest_run(fixture.source.id, SyncRunKind.FULL)
+    assert cancelled is not None
+    assert (cancelled.status, cancelled.error) == (SyncRunStatus.FAILED, CANCELLED_ERROR)
+
+    release.set()
+    resumed = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+
+    assert (resumed.id, resumed.status) == (cancelled.id, SyncRunStatus.COMPLETED)
+
+
+async def test_a_walk_whose_close_fails_still_ends_cancelled(fixture: _Fixture) -> None:
+    async def reset() -> None:
+        raise RuntimeError("connection reset")
+
+    fixture.service._rollback = reset  # the close's own failure, not the walk's
+    _shelve(fixture, "Films", range(3))
+    fixture.adapter.hold("Films")
+    task = asyncio.create_task(
+        fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    )
+    await _until(lambda: bool(fixture.adapter.unit_starts))
+    lines: list[str] = []
+    sink = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            async with asyncio.timeout(5):
+                await task
+    finally:
+        logger.remove(sink)
+    stored = await fixture.runs.latest_run(fixture.source.id, SyncRunKind.FULL)
+    assert stored is not None
+    assert stored.status is SyncRunStatus.RUNNING, "the premise: nothing closed it"
+    assert [line.rstrip("\n") for line in lines] == [
+        f"a cancelled sync of {fixture.source.name} could not close its run {stored.id} "
+        "(connection reset); it counts as live until its heartbeat is 10 minutes old"
+    ]
+
+
+# -- every item walk beats, and the next one closes a dead one ---------------
+
+
+async def test_a_single_walk_is_stored_with_a_heartbeat_and_not_planned(fixture: _Fixture) -> None:
+    run = await fixture.service.reconcile(
+        fixture.source, SyncRunKind.FULL, fixture.adapter, plan=False
+    )
+    assert fixture.checkpoints[0][1] is not None, "the run's first commit carried no heartbeat"
+    stored = await fixture.runs.get(run.id)
+    assert stored is not None and stored.planned is False
+
+
+async def test_a_planned_walk_is_stored_planned(fixture: _Fixture) -> None:
+    _shelve(fixture, "Films", range(2))
+    run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    stored = await fixture.runs.get(run.id)
+    assert stored is not None and stored.planned is True
+
+
+async def test_a_single_walk_beats_while_a_page_is_slow() -> None:
+    """Each beat falls due as the timer passes the heartbeat, while no item arrives.
+
+    A heartbeat of a hundredth of a second only sets how often the waiting writer looks;
+    the timer, moved one and a half heartbeats at a time, says when a beat is due.
+    """
+    timer = _Timer()
+    fixture = _Fixture(heartbeat_seconds=0.01, timer=timer)
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter, plan=False)
+    listing, release = asyncio.Event(), asyncio.Event()
+
+    async def slow(since: AwareDatetime | None = None) -> AsyncGenerator[SourceItem]:
+        listing.set()
+        await release.wait()
+        yield _item("m1")
+
+    fixture.adapter.list_items = slow  # type: ignore[method-assign]
+    before = len(fixture.checkpoints)
+    task = asyncio.create_task(
+        fixture.service.reconcile(fixture.source, SyncRunKind.DELTA, fixture.adapter)
+    )
+    await asyncio.wait_for(listing.wait(), 5)
+    for beat in range(1, 3):
+        timer.now += 0.015
+        await _until_checkpoints(fixture, before + 1 + beat)
+    release.set()
+    run = await task
+    # The last commit closes the run, and a close moves no heartbeat.
+    beats = [heartbeat for _, heartbeat in fixture.checkpoints[before:-1]]
+    assert run.status is SyncRunStatus.COMPLETED
+    assert len(beats) == 4, "the insert, two beats and the batch, and nothing more"
+    assert (
+        all(b is not None for b in beats)
+        and beats == sorted(beats)  # type: ignore[type-var]
+        and len(set(beats)) == len(beats)
+    )
+
+
+async def test_items_that_keep_arriving_below_a_batch_still_let_a_single_walk_beat() -> None:
+    """A single walk's beat falls due a fixed time after its last commit, as a plan's does.
+
+    Forty items, each two-fifths of a heartbeat after the last on the timer, never fill
+    a batch, so a writer that beat only when nothing arrived would not beat once. Each
+    item waits a turn of the loop, so the writer takes it before the timer moves again.
+    """
+    heartbeat = 60.0
+    timer = _Timer()
+    fixture = _Fixture(heartbeat_seconds=heartbeat, timer=timer)
+
+    async def trickle(since: AwareDatetime | None = None) -> AsyncGenerator[SourceItem]:
+        for index in range(40):
+            timer.now += 0.4 * heartbeat
+            yield _item(f"t{index}")
+            await asyncio.sleep(0)
+
+    fixture.adapter.list_items = trickle  # type: ignore[method-assign]
+    run = await asyncio.wait_for(
+        fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter, plan=False),
+        5.0,
+    )
+    assert run.status is SyncRunStatus.COMPLETED
+    carried = [seen for seen, _ in fixture.checkpoints if seen]
+    assert carried[0] == 40, "the premise: the forty items rode one commit"
+    beats = [beat for seen, beat in fixture.checkpoints[1:] if seen == 0]
+    assert len(beats) >= 2, "no beat while items kept arriving"
+
+
+async def test_a_single_walk_beats_with_each_batch() -> None:
+    fixture = _Fixture(batch_size=2)
+    for index in range(4):
+        fixture.adapter.seed(_item(f"m{index}"), T0)
+    before = len(fixture.checkpoints)
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter, plan=False)
+    batches = [cp for cp in fixture.checkpoints[before:] if cp[0] in (2, 4)]
+    assert [seen for seen, _ in batches][:2] == [2, 4]
+    assert batches[0][1] is not None and batches[0][1] < batches[1][1]  # type: ignore[operator]
+
+
+async def test_a_single_walks_listing_error_drops_the_partial_batch() -> None:
+    fixture = _Fixture(batch_size=2)
+    for index in range(5):
+        fixture.adapter.seed(_item(f"m{index}"), T0)
+    fixture.adapter.fail_after(3)
+    run = await fixture.service.reconcile(
+        fixture.source, SyncRunKind.FULL, fixture.adapter, plan=False
+    )
+    assert (run.status, run.items_seen) == (SyncRunStatus.FAILED, 2)
+
+
+async def test_a_truncated_single_walk_does_not_wait_for_the_listing(fixture: _Fixture) -> None:
+    async def endless(since: AwareDatetime | None = None) -> AsyncGenerator[SourceItem]:
+        for index in range(3):
+            yield _item(f"m{index}")
+        await asyncio.Event().wait()
+
+    fixture.adapter.list_items = endless  # type: ignore[method-assign]
+    run = await asyncio.wait_for(
+        fixture.service.reconcile(
+            fixture.source, SyncRunKind.FULL, fixture.adapter, plan=False, max_items=2
+        ),
+        5.0,
+    )
+    assert (run.status, run.error_code, run.items_seen) == (
+        SyncRunStatus.FAILED,
+        CEILING_ERROR_CODE,
+        2,
+    )
+
+
+async def test_a_truncated_single_walk_closes_its_listing() -> None:
+    """The reader the walk cancels closes its listing, which ends a listing's read-ahead."""
+    fixture = _Fixture(batch_size=2)
+    closed: list[str] = []
+    # Held, so only an explicit close can run a listing's `finally`: one dropped would
+    # be closed by the loop's finalizer whether or not the reader closed it.
+    listings: list[AsyncGenerator[SourceItem]] = []
+
+    async def endless() -> AsyncGenerator[SourceItem]:
+        try:
+            for index in range(100):
+                yield _item(f"m{index}")
+        finally:
+            closed.append("closed")
+
+    def listing(since: AwareDatetime | None = None) -> AsyncGenerator[SourceItem]:
+        listings.append(endless())
+        return listings[-1]
+
+    fixture.adapter.list_items = listing  # type: ignore[method-assign]
+    run = await asyncio.wait_for(
+        fixture.service.reconcile(
+            fixture.source, SyncRunKind.FULL, fixture.adapter, plan=False, max_items=2
+        ),
+        5.0,
+    )
+    assert run.error_code == CEILING_ERROR_CODE, "the premise: the walk stopped at its ceiling"
+    assert len(listings) == 1, "the premise: one listing, opened by this walk"
+    assert closed == ["closed"]
+
+
+async def test_a_truncated_single_walk_ends_though_its_listings_close_raises() -> None:
+    """The reader, cancelled on a full queue, stays cancelled when its listing's close raises.
+
+    Each commit suspends, as a real one does, so the reader fills the queue again while
+    the last batch commits. A reader that put the close's error there would wait on a
+    queue nothing reads, and the walk, awaiting the reader, would never end.
+    """
+    fixture = _Fixture(batch_size=2)
+    yielded = 0
+
+    async def endless(since: AwareDatetime | None = None) -> AsyncGenerator[SourceItem]:
+        nonlocal yielded
+        try:
+            for index in range(100):
+                yielded += 1
+                yield _item(f"m{index}")
+        finally:
+            raise RuntimeError("the listing's close failed")
+
+    fixture.adapter.list_items = endless  # type: ignore[method-assign]
+    commit = fixture.service._commit
+
+    async def _commit_after_a_round_trip() -> None:
+        await asyncio.sleep(0.005)
+        await commit()
+
+    fixture.service._commit = _commit_after_a_round_trip
+    async with asyncio.timeout(5):
+        run = await fixture.service.reconcile(
+            fixture.source, SyncRunKind.FULL, fixture.adapter, plan=False, max_items=3
+        )
+    # The four items the walk took, a full queue of two, and one waiting to join it.
+    assert yielded == 4 + 2 + 1, "the premise: the reader was cancelled on a full queue"
+    assert (run.status, run.error_code) == (SyncRunStatus.FAILED, CEILING_ERROR_CODE)
+
+
+@pytest.mark.parametrize("heartbeat_at", [NOW - STALE_AFTER, None])
+async def test_a_dead_item_walk_is_closed_abandoned_before_the_next_walk(
+    heartbeat_at: datetime | None,
+) -> None:
+    fixture = _Fixture(clock=lambda: NOW)
+    dead = SyncRun(
+        source_id=fixture.source.id,
+        kind=SyncRunKind.DELTA,
+        heartbeat_at=heartbeat_at,
+        started_at=T0,
+    )
+    await fixture.runs.add(dead)
+    lines: list[str] = []
+    sink = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        await fixture.service.reconcile(
+            fixture.source, SyncRunKind.FULL, fixture.adapter, plan=False
+        )
+    finally:
+        logger.remove(sink)
+    closed = await fixture.runs.get(dead.id)
+    assert closed is not None
+    assert (closed.status, closed.error, closed.finished_at) == (
+        SyncRunStatus.FAILED,
+        ABANDONED_ERROR,
+        NOW,
+    )
+    assert [line.rstrip("\n") for line in lines] == [
+        "closed 1 item walk(s) of Living Room Emby whose process had stopped"
+    ]
+
+
+async def test_a_live_single_walk_is_left_running() -> None:
+    fixture = _Fixture(clock=lambda: NOW)
+    live = SyncRun(
+        source_id=fixture.source.id,
+        kind=SyncRunKind.DELTA,
+        heartbeat_at=NOW - STALE_AFTER + timedelta(microseconds=1),
+        started_at=T0,
+    )
+    await fixture.runs.add(live)
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter, plan=False)
+    assert await fixture.runs.get(live.id) == live
+
+
+async def test_a_dead_planned_walk_is_closed_then_resumed_in_place() -> None:
+    fixture = _Fixture(clock=lambda: NOW)
+    _shelve(fixture, "Films", range(2))
+    dead = await _given_walk(
+        fixture, heartbeat_at=NOW - STALE_AFTER, units=[("Films", SyncRunUnitStatus.PENDING, 0)]
+    )
+    lines: list[str] = []
+    sink = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    finally:
+        logger.remove(sink)
+    assert (run.id, run.status) == (dead.id, SyncRunStatus.COMPLETED)
+    assert "closed 1 item walk(s) of Living Room Emby whose process had stopped" in [
+        line.rstrip("\n") for line in lines
+    ]
+
+
+async def test_a_walk_closes_no_watch_run_and_no_other_sources_walk() -> None:
+    """Both are dead and neither is this walk's to close, so nothing is, and nothing is logged.
+
+    The watch lane closes its own runs, and another source's walks are that source's.
+    """
+    fixture = _Fixture(clock=_Clock(NOW))
+    watch = SyncRun(
+        source_id=fixture.source.id, kind=SyncRunKind.WATCH_STATE, heartbeat_at=None, started_at=T0
+    )
+    elsewhere = SyncRun(source_id=new_id(), kind=SyncRunKind.FULL, heartbeat_at=None, started_at=T0)
+    for one in (watch, elsewhere):
+        await fixture.runs.add(one)
+    lines: list[str] = []
+    sink = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        run = await fixture.service.reconcile(
+            fixture.source, SyncRunKind.FULL, fixture.adapter, plan=False
+        )
+    finally:
+        logger.remove(sink)
+    assert run.status is SyncRunStatus.COMPLETED, "the premise: the walk ran to its end"
+    assert lines == []
+    assert await fixture.runs.get(watch.id) == watch
+    assert await fixture.runs.get(elsewhere.id) == elsewhere
+
+
+async def test_a_walk_refused_by_a_live_walk_still_commits_its_close() -> None:
+    """The close is committed before the claim, so a refusal there leaves the dead walk closed.
+
+    The caller of a refused walk commits nothing, so a close riding a later commit is lost.
+    """
+    fixture = _Fixture(clock=_Clock(NOW))
+    _shelve(fixture, "Films", range(2))
+    live = await _given_walk(
+        fixture, heartbeat_at=NOW, units=[("Films", SyncRunUnitStatus.RUNNING, 1)]
+    )
+    dead = SyncRun(
+        source_id=fixture.source.id, kind=SyncRunKind.DELTA, heartbeat_at=None, started_at=T0
+    )
+    await fixture.runs.add(dead)
+    with pytest.raises(WalkRefused):
+        await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    assert await fixture.runs.get(live.id) == live, "the premise: the live walk was left alone"
+    closed = await fixture.runs.get(dead.id)
+    assert closed is not None
+    assert (closed.status, closed.error) == (SyncRunStatus.FAILED, ABANDONED_ERROR)
+    assert fixture.commits == 1, "the close was not committed before the refusal"
+
+
+async def test_the_claim_judges_a_walk_at_the_instant_its_close_did() -> None:
+    """One instant for both, so a walk the close left alone as live is refused.
+
+    Its heartbeat is half a second from stale at the walk's first clock read. Judged at
+    a second read, a second later, it would be taken for dead and resumed.
+    """
+    clock = _Ticks()
+    fixture = _Fixture(clock=clock)
+    _shelve(fixture, "Films", range(3))
+    first_read = LATER + timedelta(seconds=1)
+    walking = await _given_walk(
+        fixture,
+        heartbeat_at=first_read - STALE_AFTER + timedelta(milliseconds=500),
+        units=[("Films", SyncRunUnitStatus.RUNNING, 2)],
+    )
+    assert clock.reads == 0, "the premise: the walk's first read is the clock's first"
+    assert is_live(walking, first_read), "the premise: live at the first read"
+    assert not is_live(walking, first_read + timedelta(seconds=1)), "the premise: dead at a second"
+    with pytest.raises(WalkRefused):
+        await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    assert await fixture.runs.get(walking.id) == walking
+
+
+async def test_a_single_walk_whose_batches_commit_often_enough_never_beats() -> None:
+    """A beat falls due `heartbeat_seconds` after the last commit, not after the last beat.
+
+    Four batches, each two-fifths of a heartbeat after the last on the timer, need none;
+    a beat counted from the walk's start would be due by the fourth. Each item waits on
+    its own gate, so no wall time decides it.
+    """
+    heartbeat = 60.0
+    timer = _Timer()
+    fixture = _Fixture(batch_size=1, heartbeat_seconds=heartbeat, timer=timer)
+    gates = [asyncio.Event() for _ in range(4)]
+
+    async def gated(since: AwareDatetime | None = None) -> AsyncGenerator[SourceItem]:
+        for index, gate in enumerate(gates):
+            await gate.wait()
+            yield _item(f"m{index}")
+
+    fixture.adapter.list_items = gated  # type: ignore[method-assign]
+    walk = asyncio.create_task(
+        fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter, plan=False)
+    )
+    origin = timer.now
+    for index, gate in enumerate(gates):
+        if index:
+            timer.now += 0.4 * heartbeat
+        gate.set()
+        await _until_checkpoints(fixture, 2 + index)
+    run = await asyncio.wait_for(walk, 5)
+    assert run.status is SyncRunStatus.COMPLETED
+    assert timer.now - origin > heartbeat, "the premise: the walk outlasted a heartbeat"
+    # The insert, four batches and the close, and no commit of a heartbeat alone.
+    assert [seen for seen, _ in fixture.checkpoints] == [0, 1, 2, 3, 4, 4]
+
+
+async def test_a_single_walks_reader_reads_no_more_than_a_batch_ahead() -> None:
+    """While the writer commits a batch, the listing waits: a batch queued, an item in hand.
+
+    An unbounded queue would read the whole listing into memory behind a slow database.
+    """
+    fixture = _Fixture(batch_size=2)
+    yielded = 0
+
+    async def counted(since: AwareDatetime | None = None) -> AsyncGenerator[SourceItem]:
+        nonlocal yielded
+        for index in range(20):
+            yielded += 1
+            yield _item(f"m{index}")
+
+    fixture.adapter.list_items = counted  # type: ignore[method-assign]
+    commit = fixture.service._commit
+    held, release = asyncio.Event(), asyncio.Event()
+
+    async def _commit_held_at_the_first_batch() -> None:
+        if fixture.commits == 1:
+            held.set()
+            await release.wait()
+        await commit()
+
+    fixture.service._commit = _commit_held_at_the_first_batch
+    walk = asyncio.create_task(
+        fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter, plan=False)
+    )
+    try:
+        await asyncio.wait_for(held.wait(), 5)
+        await asyncio.sleep(0.05)
+        # The batch being committed, a batch queued, and one item waiting to join it.
+        assert yielded == 2 + 2 + 1
+    finally:
+        release.set()
+        run = await walk
+    assert (run.status, run.items_seen) == (SyncRunStatus.COMPLETED, 20)

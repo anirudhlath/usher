@@ -239,6 +239,7 @@ async def test_sync_status_lists_a_live_whole_library_walk_newer_runs_push_out(
         kind=SyncRunKind.FULL,
         started_at=now - timedelta(hours=3),
         heartbeat_at=now,
+        planned=True,
     )
     watched = [
         SyncRun(
@@ -889,7 +890,9 @@ async def test_usher_sync_exits_non_zero_when_a_live_walk_refuses_it(
         credentials_ref=f"ref-{new_id()}",
         device_id=str(new_id()),
     )
-    live = SyncRun(source_id=source.id, kind=SyncRunKind.FULL, heartbeat_at=datetime.now(UTC))
+    live = SyncRun(
+        source_id=source.id, kind=SyncRunKind.FULL, heartbeat_at=datetime.now(UTC), planned=True
+    )
     async with _session_for(cli_settings) as session:
         await PostgresSourceRepository(session).add(source)
         runs = PostgresSyncRunRepository(session)

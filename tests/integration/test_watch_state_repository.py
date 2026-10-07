@@ -2,7 +2,7 @@
 
 import uuid
 from collections.abc import Iterator
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -232,8 +232,7 @@ async def test_a_client_write_stamps_a_fresh_updated_at_over_a_backdated_row(
     which is exactly the trap `db-and-sql.md` names for this fixture shape.
 
     The walk side is therefore a real row backdated with a raw `INSERT` (the trigger
-    only fires `BEFORE UPDATE`, so an insert dodges it), the same shape
-    `test_the_update_trigger_owns_updated_at` uses for the merge path.
+    only fires `BEFORE UPDATE`, so an insert dodges it).
 
     This is the `ON CONFLICT ... DO UPDATE` path specifically, which nothing
     else in this file drives through the trigger: proof that the exotic
@@ -262,46 +261,120 @@ async def test_a_client_write_stamps_a_fresh_updated_at_over_a_backdated_row(
     assert result.origin is WatchStateOrigin.API, "the DO UPDATE branch must promote it too"
 
 
-async def test_the_update_trigger_owns_updated_at(
+async def _stored(session: AsyncSession, title_id: uuid.UUID) -> tuple[int, datetime]:
+    row = (
+        await session.execute(
+            text("SELECT position_seconds, updated_at FROM watch_states WHERE title_id = :t"),
+            {"t": title_id},
+        )
+    ).one()
+    return row.position_seconds, row.updated_at
+
+
+async def test_a_source_merge_keeps_its_own_instant_on_the_update_path(
     repository: PostgresWatchStateRepository,
     session: AsyncSession,
     user_id: uuid.UUID,
     title_id: uuid.UUID,
 ) -> None:
-    """`trg_watch_states_set_updated_at` is a `BEFORE UPDATE` trigger that assigns `now()`.
+    """`watch_states_set_updated_at` keeps `observed_at` on an update whose origin is the source.
 
-    unconditionally, so the merge's own `updated_at = d.observed_at` lands on the
-    *insert* path only.
-
-    Recorded rather than assumed, because "latest `updated_at` wins" is the merge's
-    conflict rule and every later reader of this column inherits whichever meaning it
-    actually has.
-
-    Benign for the rule: after a walk writes a row, `updated_at` is the write
-    instant, which is if anything the more honest answer to "was this row
-    written after the walk observed it". `FakeWatchStateRepository` stores
-    `observed_at` on both paths and says so in its docstring.
+    The first merge inserts, which no trigger sees; the second updates the row it left, the
+    path the old trigger stamped with the transaction's `now()`.
     """
     await repository.merge_from_source([merge(user_id, title_id)])
-    inserted = (
-        await session.execute(
-            text("SELECT updated_at FROM watch_states WHERE title_id = :t"),
-            {"t": title_id},
-        )
-    ).scalar_one()
-    assert inserted == WALK_AT, "the insert path stores observed_at verbatim"
-
+    assert await _stored(session, title_id) == (90, WALK_AT), "the premise: the insert path"
     await repository.merge_from_source(
         [merge(user_id, title_id, position_seconds=999, observed_at=LATER)]
     )
-    updated = (
-        await session.execute(
-            text("SELECT updated_at FROM watch_states WHERE title_id = :t"),
-            {"t": title_id},
-        )
-    ).scalar_one()
-    assert updated != LATER, "the trigger overwrote it with now()"
-    assert updated > LATER
+    assert await _stored(session, title_id) == (999, LATER)
+
+
+async def test_a_newer_read_is_not_refused_because_an_older_one_committed_first(
+    repository: PostgresWatchStateRepository,
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    title_id: uuid.UUID,
+) -> None:
+    """Two walks overlap over a stored row, and the one that began first commits first.
+
+    Its update keeps the instant that walk began, so the second walk's newer read still
+    writes. The old trigger stamped that update with the transaction's `now()` -- later
+    than the second walk began -- and refused the newer read, leaving the older position.
+    """
+    await repository.merge_from_source(
+        [merge(user_id, title_id, observed_at=WALK_AT - timedelta(days=1))]
+    )
+    await repository.merge_from_source(
+        [merge(user_id, title_id, position_seconds=5, observed_at=WALK_AT)]
+    )
+    position, _ = await _stored(session, title_id)
+    assert position == 5, "the premise: the older read wrote first, on the update path"
+    await repository.merge_from_source(
+        [merge(user_id, title_id, position_seconds=999, observed_at=LATER)]
+    )
+    assert await _stored(session, title_id) == (999, LATER)
+
+
+async def test_a_later_sighting_by_the_same_walk_writes_at_the_walks_instant(
+    repository: PostgresWatchStateRepository,
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    title_id: uuid.UUID,
+) -> None:
+    """A walk sights a stored row in two batches; the later one writes, at the walk's instant.
+
+    The second batch carries the instant the first left, which the merge's `<=` lets
+    through. A trigger stamping `now()` on that tie writes the row and then refuses every
+    read of it that began before the commit -- the fixed defect, back for any row a walk
+    sights twice.
+    """
+    await repository.merge_from_source(
+        [merge(user_id, title_id, observed_at=WALK_AT - timedelta(days=1))]
+    )
+    await repository.merge_from_source(
+        [merge(user_id, title_id, position_seconds=5, observed_at=WALK_AT)]
+    )
+    position, _ = await _stored(session, title_id)
+    assert position == 5, "the premise: the first sighting wrote, on the update path"
+    await repository.merge_from_source(
+        [merge(user_id, title_id, position_seconds=6, observed_at=WALK_AT)]
+    )
+    assert await _stored(session, title_id) == (6, WALK_AT)
+
+
+async def test_an_older_read_committed_after_a_newer_one_is_refused(
+    repository: PostgresWatchStateRepository,
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    title_id: uuid.UUID,
+) -> None:
+    """The converse: the newer read commits first, and the older one after it writes nothing.
+
+    The first merge only seeds the row, so both reads land on the update path.
+    """
+    await repository.merge_from_source(
+        [merge(user_id, title_id, observed_at=WALK_AT - timedelta(days=1))]
+    )
+    await repository.merge_from_source(
+        [merge(user_id, title_id, position_seconds=999, observed_at=LATER)]
+    )
+    await repository.merge_from_source(
+        [merge(user_id, title_id, position_seconds=5, observed_at=WALK_AT)]
+    )
+    assert await _stored(session, title_id) == (999, LATER)
+
+
+async def test_a_client_write_over_a_source_row_is_still_stamped_now(
+    repository: PostgresWatchStateRepository,
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    title_id: uuid.UUID,
+) -> None:
+    await repository.merge_from_source([merge(user_id, title_id)])
+    await repository.set_from_client(write(user_id, title_id, position_seconds=30))
+    now = (await session.execute(text("SELECT now()"))).scalar_one()
+    assert await _stored(session, title_id) == (30, now)
 
 
 @pytest.fixture

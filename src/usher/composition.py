@@ -390,6 +390,7 @@ def build_pipeline(
             runs=runs,
             events=publisher,
             commit=session.commit,
+            rollback=session.rollback,
             batch_size=settings.sync_batch_size,
             walkers=settings.sync_walkers,
             max_retract_fraction=(
@@ -404,6 +405,7 @@ def build_pipeline(
             runs=runs,
             queue=queue,
             commit=session.commit,
+            rollback=session.rollback,
             batch_size=settings.sync_batch_size,
         ),
         # **Delegated to `build_search_service` rather than spelled here**, so this

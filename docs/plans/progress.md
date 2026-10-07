@@ -65,7 +65,7 @@ that file could see it.
 ## Resumable watch lane (from docs/specs/2026-08-21-issue-41-resumable-watch-lane-design.md)
 | Task | What it delivers | Plan file | Status |
 |---|---|---|---|
-| 1–6 | `sync_runs.position` as a `StartIndex` checkpoint; `latest_incomplete_run` on the sync-run port and both its arms; `watch_state(start_index=…)` on `SourceAdapter`; `WatchStateSyncService` reclaiming its own incomplete run in place; a planted regression to prove the new cases have teeth; the docs the change invalidates | docs/plans/2026-08-21-issue-41-resumable-watch-lane.md | ✅ **all six landed, merged in PR #68** — 13 commits from `aa125da` to the tip of `fix/41-resumable-watch-lane`. The live deployment's watch walk has since run to completion, and its lane runs cursored deltas; ⏳ nothing schedules a source's first watch walk, and closing #41 is the owner's call. The design spec and the plan landed together in `aa125da`, and the reasoning for the approach is the spec's. |
+| 1–6 | `sync_runs.position` as a `StartIndex` checkpoint; `latest_incomplete_run` on the sync-run port and both its arms; `watch_state(start_index=…)` on `SourceAdapter`; `WatchStateSyncService` reclaiming its own incomplete run in place; a planted regression to prove the new cases have teeth; the docs the change invalidates | docs/plans/2026-08-21-issue-41-resumable-watch-lane.md | ✅ **all six landed, merged in PR #68** — 13 commits from `aa125da` to the tip of `fix/41-resumable-watch-lane`. The live deployment's watch walk has since run to completion, and its lane runs cursored deltas; ⏳ nothing schedules a source's first watch walk, and closing #41 is the owner's call. Its resume is withdrawn by sync correctness (PR #97). The design spec and the plan landed together in `aa125da`, and the reasoning for the approach is the spec's. |
 
 **Two behaviours on that branch are not in the plan above, and both came out
 of review rather than out of a task.** The plan's reuse-in-place rested on
@@ -105,12 +105,23 @@ table"* one obligation rather than four separate ones a plan can fall between.
 |---|---|---|---|
 | 1–8 | Phase 1, PR 1: 1,000-item pages, the count asked for once, overlapping pages deduplicated, one page of read-ahead, a 120 s listing read budget, and a first watch walk that asks only for what was watched | docs/plans/2026-10-01-fast-first-sync.md | ✅ landed (PR #94) |
 | 9 | Phase 1's live acceptance on Shared Emby: the first watch walk timed on a clone of the dev catalog, the item walk on production — owner-gated | docs/plans/2026-10-01-fast-first-sync.md | ✅ passed: the first watch walk in 5 s, the item walk on production in 2.36 h |
-| 10–20 | Phase 2, PR 2: the planner's facts measured, a whole-library walk as a persisted plan of units (`m10g`), several walkers and one writer, the seed and the early watch lane, backoff, resume in place, and where a walk stands | docs/plans/2026-10-01-fast-first-sync.md | 🔨 in review (PR #95) |
+| 10–20 | Phase 2, PR 2: the planner's facts measured, a whole-library walk as a persisted plan of units (`m10g`), several walkers and one writer, the seed and the early watch lane, backoff, resume in place, and where a walk stands | docs/plans/2026-10-01-fast-first-sync.md | ✅ landed (PR #95) |
 | 21 | Phase 2's live acceptance: the 2-, 10- and 75-minute targets, a resume after a kill mid-EPISODES, and panel 11's first real walk — owner-gated | docs/plans/2026-10-01-fast-first-sync.md | 📋 planned |
 
 **A fifth table, for the fourth's reason.** Fast first sync has its own spec and
 is not a milestone, so a row under any heading above would make that heading
 false. `tests/unit/test_docs_currency.py` reads it into the same union.
+
+## Sync correctness (from docs/plans/2026-10-05-sync-correctness.md's Decisions)
+| Task | What it delivers | Plan file | Status |
+|---|---|---|---|
+| 1–7 | The owner's rulings on PR #95's review concerns: a cancelled walk closes its run, paging that backs up rather than skips (mid-walk, across a resume via `m10h`'s checkpoint, and at chunk boundaries), dead runs closed by the next run of their lane with the watch lane no longer resuming, and a source merge keeping its own instant | docs/plans/2026-10-05-sync-correctness.md | 🔨 in review (PR #97) |
+| 8 | Status rows: fast first sync's Phase 2 landed, this plan in review | docs/plans/2026-10-05-sync-correctness.md | 🔨 in review (PR #97) |
+
+**A sixth table, for the fifth's reason.** Sync correctness has no spec of its
+own — the owner's rulings are its plan's Decisions — and is not a milestone, so a
+row under any heading above would make that heading false.
+`tests/unit/test_docs_currency.py` reads it into the same union.
 
 ## M1 task groups → plan line ranges
 Plan file: `docs/plans/2026-07-28-m1-foundation.md` (2470 lines)

@@ -3,17 +3,22 @@
 For the things the fakes cannot say: a refused sweep, and the sweep's own SQL.
 """
 
-from collections.abc import AsyncGenerator, AsyncIterator, Iterator
+import asyncio
+import functools
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator
 from datetime import UTC, datetime
 
 import pytest
 import pytest_asyncio
+from loguru import logger
 from opentelemetry import metrics
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tests.fakes.event_publisher import FakeEventPublisher
+from tests.fakes.source_adapter import FakeSourceAdapter
 from usher.db.repositories.episode import PostgresEpisodeRepository
 from usher.db.repositories.jobs import PostgresJobQueue
 from usher.db.repositories.matching import PostgresTitleMatchRepository
@@ -24,7 +29,15 @@ from usher.db.repositories.title import PostgresTitleRepository
 from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
 from usher.domain.source import Source
-from usher.domain.sync import SyncRunKind, SyncRunStatus, SyncRunUnitStatus
+from usher.domain.sync import (
+    ABANDONED_ERROR,
+    CANCELLED_ERROR,
+    SyncRun,
+    SyncRunKind,
+    SyncRunStatus,
+    SyncRunUnitStatus,
+    WalkStage,
+)
 from usher.ports.errors import PortUnavailable
 from usher.ports.source import (
     DEFAULT_UNIT_KEY,
@@ -90,18 +103,24 @@ def _service(
     media_items: PostgresMediaItemRepository,
     *,
     batch_size: int,
+    commit: Callable[[], Awaitable[None]] | None = None,
+    heartbeat_seconds: float | None = None,
 ) -> ReconcileService:
-    """The fixture's own wiring, reachable at another batch size.
+    """The fixture's own wiring, reachable at another batch size, commit or heartbeat.
 
     Extracted rather than parametrised because exactly one case wants a
-    different one: the ceiling case walks 500 items, and 250 flushes of two
+    different batch size: the ceiling case walks 500 items, and 250 flushes of two
     would make it a benchmark of the ingest pipeline instead of a test of
-    where the walk stops.
+    where the walk stops. `rollback` is the session's own, which only a walk that
+    is cancelled reaches; on the rolled-back `session` fixture it would end the
+    fixture's own transaction, so the cases that cancel bring a session that commits.
+    Without `heartbeat_seconds` the service keeps its own heartbeat period.
     """
     titles = PostgresTitleRepository(session)
     matching = PostgresTitleMatchRepository(session)
     queue = PostgresJobQueue(session, max_attempts=5, backoff_seconds=30.0)
-    return ReconcileService(
+    build = functools.partial(
+        ReconcileService,
         ingest=IngestService(
             matcher=MatchService(titles=titles, matching=matching, queue=queue),
             matching=matching,
@@ -112,9 +131,11 @@ def _service(
         media_items=media_items,
         events=FakeEventPublisher(),
         runs=runs,
-        commit=session.flush,
+        commit=commit or session.flush,
+        rollback=session.rollback,
         batch_size=batch_size,
     )
+    return build() if heartbeat_seconds is None else build(heartbeat_seconds=heartbeat_seconds)
 
 
 @pytest.fixture
@@ -143,11 +164,11 @@ class _Adapter:
         # claim about.
         self.since_calls: list[datetime | None] = []
 
-    def list_items(self, since: datetime | None = None) -> AsyncIterator[SourceItem]:
+    def list_items(self, since: datetime | None = None) -> AsyncGenerator[SourceItem]:
         self.since_calls.append(since)
         return self._walk()
 
-    async def _walk(self) -> AsyncIterator[SourceItem]:
+    async def _walk(self) -> AsyncGenerator[SourceItem]:
         for index, item in enumerate(list(self.items.values())):
             if self.fail_after is not None and index >= self.fail_after:
                 raise PortUnavailable("source went away mid-walk")
@@ -156,7 +177,9 @@ class _Adapter:
     async def plan_walk(self) -> WalkPlan:
         return WHOLE_LIBRARY
 
-    def list_unit(self, key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage]:
+    def list_unit(
+        self, key: str, *, start_index: int = 0, checkpoint: str | None = None
+    ) -> AsyncGenerator[UnitPage]:
         # Pages of two, so at the fixture's batch of two a planned walk commits
         # page by page, as its single walk commits item pair by item pair.
         return pages_of(self._walk(), start_index=start_index, size=2)
@@ -461,8 +484,8 @@ async def test_a_failed_planned_delta_resumes_in_place_after_the_gap_closer_walk
 ) -> None:
     """The gap-closer's single walk of a source with no cursor writes the newest delta row.
 
-    That row has no heartbeat, and the planned delta's claim passes over it through the
-    real statement, to the failed walk it resumes.
+    That row beats as every walk does but is not planned, and the planned delta's claim
+    passes over it through the real statement, to the failed walk it resumes.
     """
     for index in range(5):
         adapter.items[f"m{index}"] = _item(f"m{index}")
@@ -475,16 +498,20 @@ async def test_a_failed_planned_delta_resumes_in_place_after_the_gap_closer_walk
         2,
     ), "the premise: a planned delta committed one page, then failed"
     adapter.fail_after = None
-    gap = await service.reconcile(
-        source,
-        SyncRunKind.DELTA,
-        adapter,  # type: ignore[arg-type]
-        max_items=1,
-        plan=False,
+    gap = await asyncio.wait_for(
+        service.reconcile(
+            source,
+            SyncRunKind.DELTA,
+            adapter,  # type: ignore[arg-type]
+            max_items=1,
+            plan=False,
+        ),
+        5.0,
     )
-    assert (gap.status, gap.heartbeat_at) == (SyncRunStatus.FAILED, None), (
+    assert (gap.status, gap.planned) == (SyncRunStatus.FAILED, False), (
         "the premise: the gap-closer left an unfinished single walk's row"
     )
+    assert gap.heartbeat_at is not None, "the premise: only `planned` keeps the row out"
     assert gap.started_at > first.started_at, "the premise: the gap-closer's row is the newer"
 
     second = await service.reconcile(source, SyncRunKind.DELTA, adapter)  # type: ignore[arg-type]
@@ -495,6 +522,43 @@ async def test_a_failed_planned_delta_resumes_in_place_after_the_gap_closer_walk
     assert (stored.status, stored.items_seen) == (SyncRunStatus.COMPLETED, 5)
     [unit] = await runs.units_for(first.id)
     assert (unit.status, unit.position) == (SyncRunUnitStatus.COMPLETED, 5)
+
+
+async def test_a_full_walk_an_older_release_left_running_is_closed_against_real_sql(
+    service: ReconcileService,
+    runs: PostgresSyncRunRepository,
+    source: Source,
+    adapter: _Adapter,
+) -> None:
+    """`running`, with no heartbeat and not planned, as `m10h` reads a walk from before both.
+
+    The next walk of its source closes it `failed` through the real statement, and walks
+    afresh, since it has no plan to resume.
+    """
+    adapter.items["m0"] = _item("m0")
+    legacy = SyncRun(source_id=source.id, kind=SyncRunKind.FULL, started_at=T0)
+    await runs.add(legacy)
+    stored = await runs.latest_run(source.id, SyncRunKind.FULL)
+    assert stored is not None
+    assert (stored.id, stored.status, stored.heartbeat_at, stored.planned) == (
+        legacy.id,
+        SyncRunStatus.RUNNING,
+        None,
+        False,
+    ), "the premise: the row an older release left"
+
+    run = await service.reconcile(source, SyncRunKind.FULL, adapter)  # type: ignore[arg-type]
+
+    assert run.id != legacy.id
+    assert run.status is SyncRunStatus.COMPLETED
+    closed = await runs.get(legacy.id)
+    assert closed is not None
+    assert (closed.status, closed.error, closed.error_code) == (
+        SyncRunStatus.FAILED,
+        ABANDONED_ERROR,
+        None,
+    )
+    assert closed.finished_at is not None
 
 
 async def test_a_run_that_failed_does_not_move_the_delta_cursor(
@@ -539,11 +603,14 @@ async def test_a_delta_that_hits_its_ceiling_records_failed_so_the_next_delta_do
     for index in range(PAST_THE_CEILING):
         adapter.items[f"m{index}"] = _item(f"m{index}")
 
-    truncated = await service.reconcile(
-        source,
-        SyncRunKind.DELTA,
-        adapter,  # type: ignore[arg-type]
-        max_items=CEILING,
+    truncated = await asyncio.wait_for(
+        service.reconcile(
+            source,
+            SyncRunKind.DELTA,
+            adapter,  # type: ignore[arg-type]
+            max_items=CEILING,
+        ),
+        5.0,
     )
 
     # -- arm 1: the walk stopped where it said, and kept what it saw -------
@@ -576,11 +643,14 @@ async def test_a_delta_that_hits_its_ceiling_records_failed_so_the_next_delta_do
         "answers this case can tell apart"
     )
     adapter.since_calls.clear()
-    second = await service.reconcile(
-        source,
-        SyncRunKind.DELTA,
-        adapter,  # type: ignore[arg-type]
-        max_items=CEILING,
+    second = await asyncio.wait_for(
+        service.reconcile(
+            source,
+            SyncRunKind.DELTA,
+            adapter,  # type: ignore[arg-type]
+            max_items=CEILING,
+        ),
+        5.0,
     )
     assert second.cursor_at == completed.started_at, (
         "the truncated delta advanced the cursor to its own start instant, so everything "
@@ -589,6 +659,175 @@ async def test_a_delta_that_hits_its_ceiling_records_failed_so_the_next_delta_do
     assert adapter.since_calls == [completed.started_at], (
         f"the `since` that crossed the port is the original cursor: {adapter.since_calls}"
     )
+
+
+MARK = "Cancelled Walk Case"
+
+
+def _marked_source() -> Source:
+    """A source the cancel cases commit, found again by `MARK` to remove it."""
+    return Source(
+        kind=SourceKind.EMBY,
+        name=MARK,
+        base_url="https://emby.invalid",
+        credentials_ref=f"ref-{new_id()}",
+        device_id=str(new_id()),
+    )
+
+
+async def _remove_marked(sessions: async_sessionmaker[AsyncSession]) -> None:
+    async with sessions() as cleanup:
+        # Cascades to `sync_runs` and `sync_run_units`.
+        await cleanup.execute(text("DELETE FROM sources WHERE name = :name"), {"name": MARK})
+        await cleanup.commit()
+
+
+async def _until(condition: Callable[[], bool]) -> None:
+    async with asyncio.timeout(10):
+        while not condition():
+            await asyncio.sleep(0.01)
+
+
+async def _until_sql(observer: AsyncSession, sql: str, **params: object) -> None:
+    """Read `sql`'s one value on `observer` until it is true, for up to 10 seconds.
+
+    Each read ends its transaction: `pg_stat_activity` is read once per transaction.
+    """
+    async with asyncio.timeout(10):
+        while True:
+            held = (await observer.execute(text(sql), params)).scalar_one()
+            await observer.rollback()
+            if held:
+                return
+            await asyncio.sleep(0.01)
+
+
+async def test_a_cancelled_walk_closes_its_run_as_last_committed_against_real_sql(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    """The close rolls back the write in flight and commits the run `failed`."""
+    try:
+        async with sessions() as session:
+            source = _marked_source()
+            await PostgresSourceRepository(session).add(source)
+            await session.commit()
+            adapter = FakeSourceAdapter(source)
+            adapter.seed(_item("m1"), T0)
+            adapter.place("m1", "Films")
+            adapter.stage("Films", WalkStage.TITLES)
+            adapter.hold("Films")
+            runs = PostgresSyncRunRepository(session)
+            service = _service(
+                session,
+                runs,
+                PostgresMediaItemRepository(session),
+                batch_size=2,
+                commit=session.commit,
+            )
+            task = asyncio.create_task(service.reconcile(source, SyncRunKind.FULL, adapter))
+            await _until(lambda: bool(adapter.unit_starts))
+            # The writer is parked on its queue and the fetcher on the hold, so the
+            # session is idle: a pending write the close must roll back, not commit.
+            started = await runs.latest_run(source.id, SyncRunKind.FULL)
+            assert started is not None, "the premise: the walk committed its run"
+            await runs.save(started.evolve(items_seen=99))
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                async with asyncio.timeout(10):
+                    await task
+        async with sessions() as reader:
+            stored = await PostgresSyncRunRepository(reader).get(started.id)
+        assert stored is not None
+        assert (stored.status, stored.error, stored.items_seen) == (
+            SyncRunStatus.FAILED,
+            CANCELLED_ERROR,
+            0,
+        )
+    finally:
+        await _remove_marked(sessions)
+
+
+async def test_a_walk_cancelled_inside_a_blocked_update_closes_its_run_against_real_sql(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    """A cancel that lands inside a statement costs the walk its connection, not its close.
+
+    A second session holds the run's row, so the writer's next heartbeat is an UPDATE
+    waiting inside asyncpg when the walk is cancelled. The close then rolls back and
+    writes on a connection of its own, as soon as the row is free.
+    """
+    lines: list[str] = []
+    sink = logger.add(lines.append, level="WARNING", format="{level.name}|{message}")
+    try:
+        async with sessions() as session, sessions() as locker, sessions() as observer:
+            source = _marked_source()
+            await PostgresSourceRepository(session).add(source)
+            await session.commit()
+            adapter = FakeSourceAdapter(source)
+            adapter.seed(_item("m1"), T0)
+            adapter.place("m1", "Films")
+            adapter.hold("Films")
+            service = _service(
+                session,
+                PostgresSyncRunRepository(session),
+                PostgresMediaItemRepository(session),
+                batch_size=2,
+                commit=session.commit,
+                heartbeat_seconds=0.05,
+            )
+            task = asyncio.create_task(service.reconcile(source, SyncRunKind.FULL, adapter))
+            try:
+                await _until(lambda: bool(adapter.unit_starts))
+                run_id = (
+                    await observer.execute(
+                        text("SELECT id FROM sync_runs WHERE source_id = :source"),
+                        {"source": source.id},
+                    )
+                ).scalar_one()
+                await observer.rollback()
+                locker_pid = (await locker.execute(text("SELECT pg_backend_pid()"))).scalar_one()
+                async with asyncio.timeout(10):
+                    await locker.execute(
+                        text("SELECT id FROM sync_runs WHERE id = :id FOR UPDATE"), {"id": run_id}
+                    )
+                await _until_sql(
+                    observer,
+                    "SELECT EXISTS (SELECT FROM pg_stat_activity"
+                    " WHERE CAST(:locker AS integer) = ANY(pg_blocking_pids(pid))"
+                    " AND wait_event_type = 'Lock' AND query LIKE 'UPDATE sync_runs %')",
+                    locker=locker_pid,
+                )
+                # Nothing commits while the writer waits on the row, so this is the last commit.
+                committed = (
+                    await observer.execute(
+                        text("SELECT items_seen, heartbeat_at FROM sync_runs WHERE id = :id"),
+                        {"id": run_id},
+                    )
+                ).one()
+                await observer.rollback()
+                task.cancel()
+                await locker.rollback()
+                with pytest.raises(asyncio.CancelledError):
+                    async with asyncio.timeout(10):
+                        await task
+            finally:
+                await locker.rollback()
+                task.cancel()
+                async with asyncio.timeout(10):
+                    await asyncio.gather(task, return_exceptions=True)
+        assert [line.rstrip("\n") for line in lines] == [], "the close gave up"
+        async with sessions() as reader:
+            stored = await PostgresSyncRunRepository(reader).get(run_id)
+        assert stored is not None
+        assert (stored.status, stored.error, stored.items_seen, stored.heartbeat_at) == (
+            SyncRunStatus.FAILED,
+            CANCELLED_ERROR,
+            committed.items_seen,
+            committed.heartbeat_at,
+        )
+    finally:
+        logger.remove(sink)
+        await _remove_marked(sessions)
 
 
 def test_the_service_is_constructed_from_ports_only() -> None:

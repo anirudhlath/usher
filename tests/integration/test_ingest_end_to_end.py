@@ -217,6 +217,7 @@ def reconcile(
         events=FakeEventPublisher(),
         runs=runs,
         commit=session.flush,
+        rollback=session.rollback,
         batch_size=1_000,
     )
 
@@ -235,6 +236,7 @@ def watch_sync(
         runs=runs,
         queue=queue,
         commit=session.flush,
+        rollback=session.rollback,
         batch_size=1_000,
     )
 
@@ -817,6 +819,7 @@ async def test_statements_do_not_grow_with_the_page(
             events=FakeEventPublisher(),
             runs=runs,
             commit=commit,
+            rollback=session.rollback,
             batch_size=batch_size,
         )
 

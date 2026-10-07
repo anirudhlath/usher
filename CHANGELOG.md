@@ -18,18 +18,25 @@ Versioning is `0.x` while the wire contract may still move —
   what the account is watching, then each library's movies and series, then its
   episodes in chunks of `USHER_SYNC_UNIT_MAX_ITEMS` (default 100,000).
   `USHER_SYNC_WALKERS` units are fetched at once while one writer commits them;
-  each unit's position is kept in `sync_run_units`, and the run's
-  `heartbeat_at` shows the writer is alive.
-- A whole-library walk that fails or is killed resumes where it stopped: the
-  same run, each unit from the position it committed. While one is alive — its
+  each unit's position is kept in `sync_run_units`, and the run is marked as a
+  whole-library walk (`sync_runs.planned`, migration `m10h`). Every item walk,
+  single walks included, moves its run's `heartbeat_at` with every commit and at
+  least once a minute between commits, to show it is alive.
+- A whole-library walk that fails or is killed resumes where it stopped, even
+  once the next full or delta walk has closed it as abandoned: the same run,
+  each unit from the position it committed. While one is alive — its
   heartbeat under 10 minutes old — a second is refused, saying how long until
   one whose process stopped can be resumed: `usher sync` exits non-zero, and a
-  worker job is deferred 10 minutes, spending none of its attempts. A
-  watch-state walk started while another is alive runs beside it instead of
-  closing or resuming the other's run.
+  worker job is deferred 10 minutes, spending none of its attempts. A walk
+  stopped with Ctrl-C closes its run `failed` with
+  `cancelled: the walk was stopped before it finished`, as last committed, so
+  the next starts at once; one whose process was killed outright counts as live
+  until its heartbeat is 10 minutes old. A watch-state walk started while
+  another is alive runs beside it and leaves the other's run alone.
 - The watch lane runs as soon as a whole-library walk has stored what the
   account is watching — played, in progress and next up — so a household's own
-  shelves fill long before the walk ends. It still runs after the walk.
+  shelves fill long before the walk ends. It still runs after the walk, and
+  `usher sync` exits on that run's outcome.
 - `GET /admin/sources/{id}/status` carries `last_sync`: the source's live
   whole-library walk if it has one, and otherwise its newest full or delta
   walk. It, every `sync.progress` frame and `usher sync-status` say where a
@@ -59,10 +66,14 @@ Versioning is `0.x` while the wire contract may still move —
   whole library, which on a million-item library took most of a day. If most of
   the played listing reads unwatched, the server is taken to ignore the filter,
   and the walk lists once and logs a WARNING.
-- **An unfinished first watch-state walk starts again rather than resuming.**
-  Its position counted the old whole-library walk, so resuming it would skip
-  every played item that is not also in progress; its row is closed `failed`
-  as superseded.
+- **The watch lane no longer resumes an unfinished run**, withdrawing #41's
+  resume: a `StartIndex` into a listing that has lost items since skips them.
+  Each watch run starts afresh from the oldest of the lane's cursor and the
+  cursor of every failed watch run that no completed run has covered — by
+  starting no earlier and reading from no later, both with a cursor or both
+  without — so a failed run costs a re-read from its cursor. A run whose process
+  stopped is closed `failed` with `abandoned: its process stopped before it
+  finished` by the next, and its cursor counts.
 - **`USHER_PUSH_STALE_AFTER_SECONDS` defaults to 300, up from 90.** An idle
   library's push channel routinely went longer than 90 s between messages, and
   every such gap cost a reconnect. `usher push --probe` listens for one window,
@@ -75,9 +86,36 @@ Versioning is `0.x` while the wire contract may still move —
 ### Fixed
 
 - **Items deleted from the source mid-walk no longer hide others from the
-  walk**, unless more of them vanish between two pages than a page re-reads.
-  Each page re-reads the end of the page before, so a full walk no longer marks
-  a file that is still there unavailable.
+  walk.** Each page re-reads the end of the page before, so a full walk no
+  longer marks a file that is still there unavailable.
+- **A walk no longer skips items when more than the page overlap leave the
+  listing between two pages.** A page that moved past the overlap is not read:
+  the walk logs a WARNING and asks again 100 items earlier, doubling while pages
+  keep moving. Before, it read on, and a full walk's sweep then retracted the
+  items it had skipped.
+- **A resumed unit of a whole-library walk no longer skips items that left its
+  library between attempts.** Each unit commits the creation time of the last
+  item it read beside its position (`sync_run_units.checkpoint`, migration
+  `m10h`), and its first page after a resume is judged against it. A unit saved
+  before this release restarts from its beginning.
+- **An episode chunk no longer skips items that move across its boundary.**
+  Chunks are bounded by the creation time of the item at each boundary, read
+  when the walk is planned, and each reads until it passes the next chunk's
+  first item. A chunk planned before this release reads to the end of its
+  library.
+- **An item walk whose process died is closed by the next full or delta walk of
+  its source** instead of staying `running`. Each such walk first closes its
+  source's item walks that are `running` with a heartbeat 10 minutes old or
+  none, `failed` with `abandoned: its process stopped before it finished`, and
+  logs a WARNING that counts them.
+- **A full walk no longer retracts an item that a walk begun before it read
+  again meanwhile.** An item keeps the latest instant it was seen at: a walk's
+  start, or the moment a push event read it.
+- **A watch merge that read newer state is no longer refused because an older
+  read committed first.** The `watch_states` trigger keeps a source merge's own
+  `updated_at` — its read's instant, which for a walk is the instant the walk
+  began — instead of stamping the commit's (migration `m10h`); a client write
+  and a restore still stamp `now()`.
 - **An embedding model that fails the embedder's norm check now fails every
   batch, not only the first.** The first batch used to park one `index` job and
   let every later vector through unchecked.
