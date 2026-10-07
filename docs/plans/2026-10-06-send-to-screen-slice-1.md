@@ -1587,7 +1587,7 @@ def _candidate(
 
 
 def _by_name(players: list[ScreenDevice]) -> tuple[ScreenDevice, ...]:
-    return tuple(sorted(players, key=lambda player: (player.name, player.entity_id)))
+    return tuple(sorted(players, key=lambda player: reading_key(player.name, player.entity_id)))
 
 
 def project(house: HouseSnapshot, recipes: tuple[Recipe, ...] = RECIPES) -> HouseView:
@@ -1621,7 +1621,7 @@ def project(house: HouseSnapshot, recipes: tuple[Recipe, ...] = RECIPES) -> Hous
                 Screen(area_id=area_id, name=_area_name(house, area_id), devices=_by_name(players))
                 for area_id, players in grouped.items()
             ),
-            key=lambda screen: (screen.name, screen.area_id),
+            key=lambda screen: reading_key(screen.name, screen.area_id),
         )
     )
     return HouseView(
@@ -1629,7 +1629,7 @@ def project(house: HouseSnapshot, recipes: tuple[Recipe, ...] = RECIPES) -> Hous
         unconfirmed=_by_name(unconfirmed),
         no_area=_by_name(no_area),
         ignored=_by_name(ignored),
-        areas=tuple(sorted(house.areas, key=lambda one: (one.name, one.area_id))),
+        areas=tuple(sorted(house.areas, key=lambda one: reading_key(one.name, one.area_id))),
     )
 
 
@@ -1941,7 +1941,7 @@ from typing import Final
 
 from usher.domain.enums import HdrFormat
 from usher.domain.recipes import Recipe
-from usher.domain.screens import Screen, ScreenDevice
+from usher.domain.screens import Screen, ScreenDevice, reading_key
 from usher.domain.source import MediaItem
 
 
@@ -2164,7 +2164,7 @@ def rank(screens: Sequence[Screen], files: Sequence[MediaItem]) -> tuple[Way, ..
     gives up against that one.
     """
     ranked: list[Way] = []
-    for screen in sorted(screens, key=lambda one: (one.name, one.area_id)):
+    for screen in sorted(screens, key=lambda one: reading_key(one.name, one.area_id)):
         ways = sorted(
             (
                 _way(screen, device, recipe, item)
