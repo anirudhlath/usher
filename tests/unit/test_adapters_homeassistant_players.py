@@ -74,6 +74,11 @@ async def _until(condition: Callable[[], bool], *, within: float = 1.0) -> None:
             await asyncio.sleep(0)
 
 
+async def _settle() -> None:
+    for _ in range(50):
+        await asyncio.sleep(0)
+
+
 async def _started(
     server: FakeHomeAssistant,
 ) -> tuple[HomeAssistantPlayers, FakeHomeAssistantConnector]:
@@ -198,9 +203,12 @@ async def test_a_sync_reads_the_house_and_nothing_from_another_domain() -> None:
     assert any(row["entity_id"] == SENSOR for row in server.entities), "the premise"
     adapter, connector = await _started(server)
     try:
+        await _settle()
         assert adapter.snapshot() == this_house()
         assert connector.urls == [URL]
         assert adapter.dropped == 0
+        assert adapter.resyncs == 0, "a clean sync started a re-read"
+        assert len(_commands(server, "config/area_registry/list")) == 1
     finally:
         await adapter.aclose()
 
@@ -285,8 +293,7 @@ async def test_registry_events_during_a_resync_cause_exactly_one_more_pass() -> 
         ]
         server.rename_area(LIVING_ROOM, "Lounge")
         await _until(lambda: adapter.resyncs >= 2)
-        for _ in range(50):
-            await asyncio.sleep(0)
+        await _settle()
         assert adapter.resyncs == 2
         assert len(_commands(server, "config/area_registry/list")) == 3
         house = adapter.snapshot()
@@ -305,8 +312,7 @@ async def test_a_burst_of_registry_events_is_read_at_most_twice() -> None:
         for name in names:
             server.rename_area(LIVING_ROOM, name)
         await _until(lambda: _area_name(adapter.snapshot(), LIVING_ROOM) == names[-1])
-        for _ in range(50):
-            await asyncio.sleep(0)
+        await _settle()
         assert 1 <= adapter.resyncs <= 2
         assert len(_commands(server, "config/area_registry/list")) == 1 + adapter.resyncs
     finally:
@@ -369,10 +375,25 @@ async def test_a_label_created_under_another_id_is_refused_before_anything_is_wr
 async def test_two_confirms_at_once_create_each_label_once() -> None:
     server = FakeHomeAssistant(this_house(apple_tv=None), labels={})
     adapter, _ = await _started(server)
+    started: list[str] = []
+    finished: list[str] = []
+    seen: list[tuple[list[str], list[str]]] = []
+    server.after_answer["config/label_registry/create"] = [
+        lambda: seen.append((list(started), list(finished)))
+    ]
+
+    async def confirm(entity_id: str, role: DeviceRole) -> None:
+        started.append(entity_id)
+        await adapter.set_role(entity_id, role)
+        finished.append(entity_id)
+
     try:
         await asyncio.gather(
-            adapter.set_role(SHIELD, DeviceRole.USE),
-            adapter.set_role(APPLE_TV, DeviceRole.IGNORE),
+            confirm(SHIELD, DeviceRole.USE),
+            confirm(APPLE_TV, DeviceRole.IGNORE),
+        )
+        assert seen[0] == ([SHIELD, APPLE_TV], []), (
+            "the premise: the second confirm began before the first create was answered"
         )
         assert len(_commands(server, "config/label_registry/create")) == 2
         assert len(_commands(server, "config/entity_registry/update")) == 2
@@ -404,6 +425,26 @@ async def test_with_no_connection_there_is_no_house_and_no_write() -> None:
         adapter.snapshot()
     with pytest.raises(PortUnavailable, match="not answering"):
         await adapter.set_role(SHIELD, DeviceRole.USE)
+
+
+async def test_a_connection_still_syncing_has_no_house_and_takes_no_write() -> None:
+    server = FakeHomeAssistant()
+    server.unanswered.add("get_states")
+    adapter = _adapter(FakeHomeAssistantConnector(server))
+    await adapter.start()
+    try:
+        await _until(lambda: bool(_commands(server, "get_states")))
+        with pytest.raises(PortUnavailable, match="not answering"):
+            await adapter.set_role(SHIELD, DeviceRole.USE)
+        written = {
+            "config/label_registry/list",
+            "config/label_registry/create",
+            "config/entity_registry/get",
+            "config/entity_registry/update",
+        }
+        assert [command for command in server.commands if command["type"] in written] == []
+    finally:
+        await adapter.aclose()
 
 
 # -- losing the connection --------------------------------------------------
@@ -482,8 +523,73 @@ async def test_a_refused_token_backs_off_and_is_never_logged() -> None:
         adapter.snapshot()
 
 
+async def test_a_failed_re_read_drops_the_connection_and_the_next_sync_brings_the_change() -> None:
+    server = FakeHomeAssistant()
+    connector = FakeHomeAssistantConnector(server)
+    resume = asyncio.Event()
+    delays: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        delays.append(seconds)
+        await resume.wait()
+
+    adapter = _adapter(connector, sleep=sleep, timeout=0.05)
+    await adapter.start()
+    try:
+        await _until(lambda: adapter.syncs == 1)
+        server.unanswered.add("config/area_registry/list")
+        server.rename_area(LIVING_ROOM, "Lounge")
+        await _until(lambda: len(delays) == 1)
+        assert len(_commands(server, "config/area_registry/list")) == 2, "the premise"
+        assert connector.latest.closed, "the failed re-read closed its connection"
+        with pytest.raises(PortUnavailable):
+            adapter.snapshot()
+        server.unanswered.clear()
+        resume.set()
+        await _until(lambda: adapter.syncs == 2)
+        assert _area_name(adapter.snapshot(), LIVING_ROOM) == "Lounge"
+        assert connector.urls == [URL, URL]
+    finally:
+        await adapter.aclose()
+
+
 async def test_aclose_closes_the_socket() -> None:
     server = FakeHomeAssistant()
     adapter, connector = await _started(server)
     await adapter.aclose()
     assert connector.latest.closed
+
+
+async def test_closing_while_a_failed_sync_unwinds_still_closes_the_socket() -> None:
+    server = FakeHomeAssistant()
+    server.unanswered.add("get_states")
+    connector = FakeHomeAssistantConnector(server)
+    delays: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        delays.append(seconds)
+        await asyncio.sleep(0)
+
+    adapter = _adapter(connector, sleep=sleep, timeout=0.05)
+    await adapter.start()
+    await _until(lambda: bool(_commands(server, "get_states")))
+    await _until(lambda: adapter._session is None)
+    await adapter.aclose()
+    assert delays == [], "the premise: aclose landed before the loop reached its backoff"
+    assert connector.latest.closed
+
+
+async def test_closing_during_a_re_read_logs_no_warning() -> None:
+    server = FakeHomeAssistant()
+    adapter, _ = await _started(server)
+    server.unanswered.add("config/area_registry/list")
+    server.rename_area(LIVING_ROOM, "Lounge")
+    await _until(lambda: len(_commands(server, "config/area_registry/list")) == 2)
+    assert adapter.resyncs == 0, "the premise: the re-read is still in flight"
+    lines: list[str] = []
+    handler = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        await adapter.aclose()
+    finally:
+        logger.remove(handler)
+    assert lines == []

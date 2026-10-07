@@ -1,4 +1,4 @@
-"""`Players` over Home Assistant's websocket: the registries read per connection, events after.
+"""`Players` over Home Assistant's websocket, its registries read on connect and on each change.
 
 One socket held open and no rate gate, because a socket is not a request; reconnects back off.
 """
@@ -65,7 +65,8 @@ class HomeAssistantPlayers(Players):
     numbered after the state list applies, and a registry change numbered after
     the first registry list starts one more registry read. After the sync,
     state changes apply as they come and registry changes coalesce into at most
-    one pending re-read. With no connection there is no house.
+    one pending re-read; a re-read that fails drops the connection, so the next
+    one syncs from scratch. With no connection there is no house.
     """
 
     def __init__(
@@ -179,16 +180,20 @@ class HomeAssistantPlayers(Players):
         pump = asyncio.create_task(session.pump(self._on_event))
         try:
             await self._sync(session)
-            await pump
+            # Shielded so a cancelled loop leaves the reader to the `finally`, which
+            # cancels a re-read before the reader can fail it with a stop it would log.
+            await asyncio.shield(pump)
         finally:
             self._session, self._held = None, None
             self._publish(None)
-            tasks = [task for task in (pump, self._resync) if task is not None]
+            tasks = [task for task in (self._resync, pump) if task is not None]
             self._resync = None
             for task in tasks:
                 task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            await session.aclose()
+            try:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            finally:
+                await session.aclose()
 
     async def _sync(self, session: HomeAssistantSession) -> None:
         for event_type in (_STATE_EVENT, *_REGISTRY_EVENTS):
@@ -240,7 +245,11 @@ class HomeAssistantPlayers(Players):
             self._resync = asyncio.create_task(self._resync_registries(self._session))
 
     async def _resync_registries(self, session: HomeAssistantSession) -> None:
-        """Re-read the three registries until no registry event arrived during a read."""
+        """Re-read the three registries until no registry event arrived during a read.
+
+        A failed read closes the session: the reader then fails, the loop syncs
+        from scratch, and until it does there is no house rather than a stale one.
+        """
         try:
             while True:
                 self._resync_again = False
@@ -260,6 +269,7 @@ class HomeAssistantPlayers(Players):
                     return
         except UsherPortError as exc:
             logger.warning("players: re-reading Home Assistant's registries failed: {}", exc)
+            await session.aclose()
 
     def _publish(self, house: HouseSnapshot | None) -> None:
         """Replace the reading and wake every waiter, swapping the event so the next wait sleeps."""

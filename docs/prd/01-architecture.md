@@ -21,21 +21,23 @@ independently testable and swappable.
 │  ports/       SourceAdapter · MetadataProvider ·          │
 │               SearchIndex · SuggestIndex · Embedder ·     │
 │               LLMClient · TitleRepository · Row ·         │
-│               RowProvider (all ABCs)                      │
+│               RowProvider · Players (all ABCs)            │
 │  adapters/    emby/ · tmdb/ · bulk/ ·                     │
-│               search/ · embedding/ · llm/ · images/       │
+│               search/ · embedding/ · llm/ · images/ ·     │
+│               homeassistant/                              │
 │  db/          SQLAlchemy 2.0 async · Alembic · repos      │
-└────────────────────────────┬──────────────────────────────┘
-                             ▼
-                       [PostgreSQL]
-             canonical catalog · search · vectors · job queue
+└────────────────────────────┬──────────────────────┬───────┘
+                             ▼                      ▼  websocket
+                       [PostgreSQL]         [Home Assistant]
+             canonical catalog ·            registries and
+             search · vectors · job queue   players' states
 ```
 
 `adapters/` subdirectories are named for the upstream service when a port's
 implementation talks to one nameable external service (`emby/` →
-`SourceAdapter`, `tmdb/` → `MetadataProvider`) and for the capability otherwise
-(`bulk/`, `search/`, `embedding/`, `llm/`, `images/`). There is no
-`adapters/postgres/`.
+`SourceAdapter`, `tmdb/` → `MetadataProvider`, `homeassistant/` → `Players`)
+and for the capability otherwise (`bulk/`, `search/`, `embedding/`, `llm/`,
+`images/`). There is no `adapters/postgres/`.
 
 **Deployment:** `compose.yml` with `usher` + `postgres`. One stateful service.
 **There is no `meilisearch` service.** What exists is a feature gate behind the
@@ -78,7 +80,7 @@ seven deliberately are not.
 | `api.themoviedb.org` (`tmdb/client.py`) | `_TokenBucket` at `USHER_TMDB_REQUESTS_PER_SECOND` |
 | `api.themoviedb.org` (`tmdb/provider.py`, six call sites) | the bucket above — this module holds no client of its own |
 | `/embywebsocket` (`emby/push.py`) | **none** — one socket held open; reconnects back off |
-| Home Assistant's `/api/websocket` (`homeassistant/players.py`) | **none** — one socket held open; registries read once per connection; reconnects back off |
+| Home Assistant's `/api/websocket` (`homeassistant/players.py`) | **none** — one socket held open; registries read on connect and again after each registry change, at most one re-read pending; reconnects back off |
 | `image.tmdb.org` (`images/provider.py`) | **none** — each image is fetched once, then served from the cache |
 | the IMDb/TMDb/MovieLens dataset hosts (`bulk/download.py`, two call sites) | **none** — one streamed file per dataset plus one `HEAD` for its revision |
 | `query.wikidata.org` (`bulk/wikidata.py`) | **none** — a bootstrap phase run by hand, chunked and sequential |

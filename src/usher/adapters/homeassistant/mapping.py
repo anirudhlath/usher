@@ -123,7 +123,11 @@ def _seconds(attributes: Mapping[str, object], key: str) -> float | None:
     value = attributes.get(key)
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
-    return float(value) if math.isfinite(value) else None
+    try:
+        seconds = float(value)
+    except OverflowError:
+        return None
+    return seconds if math.isfinite(seconds) else None
 
 
 def _instant(attributes: Mapping[str, object], key: str) -> datetime | None:

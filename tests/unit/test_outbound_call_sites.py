@@ -217,10 +217,10 @@ _PUSH = _Decision(
 _HOME_ASSISTANT = _Decision(
     upstream="Home Assistant's /api/websocket (`USHER_HA_URL`), a machine in the household",
     limiter=(
-        "none: `usher.adapters.homeassistant.players` holds one socket open, reads the "
-        "registries once per connection and follows events after; its only writes are an "
-        "owner's confirm. What limits it is the reconnect backoff "
-        "(`HomeAssistantPlayers._delay`, `USHER_PLAYERS_BACKOFF_SECONDS` doubling to "
+        "none: `usher.adapters.homeassistant.players` holds one socket open and reads the "
+        "registries on connect and again after each registry change, at most one re-read "
+        "pending; its only writes are an owner's confirm. What limits it is the reconnect "
+        "backoff (`HomeAssistantPlayers._delay`, `USHER_PLAYERS_BACKOFF_SECONDS` doubling to "
         "`USHER_PLAYERS_MAX_BACKOFF_SECONDS`)"
     ),
     recorded_in="src/usher/adapters/homeassistant/players.py",

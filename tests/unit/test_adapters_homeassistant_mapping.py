@@ -166,7 +166,14 @@ def test_disabled_by_anyone_is_disabled(disabled_by: str | None, disabled: bool)
 
 @pytest.mark.parametrize(
     ("value", "seconds"),
-    [(489, 489.0), (489.5, 489.5), (True, None), ("489", None), (float("nan"), None)],
+    [
+        (489, 489.0),
+        (489.5, 489.5),
+        (True, None),
+        ("489", None),
+        (float("nan"), None),
+        pytest.param(10**400, None, id="beyond-a-float"),
+    ],
 )
 def test_a_position_is_a_finite_number_and_never_a_bool(
     value: object, seconds: float | None
