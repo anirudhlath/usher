@@ -29,13 +29,20 @@ from usher.domain.screens import HouseView, ScreenDevice, project
 
 # Invented: the remote HA's `apple_tv` integration adds beside each media player.
 APPLE_TV_REMOTE = "remote.living_room_apple_tv"
+# Invented: a player with no device of its own, as HA's group and universal players are.
+WHOLE_HOUSE = "media_player.whole_house"
 _NOTHING_PLACED: dict[str, object] = {
     "screens": {},
     "unconfirmed": [],
     "no_area": [],
     "ignored": [],
 }
+# Names in neither their ids' order nor their arrival's.
+_NOT_BY_ID = {"z": "Attic", "x": "Bedroom", "y": "Cellar"}
 _BY_NAME = ["media_player.z", "media_player.x", "media_player.y"]
+# Names a person reads in an order their codepoints do not.
+_MIXED_CASE = {"a": "Pantry", "b": "office", "c": "Bedroom"}
+_MIXED_CASE_BY_NAME = ["media_player.c", "media_player.b", "media_player.a"]
 
 
 def _labelled(house: HouseSnapshot, entity_id: str, role: DeviceRole | None) -> HouseSnapshot:
@@ -85,9 +92,36 @@ def _answering(house: HouseSnapshot, entity_id: str) -> tuple[Recipe, ...]:
     )
 
 
-def _three_players(role: DeviceRole | None, area_id: str | None) -> HouseSnapshot:
-    """Three SHIELDs whose id order, arrival order and name order are three different orders."""
-    names = {"z": "Attic", "x": "Bedroom", "y": "Cellar"}
+def _arrival(names: dict[str, str]) -> list[str]:
+    """Keys rotated one place from id order: a third order, beside id order and name order."""
+    in_id_order = sorted(names)
+    return [*in_id_order[1:], *in_id_order[:1]]
+
+
+def _three_screens(names: dict[str, str]) -> HouseSnapshot:
+    """A confirmed SHIELD in each of three areas, area `key` named `names[key]`."""
+    return snapshot(
+        areas=tuple(area(key, names[key]) for key in _arrival(names)),
+        devices=tuple(
+            device(f"dev-{key}", model="SHIELD Android TV", area_id=key) for key in _arrival(names)
+        ),
+        entities=tuple(
+            entity(
+                f"media_player.{key}",
+                integration="cast",
+                device_id=f"dev-{key}",
+                name=f"Player {names[key]}",
+                role=DeviceRole.USE,
+            )
+            for key in _arrival(names)
+        ),
+    )
+
+
+def _three_players(
+    names: dict[str, str], role: DeviceRole | None, area_id: str | None
+) -> HouseSnapshot:
+    """Three SHIELDs on one device, player `media_player.<key>` named after `names[key]`."""
     return snapshot(
         areas=(area("den"),),
         devices=(device("dev-den", model="SHIELD Android TV", area_id=area_id),),
@@ -99,9 +133,19 @@ def _three_players(role: DeviceRole | None, area_id: str | None) -> HouseSnapsho
                 name=f"Player {names[key]}",
                 role=role,
             )
-            for key in ("y", "z", "x")
+            for key in _arrival(names)
         ),
     )
+
+
+def _in_every_list(by_name: list[str]) -> list[object]:
+    """One case per list a player can be in: (role, the device's area, what is placed)."""
+    return [
+        pytest.param(DeviceRole.USE, "den", {"screens": {"den": by_name}}, id="screen"),
+        pytest.param(DeviceRole.USE, None, {"no_area": by_name}, id="no_area"),
+        pytest.param(None, "den", {"unconfirmed": by_name}, id="unconfirmed"),
+        pytest.param(DeviceRole.IGNORE, "den", {"ignored": by_name}, id="ignored"),
+    ]
 
 
 def test_this_house_has_one_screen_holding_the_apple_tv() -> None:
@@ -170,6 +214,22 @@ def test_only_a_media_player_is_a_candidate() -> None:
     assert project(with_remote).candidate(APPLE_TV_REMOTE) is None
 
 
+@pytest.mark.parametrize("device_id", [None, "dev-not-in-the-house"], ids=["none", "unknown"])
+def test_a_player_with_no_device_is_never_a_candidate(device_id: str | None) -> None:
+    house = this_house()
+    assert device_id is None or house.device(device_id) is None, (
+        "the premise: the id names no device in the house"
+    )
+    deviceless = entity(WHOLE_HOUSE, integration="cast", device_id=device_id, role=DeviceRole.USE)
+    on_the_shield = replace(deviceless, device_id=SHIELD_DEVICE)
+    with_it_on_the_shield = house.with_registries(entities=(*house.entities, on_the_shield))
+    assert project(with_it_on_the_shield).candidate(WHOLE_HOUSE) is not None, (
+        "the premise: the same entity on the SHIELD's device is a candidate"
+    )
+    with_it = house.with_registries(entities=(*house.entities, deviceless))
+    assert project(with_it).candidate(WHOLE_HOUSE) is None
+
+
 def test_the_shield_waits_unconfirmed_with_no_area() -> None:
     view = project(this_house())
     assert [player.entity_id for player in view.unconfirmed] == [SHIELD]
@@ -226,7 +286,11 @@ def test_a_disabled_entity_is_never_a_candidate() -> None:
 
 
 def test_a_player_moved_between_areas_moves_screen() -> None:
-    view = project(_moved(this_house(), APPLE_TV_DEVICE, BEDROOM))
+    house = this_house()
+    assert [screen.area_id for screen in project(house).screens] == [LIVING_ROOM], (
+        "the premise: before the move the Apple TV's screen is the Living Room"
+    )
+    view = project(_moved(house, APPLE_TV_DEVICE, BEDROOM))
     assert [screen.area_id for screen in view.screens] == [BEDROOM]
 
 
@@ -260,25 +324,7 @@ def test_a_screen_is_found_by_its_area_and_an_area_with_no_device_is_no_screen()
 
 
 def test_screens_and_areas_are_ordered_by_name_not_by_id_or_arrival() -> None:
-    """Ids chosen so id order, arrival order and name order are three different orders."""
-    names = {"z": "Attic", "x": "Bedroom", "y": "Cellar"}
-    house = snapshot(
-        areas=tuple(area(area_id, names[area_id]) for area_id in ("y", "z", "x")),
-        devices=tuple(
-            device(f"dev-{area_id}", model="SHIELD Android TV", area_id=area_id)
-            for area_id in ("y", "z", "x")
-        ),
-        entities=tuple(
-            entity(
-                f"media_player.{area_id}",
-                integration="cast",
-                device_id=f"dev-{area_id}",
-                name=f"Player {names[area_id]}",
-                role=DeviceRole.USE,
-            )
-            for area_id in ("y", "z", "x")
-        ),
-    )
+    house = _three_screens(_NOT_BY_ID)
     in_id_order = [one.name for one in house.areas]
     assert in_id_order != sorted(in_id_order), "the premise: id order is not name order"
     view = project(house)
@@ -286,22 +332,37 @@ def test_screens_and_areas_are_ordered_by_name_not_by_id_or_arrival() -> None:
     assert [one.name for one in view.areas] == ["Attic", "Bedroom", "Cellar"]
 
 
-@pytest.mark.parametrize(
-    ("role", "area_id", "placed"),
-    [
-        pytest.param(DeviceRole.USE, "den", {"screens": {"den": _BY_NAME}}, id="screen"),
-        pytest.param(DeviceRole.USE, None, {"no_area": _BY_NAME}, id="no_area"),
-        pytest.param(None, "den", {"unconfirmed": _BY_NAME}, id="unconfirmed"),
-        pytest.param(DeviceRole.IGNORE, "den", {"ignored": _BY_NAME}, id="ignored"),
-    ],
-)
+def test_screens_and_areas_sort_as_a_person_reads_not_by_codepoint() -> None:
+    house = _three_screens(_MIXED_CASE)
+    names = [one.name for one in house.areas]
+    assert sorted(names) != sorted(names, key=str.casefold), (
+        "the premise: codepoint order is not reading order"
+    )
+    view = project(house)
+    assert [screen.name for screen in view.screens] == ["Bedroom", "office", "Pantry"]
+    assert [one.name for one in view.areas] == ["Bedroom", "office", "Pantry"]
+
+
+@pytest.mark.parametrize(("role", "area_id", "placed"), _in_every_list(_BY_NAME))
 def test_players_are_ordered_by_name_in_every_list(
     role: DeviceRole | None, area_id: str | None, placed: dict[str, object]
 ) -> None:
-    house = _three_players(role, area_id)
+    house = _three_players(_NOT_BY_ID, role, area_id)
     in_id_order = [one.entity_id for one in house.entities]
     in_name_order = [one.entity_id for one in sorted(house.entities, key=lambda e: e.name or "")]
     assert in_id_order != in_name_order, "the premise: id order is not name order"
+    assert _placed(project(house)) == {**_NOTHING_PLACED, **placed}
+
+
+@pytest.mark.parametrize(("role", "area_id", "placed"), _in_every_list(_MIXED_CASE_BY_NAME))
+def test_players_sort_as_a_person_reads_not_by_codepoint_in_every_list(
+    role: DeviceRole | None, area_id: str | None, placed: dict[str, object]
+) -> None:
+    house = _three_players(_MIXED_CASE, role, area_id)
+    names = [one.name or "" for one in house.entities]
+    assert sorted(names) != sorted(names, key=str.casefold), (
+        "the premise: codepoint order is not reading order"
+    )
     assert _placed(project(house)) == {**_NOTHING_PLACED, **placed}
 
 
