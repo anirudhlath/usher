@@ -204,8 +204,8 @@ _PUSH = _Decision(
         "count differ here"
     ),
     limiter=(
-        "none: `usher.adapters.emby.push` dials through `websockets`, not httpx, and "
-        "holds the connection open. **A socket held open is not a request**, so a "
+        "none: `usher.adapters.emby.push` dials through `usher.adapters.websocket`, not "
+        "httpx, and holds the connection open. **A socket held open is not a request**, so a "
         "requests-per-second gate has nothing to space. What limits it is the "
         "reconnect *backoff* (`PushSupervisor._backoff`, `src/usher/services/push.py`), "
         "which is the right shape for the failure a limiter would be for here -- a "

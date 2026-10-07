@@ -62,7 +62,8 @@ Import discipline is enforced in CI by `import-linter`: **Fourteen contracts**.
 ## Ports are ABCs, not Protocols
 
 All ports are `abc.ABC` with `@abstractmethod`. The shared httpx pieces live in
-`src/usher/adapters/http.py`; the client lifecycle is per-adapter.
+`src/usher/adapters/http.py` and the shared websocket transport in
+`src/usher/adapters/websocket.py`; the client lifecycle is per-adapter.
 
 ### Outbound calls and their limiters
 
