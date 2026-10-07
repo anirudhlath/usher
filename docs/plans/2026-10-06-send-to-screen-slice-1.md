@@ -14,7 +14,7 @@
 - import-linter.
 - The Console's settings catalogue and generated schema in `web/`.
 
-**Spec:** `docs/specs/2026-10-06-send-to-screen-design.md`. This plan covers slice 1 of its five slices. Read the spec beside this plan. The plan departs from the spec in ten places, and each departure is called out where it happens:
+**Spec:** `docs/specs/2026-10-06-send-to-screen-design.md`. This plan covers slice 1 of its five slices. Read the spec beside this plan. The plan departs from the spec in eleven places, and each departure is called out where it happens:
 
 1. **`proven`, not `measured`.** The prose hook (`.claude/hooks/guard_prose.py`) refuses the word "measured" in Python prose. A field whose own docstring cannot name it invites drift, so the recipe field and the API field are both `proven`, against the default `assumed` (Task 3).
 2. **The port has no `call_service` yet.** Slice 2 adds it, with the dispatcher that uses it (Task 9).
@@ -25,7 +25,8 @@
 7. **Infuse's profile admits HLG**, which the spec's table omits. Every fact is `assumed` either way, and refusing HLG on Infuse would hide a way that plays (Task 3).
 8. **Confirm only places a player that has no area.** A player that is already in an area is moved in HA. The spec offers an area for the `NO AREA` list only, and moving a player whose entity carries its own area override cannot work through the device registry (Task 12).
 9. **Container sets carry MP4's sibling names, and HDR is not tied to a container.** Infuse admits `m4v` and `mov` beside the spec's MKV and MP4, and AirPlay and Cast admit `m4v`, because a source can name an MP4 file by its family (`mov,mp4,m4a,…`, Task 5). `DirectPlay` cannot tie an HDR format to a container, so AirPlay's "Dolby Vision in MP4" admits Dolby Vision in any of its containers. Every fact is `assumed` either way (Task 3).
-10. **Provenance is per recipe, not per fact.** One `proven` flag covers all of a recipe's facts, since slice 1 proves none of them. How a recipe resumes and its stage predicates arrive with slice 2, which reads them (Task 3).
+10. **Provenance is per recipe, not per fact.** One `proven` flag covers all of a recipe's facts, since slice 1 proves none of them. How a recipe resumes, its stage predicates and its stage deadlines arrive with slice 2, which reads them (Task 3).
+11. **The recipes are as fine as `HdrFormat` and the catalog allow.** `HdrFormat` has HDR10, Dolby Vision and HLG, so a recipe cannot name HDR10+ or a Dolby Vision profile: Infuse admits every Dolby Vision file and Cast refuses every one, profile 8.1 included. Infuse's TrueHD and DTS-HD become no audio limit at all. Every fact is `assumed` either way (Task 3).
 
 ## Global Constraints
 
@@ -1098,7 +1099,7 @@ git commit -m "players: the house as Home Assistant reports it, held in memory a
 
 ### Task 3: Recipes
 
-A recipe is the code Usher holds about something HA has no concept of. It records how an app on a device model is handed a URL, what that app can direct-play, and whether that needs nobody at the TV. Departure 1: the fact flag is `proven`, not `measured`. Departure 7: Infuse admits HLG.
+A recipe is the code Usher holds about something HA has no concept of. It records how an app on a device model is handed a URL, what that app can direct-play, and whether that needs nobody at the TV. Departure 1: the fact flag is `proven`, not `measured`. Departure 7: Infuse admits HLG. Departure 9: the container sets carry MP4's sibling names. Departure 10: one `proven` per recipe, and no resume, stage predicates or deadlines yet. Departure 11: no HDR10+ or Dolby Vision profile.
 
 **Files:**
 - Create: `src/usher/domain/recipes.py`
@@ -2818,7 +2819,7 @@ git commit -m "players: record Home Assistant's answer shapes and render the fak
 
 ### Task 7: Reading HA's rows
 
-This is the adapter package's first module. It is pure: HA's rows in, house types out. A row that will not read raises `MalformedRow`. The list readers count each such row and carry on, so one odd device never empties the house. The package's import contracts land with it, because Task 1's guard requires every adapter package to be named the moment it exists.
+This is the adapter package's first module. It is pure: HA's rows in, house types out. A row that will not read raises `MalformedRow`. The list readers count each such row and carry on, so one odd device never empties the house. Departure 5: only `media_player.` rows are read. The package's import contracts land with it, because Task 1's guard requires every adapter package to be named the moment it exists.
 
 **Files:**
 - Create: `src/usher/adapters/homeassistant/__init__.py`
@@ -4212,6 +4213,8 @@ git commit -m "homeassistant: one authenticated session, numbered frames, one re
 ---
 
 ### Task 9: The `Players` port, its fake, and the contract both arms run
+
+Departure 2: the port has no `call_service` yet; slice 2 adds it with the dispatcher that uses it.
 
 **Files:**
 - Create: `src/usher/ports/players.py`
@@ -5978,7 +5981,7 @@ git commit -m "players: settings, composition and the lifespan, off by default"
 
 ### Task 12: The screens and ways services
 
-Two request-scoped services over the port, in `services/` so they see only `domain/` and `ports/`. `ScreensService` reads the house and confirms a player. `WaysService` ranks a title's or an episode's copies on the house's screens. Neither persists anything.
+Two request-scoped services over the port, in `services/` so they see only `domain/` and `ports/`. `ScreensService` reads the house and confirms a player. `WaysService` ranks a title's or an episode's copies on the house's screens. Neither persists anything. Departure 8: confirm places only a player that has no area.
 
 **Files:**
 - Create: `src/usher/services/screens.py`, `src/usher/services/ways.py`
