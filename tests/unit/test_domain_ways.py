@@ -32,6 +32,7 @@ from usher.domain.ways import (
 
 SOURCE = uuid.UUID("00000000-0000-4000-8000-0000000000aa")
 TITLE = uuid.UUID("00000000-0000-4000-8000-0000000000bb")
+VARIANTS = uuid.UUID("00000000-0000-4000-8000-0000000000cc")
 RECIPE = {recipe.key: recipe for recipe in RECIPES}
 # Names whose codepoint, casefolded and reading orders all disagree, listed in none of them.
 _READ_APART = ("Pantry", "Écran", "office")
@@ -53,6 +54,13 @@ _AUDIO_LADDER: tuple[tuple[tuple[str | None, int], ...], ...] = (
 
 def _copy(name: str, **fields: Any) -> MediaItem:
     return MediaItem(source_id=SOURCE, title_id=TITLE, external_id=name, **fields)
+
+
+def _variant(base: MediaItem, name: str, **changes: Any) -> MediaItem:
+    """`base` with `changes`, as a copy of its own: its own name and media-item id."""
+    variant = base.evolve(id=uuid.uuid5(VARIANTS, name), external_id=name, **changes)
+    assert variant.id != base.id, f"the premise: {name} is a copy of its own"
+    return variant
 
 
 DV_MKV = _copy(
@@ -93,6 +101,16 @@ AV1_MP4 = _copy(
     video_codec="av1",
     audio_codec="aac",
     audio_channels=2,
+    width=1920,
+    height=1080,
+)
+# PCM under one of ffprobe's sample-format spellings.
+PCM_MOV = _copy(
+    "pcm-mov",
+    container="mov",
+    video_codec="hevc",
+    audio_codec="pcm_s24le",
+    audio_channels=6,
     width=1920,
     height=1080,
 )
@@ -204,6 +222,8 @@ def _audio(codec: str | None, channels: int | None) -> MediaItem:
         ("apple_tv.infuse", MATROSKA, None, True),
         ("apple_tv.airplay", MATROSKA, "MKV OVER AIRPLAY", True),
         ("cast.shield", MATROSKA, None, True),
+        ("apple_tv.infuse", PCM_MOV, None, True),
+        ("apple_tv.airplay", PCM_MOV, "PCM OVER AIRPLAY", True),
     ],
 )
 def test_every_recipe_against_every_copy_shape(
@@ -218,7 +238,9 @@ def test_every_recipe_against_every_copy_shape(
 def test_a_copy_missing_any_fact_its_profile_constrains_is_not_fully_known(missing: str) -> None:
     airplay = RECIPE["apple_tv.airplay"]
     assert facts_known(HDR10_MP4, airplay) is True, "the premise: with every fact, it is known"
-    assert facts_known(HDR10_MP4.evolve(**{missing: None}), airplay) is False
+    assert (
+        facts_known(_variant(HDR10_MP4, f"without-{missing}", **{missing: None}), airplay) is False
+    )
 
 
 @pytest.mark.parametrize(
@@ -233,13 +255,13 @@ def test_a_fact_its_profile_does_not_constrain_is_not_needed(missing: str, const
     airplay = RECIPE["apple_tv.airplay"]
     unconstrained: dict[str, Any] = {constraint: None}
     loose = replace(airplay, direct_play=replace(airplay.direct_play, **unconstrained))
-    item = HDR10_MP4.evolve(**{missing: None})
+    item = _variant(HDR10_MP4, f"without-{missing}", **{missing: None})
     assert facts_known(item, airplay) is False, "the premise: AirPlay needs the fact"
     assert facts_known(item, loose) is True
 
 
 def test_audio_outside_the_profile_is_refused_by_name() -> None:
-    item = HDR10_MP4.evolve(audio_codec="truehd")
+    item = _variant(HDR10_MP4, "truehd-mp4", audio_codec="truehd")
     assert refusal(item, RECIPE["apple_tv.airplay"]) == "TRUEHD OVER AIRPLAY"
 
 
@@ -251,8 +273,8 @@ def test_a_copy_taller_than_the_profile_is_refused_by_height() -> None:
 
 
 def test_a_source_s_capitals_read_as_the_profile_s_lowercase() -> None:
-    lower = HDR10_MP4.evolve(container="mp4")
-    capitals = lower.evolve(container="MP4", video_codec="HEVC", audio_codec="EAC3")
+    lower = _variant(HDR10_MP4, "lower", container="mp4")
+    capitals = _variant(lower, "capitals", container="MP4", video_codec="HEVC", audio_codec="EAC3")
     assert refusal(lower, RECIPE["apple_tv.airplay"]) is None, "the premise: lowercase plays"
     assert refusal(capitals, RECIPE["apple_tv.airplay"]) is None
     assert quality_of(capitals).score == quality_of(lower).score
@@ -291,18 +313,20 @@ def test_the_score_orders_resolution_before_hdr_before_audio() -> None:
         "hd", width=1920, height=1080, hdr_format=HdrFormat.DOLBY_VISION, audio_codec="truehd"
     )
     uhd_plain = _copy("uhd", width=3840, height=2160, audio_codec="aac")
-    uhd_hdr = uhd_plain.evolve(hdr_format=HdrFormat.HDR10)
-    uhd_lossless = uhd_plain.evolve(audio_codec="truehd")
+    uhd_hdr = _variant(uhd_plain, "uhd-hdr", hdr_format=HdrFormat.HDR10)
+    uhd_lossless = _variant(uhd_plain, "uhd-lossless", audio_codec="truehd")
     assert quality_of(hd_everything).score < quality_of(uhd_plain).score
     assert quality_of(uhd_lossless).score < quality_of(uhd_hdr).score
 
 
 def test_the_score_orders_audio_before_channels_before_container() -> None:
     uhd = _copy("uhd", width=3840, height=2160)
-    eac3_six_mp4 = uhd.evolve(audio_codec="eac3", audio_channels=6, container="mp4")
-    ac3_eight_mp4 = uhd.evolve(audio_codec="ac3", audio_channels=8, container="mp4")
-    ac3_six_mkv = uhd.evolve(audio_codec="ac3", audio_channels=6, container="mkv")
-    ac3_six_mp4 = ac3_six_mkv.evolve(container="mp4")
+    eac3_six_mp4 = _variant(
+        uhd, "eac3-6-mp4", audio_codec="eac3", audio_channels=6, container="mp4"
+    )
+    ac3_eight_mp4 = _variant(uhd, "ac3-8-mp4", audio_codec="ac3", audio_channels=8, container="mp4")
+    ac3_six_mkv = _variant(uhd, "ac3-6-mkv", audio_codec="ac3", audio_channels=6, container="mkv")
+    ac3_six_mp4 = _variant(ac3_six_mkv, "ac3-6-mp4", container="mp4")
     assert quality_of(ac3_eight_mp4).score < quality_of(eac3_six_mp4).score
     assert quality_of(ac3_six_mkv).score < quality_of(ac3_eight_mp4).score
     assert quality_of(ac3_six_mp4).score < quality_of(ac3_six_mkv).score
@@ -316,8 +340,8 @@ def test_the_score_orders_audio_before_channels_before_container() -> None:
     ],
 )
 def test_a_container_family_scores_as_the_container_it_names(family: str, named: str) -> None:
-    by_family = quality_of(HDR10_MP4.evolve(container=family)).score
-    assert by_family == quality_of(HDR10_MP4.evolve(container=named)).score
+    by_family = quality_of(_variant(HDR10_MP4, family, container=family)).score
+    assert by_family == quality_of(_variant(HDR10_MP4, named, container=named)).score
 
 
 @pytest.mark.parametrize(
@@ -338,7 +362,7 @@ def test_lossy_audio_above_two_channels_outranks_any_stereo_codec(
 def test_hdr_ranks_dolby_vision_then_hdr10_then_hlg_then_none() -> None:
     sdr = _copy("sdr", width=3840, height=2160, audio_codec="eac3")
     formats = (HdrFormat.DOLBY_VISION, HdrFormat.HDR10, HdrFormat.HLG, None)
-    scores = [quality_of(sdr.evolve(hdr_format=hdr)).score for hdr in formats]
+    scores = [quality_of(_variant(sdr, f"sdr-{hdr}", hdr_format=hdr)).score for hdr in formats]
     assert [higher > lower for higher, lower in pairwise(scores)] == [True, True, True]
 
 
@@ -355,7 +379,7 @@ def test_audio_ranks_by_tier_then_codec_then_channels_and_dts_as_lossy() -> None
 def test_a_retracted_copy_is_no_way_at_all() -> None:
     living_room = _living_room()
     assert len(rank((living_room,), (HDR10_MP4,))) == 2, "the premise: available, it has ways"
-    assert rank((living_room,), (HDR10_MP4.evolve(available=False),)) == ()
+    assert rank((living_room,), (_variant(HDR10_MP4, "retracted", available=False),)) == ()
 
 
 def test_hands_free_ways_rank_above_ways_that_need_a_press_whatever_their_quality() -> None:
@@ -430,7 +454,7 @@ def test_gives_up_names_every_known_shortfall_against_the_best() -> None:
 def test_a_way_gives_up_only_what_its_copy_is_known_to_lack(
     changes: dict[str, Any], expected: tuple[str, ...]
 ) -> None:
-    lesser = FULL.evolve(external_id="lesser", **changes)
+    lesser = _variant(FULL, "lesser", **changes)
     _tall_enough("cast.shield", FULL, lesser)
     best, other = rank(_shield_in_the_bedroom()[:1], (lesser, FULL))
     assert (best.file.external_id, other.file.external_id) == ("full", "lesser"), (
@@ -453,7 +477,7 @@ def test_a_way_gives_up_only_what_its_copy_is_known_to_lack(
 )
 def test_any_one_video_fact_makes_a_missing_hdr_a_known_loss(changes: dict[str, Any]) -> None:
     """Over Infuse, which admits HLG and a copy with no video codec."""
-    lesser = FULL.evolve(external_id="lesser", **changes)
+    lesser = _variant(FULL, "lesser", **changes)
     _tall_enough("apple_tv.infuse", FULL, lesser)
     best, other, *_refused = rank((_living_room(),), (lesser, FULL))
     assert (best.file.external_id, other.file.external_id, other.playable) == (
@@ -474,8 +498,8 @@ def test_any_one_video_fact_makes_a_missing_hdr_a_known_loss(changes: dict[str, 
     ],
 )
 def test_a_channel_loss_names_the_layout_a_person_knows(channels: int, word: str) -> None:
-    better = FULL.evolve(external_id="better", audio_channels=12)
-    lesser = FULL.evolve(external_id="lesser", audio_channels=channels)
+    better = _variant(FULL, "better", audio_channels=12)
+    lesser = _variant(FULL, "lesser", audio_channels=channels)
     _tall_enough("cast.shield", better, lesser)
     best, other = rank(_shield_in_the_bedroom()[:1], (lesser, better))
     assert (best.file.external_id, other.file.external_id) == ("better", "lesser"), (
@@ -484,12 +508,13 @@ def test_a_channel_loss_names_the_layout_a_person_knows(channels: int, word: str
     assert other.gives_up == (word,)
 
 
-def test_every_audio_rank_stays_below_the_tier_span() -> None:
-    """The audio score packs a tier and a codec rank into one number: no rank may reach a tier."""
+def test_every_audio_rank_fits_inside_one_tier() -> None:
+    """The audio score packs a tier and a codec rank into one number: no rank may leave a tier."""
     spellings = ("pcm_s16le", "pcm_s24le", "PCM_F32LE")
     assert {_audio_rank(_codec(name)) for name in spellings} == {_AUDIO_RANK["pcm"]}, (
         "the premise: every PCM spelling reads PCM's rank from the table"
     )
+    assert min(_AUDIO_RANK.values()) >= 0
     assert {codec: rank for codec, rank in _AUDIO_RANK.items() if rank >= _TIER_SPAN} == {}
 
 
@@ -507,8 +532,8 @@ def test_an_audio_loss_names_the_codec_and_the_channels_apart(
     best_audio: tuple[str, int], way_audio: tuple[str, int], expected: tuple[str, ...]
 ) -> None:
     (best_codec, best_channels), (way_codec, way_channels) = best_audio, way_audio
-    better = FULL.evolve(external_id="better", audio_codec=best_codec, audio_channels=best_channels)
-    lesser = FULL.evolve(external_id="lesser", audio_codec=way_codec, audio_channels=way_channels)
+    better = _variant(FULL, "better", audio_codec=best_codec, audio_channels=best_channels)
+    lesser = _variant(FULL, "lesser", audio_codec=way_codec, audio_channels=way_channels)
     _tall_enough("cast.shield", better, lesser)
     best, other = rank(_shield_in_the_bedroom()[:1], (lesser, better))
     assert (best.file.external_id, other.file.external_id) == ("better", "lesser"), (
@@ -525,7 +550,7 @@ def test_a_container_loss_names_the_family_of_the_best_copy() -> None:
         name="Den",
         devices=(_shield("media_player.shield", "SHIELD", "den", (loose,)),),
     )
-    webm = HDR10_MP4.evolve(external_id="webm", container="webm")
+    webm = _variant(HDR10_MP4, "webm", container="webm")
     _tall_enough("cast.shield", HDR10_MP4, webm)
     best, other = rank((den,), (webm, HDR10_MP4))
     assert (best.file.external_id, other.playable) == ("hdr10-mp4", True), (

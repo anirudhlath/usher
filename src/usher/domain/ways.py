@@ -188,7 +188,7 @@ def refusal(item: MediaItem, recipe: Recipe) -> str | None:
         return f"{codec.upper()} OVER {via}"
     if item.hdr_format is not None and item.hdr_format not in profile.hdr_formats:
         return f"NO {HDR_LABELS[item.hdr_format]} OVER {via}"
-    audio = (item.audio_codec or "").lower()
+    audio = _codec(item.audio_codec)
     if profile.audio_codecs is not None and audio and audio not in profile.audio_codecs:
         return f"{audio.upper()} OVER {via}"
     if item.height is not None and item.height > profile.max_height:
