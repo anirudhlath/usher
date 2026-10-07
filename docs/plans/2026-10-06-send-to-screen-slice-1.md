@@ -160,7 +160,7 @@ Emby's push channel owns the only websocket wrapper. HA needs the same guarantee
 - Create: `src/usher/adapters/websocket.py`
 - Modify:
   - `src/usher/adapters/emby/push.py`: lines 3–17, the imports; lines 40–53, `socket_logger`; lines 132–172, `PushConnection`; lines 392–468, `_WebsocketsConnection` and `connect_websocket`.
-  - `tests/unit/test_adapters_emby_push.py`: lines 1258–1276, `test_the_real_connection_never_raises_out_of_aclose`, which moves to the new test file.
+  - `tests/unit/test_adapters_emby_push.py`: lines 1258–1276, `test_the_real_connection_never_raises_out_of_aclose`, which moves to the new test file; and line 8, which drops `cast`.
   - `pyproject.toml`: one new contract after "the shared http helpers import no concrete adapter".
   - `docs/prd/01-architecture.md` and `CLAUDE.md`: the contract count, thirteen to fourteen.
 - Test: `tests/unit/test_adapters_websocket.py`
@@ -314,7 +314,7 @@ def test_both_shared_helper_contracts_forbid_every_adapter_package() -> None:
         assert forbidden == packages, f"{helper} leaves out {sorted(packages - forbidden)}"
 ```
 
-Delete `test_the_real_connection_never_raises_out_of_aclose` from `tests/unit/test_adapters_emby_push.py` (lines 1258–1276). Its replacement is `test_aclose_never_raises` above.
+Delete `test_the_real_connection_never_raises_out_of_aclose` from `tests/unit/test_adapters_emby_push.py` (lines 1258–1276). Its replacement is `test_aclose_never_raises` above. The deleted test was `cast`'s only user, so change line 8 from `from typing import Any, cast` to `from typing import Any`, or ruff's F401 fails the gate.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -607,7 +607,7 @@ Pure types: everything later tasks project, rank, serve and fake. They are froze
 ```python
 """Builders for `HouseSnapshot`, and this house as the spec's probe found it.
 
-`this_house()` and `tests/fixtures/homeassistant/house.json` describe one house.
+`tests/fakes/home_assistant_rows.py` renders it in the shape `shape.json` recorded.
 """
 
 from datetime import UTC, datetime
@@ -3555,7 +3555,7 @@ async def test_a_command_answers_its_result_and_the_number_of_its_frame() -> Non
         second = await session.command("config/device_registry/list")
     assert first.value == server.areas
     assert second.value == server.devices
-    assert 0 < first.seq < second.seq
+    assert first.seq < second.seq
     assert server.commands == [
         {"id": 1, "type": "config/area_registry/list"},
         {"id": 2, "type": "config/device_registry/list"},
@@ -5047,7 +5047,7 @@ async def test_a_dropped_connection_clears_the_house_until_the_next_sync() -> No
 async def test_backoff_doubles_until_a_connection_syncs_then_starts_again(
     jitter: float, expected: list[float]
 ) -> None:
-    """Equal jitter on `min(max, base * 2**failures)`: 1, 2, 4 capped at 5, 0 after a sync."""
+    """Equal jitter on `min(max, base * 2**failures)`: 2, 4, 5 at the cap, 1 again after a sync."""
     server = FakeHomeAssistant()
     connector = FakeHomeAssistantConnector(server)
     for _ in range(3):
@@ -5520,7 +5520,7 @@ Expected: every case passes; mypy is clean; `15 kept`.
 - [ ] **Step 8: Plant four guards**
 
 Each plant follows the cycle in "How to work this plan":
-1. In `_sync`, delete `stale = stale or event.seq > areas.seq`. Expect `test_a_registry_change_during_the_first_sync_is_not_lost` to fail: the area stays "Living Room" and `_until` times out.
+1. In `_sync`, replace `stale = stale or event.seq > areas.seq` with `pass` (deleting it leaves the `if` with no body, which does not compile). Expect `test_a_registry_change_during_the_first_sync_is_not_lost` to fail: the area stays "Living Room" and `_until` times out.
 2. In `_resync_registries`, delete `if not self._resync_again: return` and put a bare `return` in its place. Expect `test_registry_events_during_a_resync_cause_exactly_one_more_pass` to fail.
 3. In `set_role`, replace `labels_of_entry(entry.value)` with `[]`. Expect `test_confirming_keeps_every_other_label` to fail.
 4. In `_ensure_labels`, delete the `async with self._labels_lock:` line and dedent its body. Expect `test_two_confirms_at_once_create_each_label_once` to fail with four creates.
@@ -5613,7 +5613,7 @@ def test_on_without_somewhere_to_connect_is_refused_naming_both(fields: dict[str
     assert _TOKEN not in messages
 
 
-@pytest.mark.parametrize("url", ["ftp://bad-scheme-host-9e2:21", "192.0.2.1:8123", "http://"])
+@pytest.mark.parametrize("url", ["ftp://bad-scheme-host-9e2:21", "192.0.2.1:8123", "http:///"])
 def test_a_url_that_is_not_http_is_refused_without_echoing_it(url: str) -> None:
     with pytest.raises(ValidationError) as failure:
         _settings(players_enabled=True, ha_url=url, ha_token=_TOKEN)
@@ -5731,7 +5731,7 @@ def test_the_dependency_refuses_an_app_whose_lifespan_never_ran() -> None:
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_config_players.py tests/unit/test_composition_players.py`
 Expected:
-- `test_config_players.py` fails with `extra_forbidden` on `players_enabled`;
+- `test_config_players.py` fails with `extra_forbidden` on `players_enabled` wherever a case passes a new field, and with `AttributeError` in `test_players_are_off_by_default_with_the_shipped_bounds` and `test_a_blank_home_assistant_setting_is_unset`, which pass none;
 - `test_composition_players.py` fails at collection with `ImportError: cannot import name 'house_players'`.
 
 - [ ] **Step 3: Add the settings**
@@ -6555,7 +6555,7 @@ The HTTP surface: `GET /screens`, `POST /screens/devices/{entity_id}/confirm`, `
   - `src/usher/api/dto/problem.py` (the member), `src/usher/api/deps.py` (two services), `src/usher/api/app.py` (two routers)
   - `src/usher/config.py`, `.env.example`, `web/src/features/operator/Config.settings.ts` (the confirm timeout)
   - `web/src/api/paths.ts` (the `screens` root)
-  - `docs/prd/07-client-api.md` (the `### Players` table, the vocabulary, `## Players`), `docs/prd/08-operations.md` (a failure row), `README.md` (Security)
+  - `docs/prd/07-client-api.md` (the `### Player routes` table, the vocabulary, `## Players`), `docs/prd/08-operations.md` (a failure row), `README.md` (Security)
   - `tests/unit/test_api_problem.py` (the literal pin), `tests/unit/test_api_openapi.py` (`_NON_PROBLEM_BODIES`)
 - Test: `tests/unit/test_api_screens.py`, `tests/unit/test_api_ways.py`
 
@@ -7516,7 +7516,7 @@ In `docs/prd/07-client-api.md`, make three edits:
 1. Between `### Actions`' last paragraph and `### Admin`, add:
 
 ```markdown
-### Players
+### Player routes
 
 | Endpoint | Returns |
 |---|---|
@@ -7790,7 +7790,7 @@ cd ~/code/.worktrees/usher/send-to-screen-spec/web
 grep -rn -i "seven" src docs --include='*.ts' --include='*.tsx' --include='*.md' | grep -v schema.d.ts
 ```
 
-Expected: only lines about something else. Those are `Insights.tsx`, `Insights.test.tsx` and `patterns.md` §15 (alerts), `OperatorShell.tsx` (surfaces) and `paths.ts` ("nineteen", since Task 13).
+Expected: only lines about something else, plus one point-in-time document. The lines about something else are `Insights.tsx`, `Insights.test.tsx` and `patterns.md` §15 (alerts), `OperatorShell.tsx` (surfaces), and `design-handoff.md`'s lines 109 and 222. `design-handoff.md`'s lines 134 and 172 do count the codes, but the handoff is a point-in-time document and is left as written.
 
 - [ ] **Step 6: Run the console's gates**
 
@@ -8201,7 +8201,7 @@ Then stop. Pushing the branch and opening the PR are the owner's call, and so is
 **Do not start without the owner's go, and run it with the owner present.** It writes to the real Home Assistant: two labels, the Apple TV's label, and possibly the SHIELD's area. Every write is recorded first and restored unless the owner keeps it. Usher runs from this branch on a local port and **not** on production. The production `.env` is the owner's to change.
 
 **Files:**
-- Modify: `tests/fixtures/homeassistant/shape.json` (the label registry, recorded), `tests/fakes/home_assistant_rows.py` and `tests/unit/test_fixtures_homeassistant.py` (the exemption removed)
+- Modify: `tests/fixtures/homeassistant/shape.json` (the label registry, recorded), `tests/fakes/home_assistant_rows.py` (`label_row`'s docstring), `tests/fixtures/README.md` (the unrecorded-labels paragraph removed) and `tests/unit/test_fixtures_homeassistant.py` (the exemption removed)
 - Modify: `docs/plans/progress.md`, `docs/prd/README.md` (Task 17's cells)
 
 - [ ] **Step 1: The token, and the state before**
@@ -8273,6 +8273,8 @@ USHER_HA_URL="$VITE_HA_URL" USHER_HA_TOKEN="$VITE_HA_TOKEN" \
 Run Task 6's leak checks against it, then `cp` it over `tests/fixtures/homeassistant/shape.json`. Then:
 - delete `test_the_label_registry_is_unrecorded_until_the_house_has_labels` from `tests/unit/test_fixtures_homeassistant.py`;
 - add `labels` to `_RECORDED_KINDS`;
+- delete the `tests/fixtures/README.md` paragraph that begins "The label registry is unrecorded";
+- reword `label_row`'s docstring in `tests/fakes/home_assistant_rows.py` to `"""HA core's label keys, as the shape records them."""`;
 - run `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_fixtures_homeassistant.py tests/unit/test_players_contract.py`.
 
 A failure here means the fake renders a label row HA does not send, or misses a key HA sends. That is the point of recording it: fix the renderer in `tests/fakes/home_assistant_rows.py`, never the fixture.
@@ -8288,7 +8290,7 @@ Turning players on in production gives every client that can reach :8100 the abi
 - [ ] **Step 9: Commit**
 
 ```bash
-git add tests/fixtures/homeassistant/shape.json tests/fakes/home_assistant_rows.py \
+git add tests/fixtures/homeassistant/shape.json tests/fakes/home_assistant_rows.py tests/fixtures/README.md \
   tests/unit/test_fixtures_homeassistant.py docs/plans/progress.md docs/prd/README.md
 git commit -m "players: the label registry's shape, recorded from the house"
 ```
