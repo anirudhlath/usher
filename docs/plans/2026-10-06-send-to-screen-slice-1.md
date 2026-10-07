@@ -5786,6 +5786,7 @@ Departure 2: the port has no `call_service` yet; slice 2 adds it with the dispat
 - Create: `src/usher/ports/players.py`
 - Create: `tests/fakes/players.py`
 - Create: `tests/contract/players_contract.py`
+- Modify: `tests/unit/test_ports.py` (`Players` in `ALL_PORTS`; a case pinning its four methods)
 - Test: `tests/unit/test_players_contract.py`
 
 **Interfaces:**
