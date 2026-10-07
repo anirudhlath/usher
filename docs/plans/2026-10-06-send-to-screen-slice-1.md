@@ -6315,7 +6315,7 @@ def test_both_arms_run_every_contract_case() -> None:
     from tests.unit.test_players_contract import TestFakePlayers
 
     cases = {name for name in dir(PlayersContract) if name.startswith("test_")}
-    assert len(cases) == 9
+    assert len(cases) == 10
     for arm in (TestHomeAssistantPlayers, TestFakePlayers):
         overridden = {
             name for name in cases if getattr(arm, name) is not getattr(PlayersContract, name)
@@ -6973,7 +6973,7 @@ class HomeAssistantPlayers(Players):
 - [ ] **Step 4: Run the adapter tests**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_adapters_homeassistant_players.py tests/unit/test_players_contract.py`
-Expected: every case passes. That is the 9 contract cases on each arm, plus the rest.
+Expected: every case passes. That is the 10 contract cases on each arm, plus the rest.
 
 - [ ] **Step 5: Grow the outbound census to ten modules**
 
