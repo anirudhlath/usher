@@ -1,6 +1,7 @@
 """`usher.adapters.websocket` over a real `websockets` server on loopback."""
 
 import asyncio
+import inspect
 import logging
 import pkgutil
 import socket
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from websockets.asyncio.client import connect
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed, ConnectionClosedError, InvalidURI
 from websockets.frames import CloseCode
@@ -157,6 +159,15 @@ async def test_a_frame_over_the_bound_is_refused_and_a_wider_bound_admits_it() -
         )
         assert len(await wide.recv(BOUND)) == len(big)
         await wide.aclose()
+
+
+def test_the_default_frame_bound_is_the_librarys_own() -> None:
+    """Emby names no bound, so this default is what keeps its sockets' bound unchanged."""
+    library_default = inspect.signature(connect).parameters["max_size"].default
+    assert isinstance(library_default, int), f"the premise: a bound was read, {library_default!r}"
+    assert library_default == DEFAULT_MAX_FRAME_BYTES, (
+        f"the default bound {DEFAULT_MAX_FRAME_BYTES} is not the library's {library_default}"
+    )
 
 
 def test_the_logger_is_silenced_under_the_name_given() -> None:
