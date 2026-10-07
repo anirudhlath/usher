@@ -14,7 +14,7 @@
 - import-linter.
 - The Console's settings catalogue and generated schema in `web/`.
 
-**Spec:** `docs/specs/2026-10-06-send-to-screen-design.md`. This plan covers slice 1 of its five slices. Read the spec beside this plan. The plan departs from the spec in eight places, and each departure is called out where it happens:
+**Spec:** `docs/specs/2026-10-06-send-to-screen-design.md`. This plan covers slice 1 of its five slices. Read the spec beside this plan. The plan departs from the spec in ten places, and each departure is called out where it happens:
 
 1. **`proven`, not `measured`.** The prose hook (`.claude/hooks/guard_prose.py`) refuses the word "measured" in Python prose. A field whose own docstring cannot name it invites drift, so the recipe field and the API field are both `proven`, against the default `assumed` (Task 3).
 2. **The port has no `call_service` yet.** Slice 2 adds it, with the dispatcher that uses it (Task 9).
@@ -24,6 +24,8 @@
 6. **The spec's first open question is settled as an allowlist setting.** `USHER_CORS_ORIGINS` is empty by default (Task 15).
 7. **Infuse's profile admits HLG**, which the spec's table omits. Every fact is `assumed` either way, and refusing HLG on Infuse would hide a way that plays (Task 3).
 8. **Confirm only places a player that has no area.** A player that is already in an area is moved in HA. The spec offers an area for the `NO AREA` list only, and moving a player whose entity carries its own area override cannot work through the device registry (Task 12).
+9. **Container sets carry MP4's sibling names, and HDR is not tied to a container.** Infuse admits `m4v` and `mov` beside the spec's MKV and MP4, and AirPlay and Cast admit `m4v`, because a source can name an MP4 file by its family (`mov,mp4,m4a,…`, Task 5). `DirectPlay` cannot tie an HDR format to a container, so AirPlay's "Dolby Vision in MP4" admits Dolby Vision in any of its containers. Every fact is `assumed` either way (Task 3).
+10. **Provenance is per recipe, not per fact.** One `proven` flag covers all of a recipe's facts, since slice 1 proves none of them. How a recipe resumes and its stage predicates arrive with slice 2, which reads them (Task 3).
 
 ## Global Constraints
 
