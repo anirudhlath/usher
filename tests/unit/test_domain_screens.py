@@ -1,5 +1,6 @@
 """The projection, over this house and the shapes it can take."""
 
+import unicodedata
 from dataclasses import replace
 
 import pytest
@@ -25,7 +26,7 @@ from tests.fakes.house import (
 )
 from usher.domain.house import DeviceRole, HouseSnapshot
 from usher.domain.recipes import RECIPES, Recipe, recipes_for
-from usher.domain.screens import HouseView, ScreenDevice, project
+from usher.domain.screens import HouseView, ScreenDevice, project, reading_key
 
 # Invented: the remote HA's `apple_tv` integration adds beside each media player.
 APPLE_TV_REMOTE = "remote.living_room_apple_tv"
@@ -37,12 +38,15 @@ _NOTHING_PLACED: dict[str, object] = {
     "no_area": [],
     "ignored": [],
 }
-# Names in neither their ids' order nor their arrival's.
+# Names whose order is not their ids' order.
 _NOT_BY_ID = {"z": "Attic", "x": "Bedroom", "y": "Cellar"}
 _BY_NAME = ["media_player.z", "media_player.x", "media_player.y"]
 # Names a person reads in an order their codepoints do not.
 _MIXED_CASE = {"a": "Pantry", "b": "office", "c": "Bedroom"}
 _MIXED_CASE_BY_NAME = ["media_player.c", "media_player.b", "media_player.a"]
+# Names a person reads in an order their casefolded codepoints do not.
+_ACCENTED = {"a": "Pantry", "b": "Écran", "c": "Bedroom"}
+_ACCENTED_BY_NAME = ["media_player.c", "media_player.b", "media_player.a"]
 
 
 def _labelled(house: HouseSnapshot, entity_id: str, role: DeviceRole | None) -> HouseSnapshot:
@@ -92,18 +96,17 @@ def _answering(house: HouseSnapshot, entity_id: str) -> tuple[Recipe, ...]:
     )
 
 
-def _arrival(names: dict[str, str]) -> list[str]:
-    """Keys rotated one place from id order: a third order, beside id order and name order."""
-    in_id_order = sorted(names)
-    return [*in_id_order[1:], *in_id_order[:1]]
+def _unaccented(name: str) -> str:
+    """Reading order's key spelled apart from `reading_key`, for premises: ASCII letters only."""
+    return unicodedata.normalize("NFD", name).encode("ascii", "ignore").decode().casefold()
 
 
 def _three_screens(names: dict[str, str]) -> HouseSnapshot:
     """A confirmed SHIELD in each of three areas, area `key` named `names[key]`."""
     return snapshot(
-        areas=tuple(area(key, names[key]) for key in _arrival(names)),
+        areas=tuple(area(key, names[key]) for key in sorted(names)),
         devices=tuple(
-            device(f"dev-{key}", model="SHIELD Android TV", area_id=key) for key in _arrival(names)
+            device(f"dev-{key}", model="SHIELD Android TV", area_id=key) for key in sorted(names)
         ),
         entities=tuple(
             entity(
@@ -113,7 +116,7 @@ def _three_screens(names: dict[str, str]) -> HouseSnapshot:
                 name=f"Player {names[key]}",
                 role=DeviceRole.USE,
             )
-            for key in _arrival(names)
+            for key in sorted(names)
         ),
     )
 
@@ -133,7 +136,7 @@ def _three_players(
                 name=f"Player {names[key]}",
                 role=role,
             )
-            for key in _arrival(names)
+            for key in sorted(names)
         ),
     )
 
@@ -323,7 +326,7 @@ def test_a_screen_is_found_by_its_area_and_an_area_with_no_device_is_no_screen()
     assert view.screen(KITCHEN) is None
 
 
-def test_screens_and_areas_are_ordered_by_name_not_by_id_or_arrival() -> None:
+def test_screens_and_areas_are_ordered_by_name_not_by_id() -> None:
     house = _three_screens(_NOT_BY_ID)
     in_id_order = [one.name for one in house.areas]
     assert in_id_order != sorted(in_id_order), "the premise: id order is not name order"
@@ -341,6 +344,17 @@ def test_screens_and_areas_sort_as_a_person_reads_not_by_codepoint() -> None:
     view = project(house)
     assert [screen.name for screen in view.screens] == ["Bedroom", "office", "Pantry"]
     assert [one.name for one in view.areas] == ["Bedroom", "office", "Pantry"]
+
+
+def test_screens_and_areas_set_accents_aside() -> None:
+    house = _three_screens(_ACCENTED)
+    names = [one.name for one in house.areas]
+    assert sorted(names, key=str.casefold) != sorted(names, key=_unaccented), (
+        "the premise: casefold order is not reading order"
+    )
+    view = project(house)
+    assert [screen.name for screen in view.screens] == ["Bedroom", "Écran", "Pantry"]
+    assert [one.name for one in view.areas] == ["Bedroom", "Écran", "Pantry"]
 
 
 @pytest.mark.parametrize(("role", "area_id", "placed"), _in_every_list(_BY_NAME))
@@ -364,6 +378,37 @@ def test_players_sort_as_a_person_reads_not_by_codepoint_in_every_list(
         "the premise: codepoint order is not reading order"
     )
     assert _placed(project(house)) == {**_NOTHING_PLACED, **placed}
+
+
+@pytest.mark.parametrize(("role", "area_id", "placed"), _in_every_list(_ACCENTED_BY_NAME))
+def test_players_set_accents_aside_in_every_list(
+    role: DeviceRole | None, area_id: str | None, placed: dict[str, object]
+) -> None:
+    house = _three_players(_ACCENTED, role, area_id)
+    names = [one.name or "" for one in house.entities]
+    assert sorted(names, key=str.casefold) != sorted(names, key=_unaccented), (
+        "the premise: casefold order is not reading order"
+    )
+    assert _placed(project(house)) == {**_NOTHING_PLACED, **placed}
+
+
+@pytest.mark.parametrize(
+    ("name", "read_as"),
+    [
+        pytest.param("office", "office", id="read_as_written"),
+        pytest.param("Straße", "strasse", id="casefolded_not_lowered"),
+        pytest.param("Écran", "ecran", id="accent_set_aside"),
+        pytest.param(
+            "\N{FULLWIDTH LATIN CAPITAL LETTER B}edroom",
+            "bedroom",
+            id="compatibility_form_unfolded",
+        ),
+    ],
+)
+def test_the_reading_key_sets_case_accents_and_compatibility_forms_aside(
+    name: str, read_as: str
+) -> None:
+    assert reading_key(name, "the-id") == (read_as, "the-id")
 
 
 def test_each_player_carries_ha_s_reading_unchanged() -> None:

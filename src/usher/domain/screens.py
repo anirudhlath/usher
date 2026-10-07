@@ -1,5 +1,6 @@
 """Screens: the house projected onto what Usher can play on, recomputed on every read."""
 
+import unicodedata
 from dataclasses import dataclass
 from typing import Final
 
@@ -75,8 +76,18 @@ def _candidate(
     )
 
 
+def reading_key(name: str, ident: str) -> tuple[str, str]:
+    """Sorts a name as a person reads it: case, accents and compatibility forms set aside.
+
+    The id breaks ties, so names that read alike still sort one way every time.
+    """
+    unfolded = unicodedata.normalize("NFKD", name)
+    unaccented = "".join(char for char in unfolded if not unicodedata.combining(char))
+    return unaccented.casefold(), ident
+
+
 def _by_name(players: list[ScreenDevice]) -> tuple[ScreenDevice, ...]:
-    return tuple(sorted(players, key=lambda player: (player.name.casefold(), player.entity_id)))
+    return tuple(sorted(players, key=lambda player: reading_key(player.name, player.entity_id)))
 
 
 def project(house: HouseSnapshot, recipes: tuple[Recipe, ...] = RECIPES) -> HouseView:
@@ -87,8 +98,7 @@ def project(house: HouseSnapshot, recipes: tuple[Recipe, ...] = RECIPES) -> Hous
     Cast speaker, a TV no recipe knows and a group player with no device are
     never candidates. Its area is HA's: the entity's own, else its device's. An
     area id naming no area is no area, so a deleted area never becomes a screen
-    named by its id. Every list is in reading order: names compared without
-    case, ids breaking ties.
+    named by its id. Every list is in `reading_key` order.
     """
     grouped: dict[str, list[ScreenDevice]] = {}
     unconfirmed: list[ScreenDevice] = []
@@ -112,7 +122,7 @@ def project(house: HouseSnapshot, recipes: tuple[Recipe, ...] = RECIPES) -> Hous
                 Screen(area_id=area_id, name=_area_name(house, area_id), devices=_by_name(players))
                 for area_id, players in grouped.items()
             ),
-            key=lambda screen: (screen.name.casefold(), screen.area_id),
+            key=lambda screen: reading_key(screen.name, screen.area_id),
         )
     )
     return HouseView(
@@ -120,7 +130,7 @@ def project(house: HouseSnapshot, recipes: tuple[Recipe, ...] = RECIPES) -> Hous
         unconfirmed=_by_name(unconfirmed),
         no_area=_by_name(no_area),
         ignored=_by_name(ignored),
-        areas=tuple(sorted(house.areas, key=lambda one: (one.name.casefold(), one.area_id))),
+        areas=tuple(sorted(house.areas, key=lambda one: reading_key(one.name, one.area_id))),
     )
 
 
