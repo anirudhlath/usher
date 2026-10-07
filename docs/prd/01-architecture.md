@@ -67,9 +67,10 @@ All ports are `abc.ABC` with `@abstractmethod`. The shared httpx pieces live in
 
 ### Outbound calls and their limiters
 
-**Nine modules** under `src/usher/adapters/` dial an upstream: **eight over
-httpx**, between them **sixteen call sites**, and a ninth — `emby/push.py` —
-over `websockets`. Three of the nine are paced; six deliberately are not.
+**Ten modules** under `src/usher/adapters/` dial an upstream: **eight over
+httpx**, between them **sixteen call sites**, and two over `websockets` —
+`emby/push.py` and `homeassistant/players.py`. Three of the ten are paced;
+seven deliberately are not.
 
 | module → upstream | limiter |
 |---|---|
@@ -77,6 +78,7 @@ over `websockets`. Three of the nine are paced; six deliberately are not.
 | `api.themoviedb.org` (`tmdb/client.py`) | `_TokenBucket` at `USHER_TMDB_REQUESTS_PER_SECOND` |
 | `api.themoviedb.org` (`tmdb/provider.py`, six call sites) | the bucket above — this module holds no client of its own |
 | `/embywebsocket` (`emby/push.py`) | **none** — one socket held open; reconnects back off |
+| Home Assistant's `/api/websocket` (`homeassistant/players.py`) | **none** — one socket held open; registries read once per connection; reconnects back off |
 | `image.tmdb.org` (`images/provider.py`) | **none** — each image is fetched once, then served from the cache |
 | the IMDb/TMDb/MovieLens dataset hosts (`bulk/download.py`, two call sites) | **none** — one streamed file per dataset plus one `HEAD` for its revision |
 | `query.wikidata.org` (`bulk/wikidata.py`) | **none** — a bootstrap phase run by hand, chunked and sequential |
@@ -94,6 +96,7 @@ over `websockets`. Three of the nine are paced; six deliberately are not.
 | `SuggestIndex` | `PostgresSuggestIndex` (`MeilisearchSuggestIndex` gated) |
 | `Embedder` | `FastEmbedEmbedder`, `OpenAICompatEmbedder` — **optional**, off by default; a deployment without one still has full-text and trigram |
 | `LLMClient` | `OpenAICompatibleClient` — one `POST /v1/chat/completions`; the provider abstraction is `USHER_LLM_BASE_URL` |
+| `Players` | `HomeAssistantPlayers` — one websocket to Home Assistant; reads the area, device and entity registries and the media players' states, and writes only Usher's two labels and a device's area |
 | `TitleRepository` | `PostgresTitleRepository` |
 | `Row` | `BaseRow` in `services/rows/base.py` and its **ten** concrete rows |
 | `RowProvider` | `ContinueWatchingProvider`, `NextUpProvider`, `RecentlyAddedProvider`, `RediscoverProvider`, `BecauseYouWatchedProvider`, `FranchiseProvider`, `GenreAffinityProvider`, `SeasonalProvider`, `PeopleProvider`, `CuratedProvider` — **ten**, registered as `services/rows/__init__.py`'s `ROW_PROVIDERS` |
@@ -109,9 +112,10 @@ usher/
 ├── src/usher/
 │   ├── api/         routers/, deps.py, dto/, lanes.py
 │   ├── domain/      title.py, person.py, source.py, watch.py, rows.py,
-│   │                curation.py
+│   │                curation.py, house.py, recipes.py, screens.py, ways.py
 │   ├── ports/       *.py  (ABCs only), repository/
-│   ├── adapters/    emby/, tmdb/, bulk/, search/, embedding/, llm/, images/
+│   ├── adapters/    emby/, tmdb/, bulk/, search/, embedding/, llm/, images/,
+│   │                homeassistant/
 │   ├── services/    rows/ (base.py, cache.py, one module per provider),
 │   │                home.py, taste.py, derive.py, similar.py, search.py,
 │   │                matching.py, ingest.py, enrich.py, push.py, jobs.py,

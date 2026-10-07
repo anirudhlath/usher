@@ -152,7 +152,7 @@ class FakeHomeAssistant:
             "type": "auth_required",
             "ha_version": HA_VERSION,
         }
-        self.after_answer: dict[str, list[Callable[[], None]]] = {}
+        self.after_answer: dict[str, list[Callable[[], object]]] = {}
         self.label_ids: dict[str, str] = {}
         self.connections: list[FakeHomeAssistantConnection] = []
 
