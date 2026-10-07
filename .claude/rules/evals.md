@@ -16,7 +16,7 @@ uv sync --extra eval                   # ranx; optional to the product, mandator
 uv run usher eval                      # every surface, quick: no bar enforced, nothing recorded
 uv run usher eval suggest --full       # full goldens, bars enforced, both sinks written
 uv run pytest tests/unit/test_eval_contract.py   # the two import contracts and the scans behind them
-uv run lint-imports                    # 14 kept, 0 broken — E1 added the 11th and 12th
+uv run lint-imports                    # 15 kept, 0 broken — E1 added the 11th and 12th
 ```
 
 **The module docstrings are the design record** — `__init__.py` (why the

@@ -1,5 +1,7 @@
 """Reading HA's rows: the round trip, HA's own precedence, and a bad row never stopping a list."""
 
+import ast
+import inspect
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -10,6 +12,7 @@ import pytest
 from tests.fakes.home_assistant_rows import LABEL_NAMES as FAKE_LABEL_NAMES
 from tests.fakes.home_assistant_rows import HouseRows, device_row, recorded, rows_of
 from tests.fakes.house import APPLE_TV, APPLE_TV_DEVICE, POSITION_UPDATED_AT, this_house
+from usher.adapters.homeassistant import mapping
 from usher.adapters.homeassistant.mapping import (
     LABEL_NAMES,
     MalformedRow,
@@ -75,6 +78,7 @@ def test_a_row_from_another_domain_is_skipped_and_not_counted() -> None:
 
 _BROKEN: list[Any] = [
     pytest.param("areas", lambda rows: {**rows.areas[0], "name": None}, id="area-name-null"),
+    pytest.param("areas", lambda rows: {**rows.areas[0], "name": ""}, id="area-name-empty"),
     pytest.param("areas", lambda rows: "not a row", id="area-not-a-mapping"),
     pytest.param("devices", lambda rows: {**rows.devices[0], "id": 7}, id="device-id-int"),
     pytest.param(
@@ -120,6 +124,12 @@ def test_the_owners_device_name_wins_over_the_integrations() -> None:
     assert to_device(row).name == "Owner"
     assert to_device({**row, "name_by_user": None}).name == "Integration"
     assert to_device({**row, "name_by_user": None, "name": None}).name == row["id"]
+
+
+def test_an_empty_optional_text_reads_as_absent() -> None:
+    row = device_row(_HOUSE.devices[0], 1)
+    assert row["model"], "the premise: the row carries a model"
+    assert to_device({**row, "model": ""}).model is None
 
 
 def test_an_entity_name_falls_back_to_the_integrations_original_name() -> None:
@@ -199,7 +209,9 @@ def test_an_entry_without_a_label_list_is_refused(entry: object) -> None:
 
 
 def test_an_entry_with_a_label_list_answers_it() -> None:
-    assert labels_of_entry({"labels": ["favourite", "usher"]}) == ["favourite", "usher"]
+    labels = ["usher", "kids", "favourite"]
+    assert labels != sorted(labels), "the premise: the entry's order is not sorted order"
+    assert labels_of_entry({"labels": labels}) == labels
 
 
 def test_the_label_registry_answers_its_ids_skipping_an_odd_row() -> None:
@@ -242,6 +254,7 @@ def test_another_domains_change_is_nothing_to_apply() -> None:
 
 
 _OTHER_PLAYERS_STATE = {"entity_id": "media_player.other", "state": "on", "attributes": {}}
+_SUN_STATE = {"entity_id": "sun.sun", "state": "above_horizon", "attributes": {}}
 
 
 @pytest.mark.parametrize(
@@ -251,8 +264,15 @@ _OTHER_PLAYERS_STATE = {"entity_id": "media_player.other", "state": "on", "attri
         {"new_state": None},
         {"entity_id": APPLE_TV, "new_state": {"entity_id": APPLE_TV, "state": "on"}},
         {"entity_id": APPLE_TV, "new_state": _OTHER_PLAYERS_STATE},
+        {"entity_id": APPLE_TV, "new_state": _SUN_STATE},
     ],
-    ids=["not-a-mapping", "no-entity", "no-attributes", "another-entitys-state"],
+    ids=[
+        "not-a-mapping",
+        "no-entity",
+        "no-attributes",
+        "another-entitys-state",
+        "another-domains-state",
+    ],
 )
 def test_a_malformed_state_change_raises_for_the_caller_to_count(data: object) -> None:
     with pytest.raises(MalformedRow):
@@ -282,8 +302,19 @@ _READ_KEYS: dict[str, tuple[str, ...]] = {
         "disabled_by",
         "labels",
     ),
-    "states": ("entity_id", "state", *(f"attributes.{key}" for key in _ATTRIBUTES_READ)),
+    "states": (
+        "entity_id",
+        "state",
+        "attributes",
+        *(f"attributes.{key}" for key in _ATTRIBUTES_READ),
+    ),
 }
+#: Keys the mapping reads from no list reader's row, each with where it is read instead.
+_READ_ELSEWHERE = {
+    "label_id": "the label registry's rows and a create's answer, which no list reader reads",
+    "new_state": "a state_changed event's data, read by state_change alone",
+}
+_KEY_READERS = frozenset({"_text", "_optional_text", "_attribute_text", "_seconds", "_instant"})
 #: Types `this_house` never renders at these keys, and a live HA sends.
 _GAPS = {
     ("devices", "model", "NoneType"),
@@ -291,6 +322,23 @@ _GAPS = {
     ("entities", "device_id", "NoneType"),
     ("entities", "area_id", "str"),
 }
+
+
+def _keys_the_mapping_reads() -> set[str]:
+    """Every string-constant key mapping.py hands a key reader or a `.get`, off its syntax tree."""
+    keys: set[str] = set()
+    for node in ast.walk(ast.parse(inspect.getsource(mapping))):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name) and node.func.id in _KEY_READERS:
+            argument = node.args[1] if len(node.args) > 1 else None
+        elif isinstance(node.func, ast.Attribute) and node.func.attr == "get":
+            argument = node.args[0] if node.args else None
+        else:
+            continue
+        if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
+            keys.add(argument.value)
+    return keys
 
 
 def _target(rows: HouseRows, kind: str) -> dict[str, Any]:
@@ -319,6 +367,10 @@ def _sample(path: str, type_name: str) -> object:
 
 def test_every_type_the_shape_records_at_a_read_key_reads() -> None:
     """A type a live HA sends at a key the mapping reads never costs the row."""
+    leaves = {path.split(".")[-1] for paths in _READ_KEYS.values() for path in paths}
+    assert _keys_the_mapping_reads() == leaves | set(_READ_ELSEWHERE), (
+        "the premise: _READ_KEYS names every key the mapping reads"
+    )
     shape = recorded()
     unknown = [
         f"{kind}: {path}"
