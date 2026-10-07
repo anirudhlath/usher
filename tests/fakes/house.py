@@ -119,7 +119,10 @@ def entity_of(house: HouseSnapshot, entity_id: str) -> HouseEntity:
 def this_house(
     *, apple_tv: DeviceRole | None = DeviceRole.USE, shield: DeviceRole | None = None
 ) -> HouseSnapshot:
-    """The Living Room as probed, after the owner confirmed the Apple TV."""
+    """The Living Room as probed, after the owner confirmed the Apple TV.
+
+    The LG is placed in the Living Room on purpose, though the probe found it in no area.
+    """
     return snapshot(
         areas=(area(BEDROOM), area(KITCHEN), area(LIVING_ROOM)),
         devices=(
