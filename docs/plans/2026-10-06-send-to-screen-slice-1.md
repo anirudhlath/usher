@@ -9559,6 +9559,7 @@ USHER_HA_URL="$VITE_HA_URL" USHER_HA_TOKEN="$VITE_HA_TOKEN" \
 Run Task 6's leak checks against it, then `cp` it over `tests/fixtures/homeassistant/shape.json`. Then:
 - delete `test_the_label_registry_is_unrecorded_until_the_house_has_labels` from `tests/unit/test_fixtures_homeassistant.py`;
 - delete `_PENDING` from `tests/fakes/home_assistant_rows.py`, and have `unrecorded_paths` return `unseen`;
+- remove from `PENDING_FRAMES` in `tests/fakes/home_assistant.py` every path the new capture records (`test_every_pending_frame_path_is_still_unrecorded` names them);
 - add `labels` to `_RECORDED_KINDS`;
 - delete the `tests/fixtures/README.md` paragraph that begins "The label registry is unrecorded";
 - reword `label_row`'s docstring in `tests/fakes/home_assistant_rows.py` to `"""HA core's label keys, as the shape records them."""`;
