@@ -7855,7 +7855,8 @@ by default ([08](08-operations.md)).
 - **`/ways` ranks every available copy on every device through every matching
   recipe**, grouped by screen. Hands-free ways come first by quality
   (resolution, then HDR, then audio — lossless object audio, lossless, lossy
-  multichannel, stereo — then container), then ways that need a press at the
+  multichannel, stereo, then the codec and its channels within a tier, unknown
+  channels counting as stereo — then container), then ways that need a press at the
   TV, then ways that cannot play, each with its `refusal`. On an equal score a
   `proven` recipe ranks first; every recipe is `proven: false` until a send
   has shown it. The first playable way of each screen is `best`, and every
