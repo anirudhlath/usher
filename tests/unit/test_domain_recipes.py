@@ -3,7 +3,7 @@
 import pytest
 
 from usher.domain.enums import HdrFormat
-from usher.domain.recipes import RECIPES, recipes_for
+from usher.domain.recipes import RECIPES, Handover, recipes_for
 
 APPLE_TV_MODEL = "Apple TV 4K (gen 3)"
 
@@ -58,6 +58,15 @@ def test_every_recipe_is_assumed_until_proven_at_the_tv() -> None:
 def test_infuse_needs_a_press_until_spike_one_says_otherwise() -> None:
     hands_free = {recipe.key: recipe.hands_free for recipe in RECIPES}
     assert hands_free == {"apple_tv.infuse": False, "apple_tv.airplay": True, "cast.shield": True}
+
+
+def test_each_recipe_names_its_own_app_and_handover() -> None:
+    handed = {recipe.key: (recipe.handover, recipe.app_id) for recipe in RECIPES}
+    assert handed == {
+        "apple_tv.infuse": (Handover.INFUSE_CALLBACK, "com.firecore.infuse"),
+        "apple_tv.airplay": (Handover.AIRPLAY_URL, None),
+        "cast.shield": (Handover.CAST_URL, None),
+    }
 
 
 def test_infuse_alone_admits_hlg() -> None:
