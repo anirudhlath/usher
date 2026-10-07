@@ -3143,7 +3143,10 @@ def _walk(value: object, depth: int, path: str, found: dict[str, set[str]]) -> N
 
 
 def merged(rows: Iterable[object], depth: int) -> dict[str, list[str]]:
-    """The union of every row's paths, sorted, so a missing-or-null key shows both types."""
+    """The union of every row's paths and type names, sorted.
+
+    A key that is null in some row adds `NoneType`; a key missing from a row adds nothing.
+    """
     found: dict[str, set[str]] = {}
     for row in rows:
         for path, names in paths(row, depth).items():
@@ -3291,6 +3294,7 @@ import ipaddress
 import re
 from collections.abc import Iterator
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -3310,6 +3314,38 @@ _RECORDED_KINDS = ("areas", "devices", "entities", "entity", "states")
 _TYPE_NAMES = {"NoneType", "bool", "dict", "float", "int", "list", "str"}
 _MAC = re.compile(r"\b(?:[0-9a-f]{2}:){5}[0-9a-f]{2}\b", re.IGNORECASE)
 _IPV4 = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+#: A recorded key is a name; a ULID or a hex id as a segment is a value that leaked.
+_SEGMENT = re.compile(r"^[a-z][a-z_]*(\[\])*$")
+_ROOT = Path(__file__).resolve().parents[2]
+_COMMITTED = (
+    "scripts/capture_ha_shape.py",
+    "tests/fakes/home_assistant_rows.py",
+    "tests/fakes/house.py",
+    "tests/fixtures/homeassistant/shape.json",
+    "tests/unit/test_fixtures_homeassistant.py",
+)
+_HA_NAMES = re.compile(r"capture_ha_shape|home_assistant_rows")
+_README = "tests/fixtures/README.md"
+_DOCUMENTATION = ipaddress.ip_network("192.0.2.0/24")
+
+
+def _undocumented(found: str) -> bool:
+    """Outside 192.0.2.0/24, or no address at all (an octet past 255): either way, named."""
+    try:
+        return ipaddress.ip_address(found) not in _DOCUMENTATION
+    except ValueError:
+        return True
+
+
+def _touched_by_the_ha_work() -> set[str]:
+    """Derived, not listed: the HA fixtures, every fake or script naming the HA work, this file."""
+    found = {path for path in (_ROOT / "tests/fixtures/homeassistant").rglob("*") if path.is_file()}
+    for folder in ("tests/fakes", "scripts"):
+        found |= {
+            path for path in (_ROOT / folder).rglob("*.py") if _HA_NAMES.search(path.read_text())
+        }
+    found.add(Path(__file__).resolve())
+    return {path.relative_to(_ROOT).as_posix() for path in found}
 
 
 def _rows(kind: str, rows: HouseRows = _ROWS) -> list[dict[str, Any]]:
@@ -3336,6 +3372,9 @@ def test_every_rendered_path_and_type_was_recorded(kind: str) -> None:
 
 @pytest.mark.parametrize("kind", _RECORDED_KINDS)
 def test_every_recorded_key_is_rendered(kind: str) -> None:
+    assert _rows(kind), "the premise: there are rows to hold to the keys"
+    top = [path for path in recorded()[kind] if "." not in path and "[" not in path]
+    assert top, "the premise: the shape records a top-level key"
     assert missing_keys(kind, _rows(kind)) == []
 
 
@@ -3348,7 +3387,7 @@ def test_the_rows_carry_both_roles_a_foreign_label_and_a_player_with_no_area() -
 
 
 def test_the_label_registry_is_unrecorded_until_the_house_has_labels() -> None:
-    """Task 17 records it; then this case and `_PENDING` go, and `labels` joins `_RECORDED_KINDS`."""
+    """Task 17 records it; then this case and `_PENDING` go and `labels` joins `_RECORDED_KINDS`."""
     assert recorded()["labels"] == {}
     assert [kind for kind in ("entities", "entity") if "labels[]" in recorded()[kind]] == []
     assert {row["label_id"] for row in _ROWS.labels} == {"favourite", "usher", "usher_ignore"}
@@ -3360,6 +3399,13 @@ def test_the_recorded_shape_holds_type_names_and_no_entity() -> None:
     names = {name for kind in shape.values() for found in kind.values() for name in found}
     assert names <= _TYPE_NAMES
     assert [path for kind in shape.values() for path in kind if "media_player." in path] == []
+    unnamed = [
+        f"{kind}: {path}"
+        for kind, found in shape.items()
+        for path in found
+        if not all(_SEGMENT.fullmatch(segment) for segment in path.split("."))
+    ]
+    assert unnamed == []
 
 
 def test_every_mac_and_address_in_the_rows_is_reserved_for_documentation() -> None:
@@ -3368,8 +3414,27 @@ def test_every_mac_and_address_in_the_rows_is_reserved_for_documentation() -> No
     addresses = [found for text in strings for found in _IPV4.findall(text)]
     assert macs and addresses, "the premise: the rows carry both"
     assert [mac for mac in macs if not mac.lower().startswith("02:00:00:")] == []
-    documentation = ipaddress.ip_network("192.0.2.0/24")
-    assert [ip for ip in addresses if ipaddress.ip_address(ip) not in documentation] == []
+    assert [ip for ip in addresses if _undocumented(ip)] == []
+
+
+def _readme_section() -> str:
+    text = (_ROOT / _README).read_text()
+    start = text.index("## Home Assistant\n")
+    return text[start : text.index("\n## ", start)]
+
+
+def test_every_mac_and_address_in_the_committed_files_is_reserved_for_documentation() -> None:
+    unscanned = sorted(_touched_by_the_ha_work() ^ set(_COMMITTED))
+    assert unscanned == [], "the premise: the scan reads exactly the files the HA work touches"
+    texts = {name: (_ROOT / name).read_text() for name in _COMMITTED}
+    texts[f"{_README} ## Home Assistant"] = _readme_section()
+    empty = [name for name, text in texts.items() if not text.strip()]
+    assert empty == [], "the premise: every file and the section were read and have text"
+    macs = [(name, mac) for name, text in texts.items() for mac in _MAC.findall(text)]
+    addresses = [(name, ip) for name, text in texts.items() for ip in _IPV4.findall(text)]
+    assert addresses, "the premise: the scan finds the documentation network the files name"
+    assert [f"{name}: {mac}" for name, mac in macs if not mac.startswith("02:00:00:")] == []
+    assert [f"{name}: {ip}" for name, ip in addresses if _undocumented(ip)] == []
 ```
 
 - [ ] **Step 4: Run them to verify they fail**
@@ -3431,7 +3496,7 @@ def recorded() -> dict[str, dict[str, list[str]]]:
 
 
 def unrecorded_paths(kind: str, rows: Sequence[object]) -> list[str]:
-    """Every `path: type` in `rows` that the recorded shape of `kind` never saw, `_PENDING` aside."""
+    """Every `path: type` in `rows` the recorded shape of `kind` never saw, `_PENDING` aside."""
     script = _script()
     seen: dict[str, list[str]] = script.merged(rows, script.DEPTHS[kind])
     shape = recorded()[kind]
@@ -3643,17 +3708,29 @@ value at all: `scripts/capture_ha_shape.py` records each key path of HA's
 websocket answers and the type names seen there. The rows every adapter test
 reads are rendered from a `HouseSnapshot` by `tests/fakes/home_assistant_rows.py`,
 and `tests/unit/test_fixtures_homeassistant.py` holds them to the shape both
-ways — no invented path, no missing key — and fails if a value or an entity id
-reaches the shape. MACs are under `02:00:00` and hosts in `192.0.2.0/24`.
+ways — no invented path, no missing key. It fails if anything but a type name
+sits where a type name goes, if a key is not a lowercase name (a ULID or a hex
+id is not), or if a path contains a player's entity id. MACs are under
+`02:00:00` and hosts in `192.0.2.0/24`, in the rows, and in the text of the
+fixture, fakes and script the scan derives.
 
 The label registry is unrecorded: the house had no labels when it was
 captured, so `label_row` carries HA core's keys, the shape's `labels` entry is
 empty, and an entity row's `labels[]` items are exempted by name (`_PENDING`)
 until a capture after the first confirm fills both.
 
-    set -a; . ~/code/ha-home-panel/.env.local; set +a
-    USHER_HA_URL="$VITE_HA_URL" USHER_HA_TOKEN="$VITE_HA_TOKEN" \
-      uv run python scripts/capture_ha_shape.py --listen 30 > /var/tmp/ha-shape.json
+To capture again, start something playing on a player first: the `media_*`
+attribute paths exist only while one plays. Merge over the committed shape so
+no path is lost, and check that no value leaked before copying it into place.
+`.env` supplies `USHER_HA_URL` and `USHER_HA_TOKEN`; the script only reads.
+
+    set -a; . ./.env; set +a
+    uv run python scripts/capture_ha_shape.py --listen 30 \
+      --merge tests/fixtures/homeassistant/shape.json > /var/tmp/ha-shape.json
+    jq '[.. | strings] | unique' /var/tmp/ha-shape.json  # type names only
+    grep -c 'media_player\.' /var/tmp/ha-shape.json     # 0
+    cp /var/tmp/ha-shape.json tests/fixtures/homeassistant/shape.json
+    uv run pytest tests/unit/test_fixtures_homeassistant.py
 ```
 
 Run: `uv run pytest tests/unit/test_docs_pointers.py`
