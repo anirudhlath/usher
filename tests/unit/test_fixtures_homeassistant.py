@@ -29,12 +29,33 @@ _SEGMENT = re.compile(r"^[a-z][a-z_]*(\[\])*$")
 _ROOT = Path(__file__).resolve().parents[2]
 _COMMITTED = (
     "scripts/capture_ha_shape.py",
-    "tests/fixtures/homeassistant/shape.json",
     "tests/fakes/home_assistant_rows.py",
+    "tests/fakes/house.py",
+    "tests/fixtures/homeassistant/shape.json",
     "tests/unit/test_fixtures_homeassistant.py",
 )
+_HA_NAMES = re.compile(r"capture_ha_shape|home_assistant_rows")
 _README = "tests/fixtures/README.md"
 _DOCUMENTATION = ipaddress.ip_network("192.0.2.0/24")
+
+
+def _undocumented(found: str) -> bool:
+    """Outside 192.0.2.0/24, or no address at all (an octet past 255): either way, named."""
+    try:
+        return ipaddress.ip_address(found) not in _DOCUMENTATION
+    except ValueError:
+        return True
+
+
+def _touched_by_the_ha_work() -> set[str]:
+    """Derived, not listed: the HA fixtures, every fake or script naming the HA work, this file."""
+    found = {path for path in (_ROOT / "tests/fixtures/homeassistant").rglob("*") if path.is_file()}
+    for folder in ("tests/fakes", "scripts"):
+        found |= {
+            path for path in (_ROOT / folder).rglob("*.py") if _HA_NAMES.search(path.read_text())
+        }
+    found.add(Path(__file__).resolve())
+    return {path.relative_to(_ROOT).as_posix() for path in found}
 
 
 def _rows(kind: str, rows: HouseRows = _ROWS) -> list[dict[str, Any]]:
@@ -103,7 +124,7 @@ def test_every_mac_and_address_in_the_rows_is_reserved_for_documentation() -> No
     addresses = [found for text in strings for found in _IPV4.findall(text)]
     assert macs and addresses, "the premise: the rows carry both"
     assert [mac for mac in macs if not mac.lower().startswith("02:00:00:")] == []
-    assert [ip for ip in addresses if ipaddress.ip_address(ip) not in _DOCUMENTATION] == []
+    assert [ip for ip in addresses if _undocumented(ip)] == []
 
 
 def _readme_section() -> str:
@@ -113,6 +134,8 @@ def _readme_section() -> str:
 
 
 def test_every_mac_and_address_in_the_committed_files_is_reserved_for_documentation() -> None:
+    unscanned = sorted(_touched_by_the_ha_work() ^ set(_COMMITTED))
+    assert unscanned == [], "the premise: the scan reads exactly the files the HA work touches"
     texts = {name: (_ROOT / name).read_text() for name in _COMMITTED}
     texts[f"{_README} ## Home Assistant"] = _readme_section()
     empty = [name for name, text in texts.items() if not text.strip()]
@@ -121,7 +144,4 @@ def test_every_mac_and_address_in_the_committed_files_is_reserved_for_documentat
     addresses = [(name, ip) for name, text in texts.items() for ip in _IPV4.findall(text)]
     assert addresses, "the premise: the scan finds the documentation network the files name"
     assert [f"{name}: {mac}" for name, mac in macs if not mac.startswith("02:00:00:")] == []
-    outside = [
-        f"{name}: {ip}" for name, ip in addresses if ipaddress.ip_address(ip) not in _DOCUMENTATION
-    ]
-    assert outside == []
+    assert [f"{name}: {ip}" for name, ip in addresses if _undocumented(ip)] == []
