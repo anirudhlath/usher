@@ -9,6 +9,7 @@ from typing import Any, cast
 
 import pytest
 from websockets.asyncio.server import ServerConnection, serve
+from websockets.exceptions import InvalidURI
 
 import usher.adapters
 from usher.adapters.websocket import (
@@ -63,8 +64,32 @@ async def test_a_refused_open_is_named_by_label_and_type_never_by_url() -> None:
             proxy=None,
             open_timeout=BOUND,
         )
+    cause = caught.value.__cause__
+    # The premise: the refusal's own text names the host, so its absence below proves something.
+    assert isinstance(cause, ConnectionRefusedError), repr(cause)
+    assert "127.0.0.1" in str(cause), str(cause)
     message = str(caught.value)
-    assert message.startswith(f"{LABEL} could not be opened: "), message
+    assert message == f"{LABEL} could not be opened: {type(cause).__name__}", message
+    assert "127.0.0.1" not in message
+    assert TOKEN not in message
+
+
+async def test_an_invalid_uri_is_named_by_type_and_its_token_never_crosses() -> None:
+    """`InvalidURI.__str__` quotes the whole URI, query string and all."""
+    with pytest.raises(PortUnavailable) as caught:
+        await connect_websocket(
+            f"http://127.0.0.1/x?token={TOKEN}",
+            label=LABEL,
+            logger_name=LOGGER,
+            proxy=None,
+            open_timeout=BOUND,
+        )
+    cause = caught.value.__cause__
+    # The premise: the library's own message carries the token, so the absence has teeth.
+    assert isinstance(cause, InvalidURI), repr(cause)
+    assert TOKEN in str(cause), str(cause)
+    message = str(caught.value)
+    assert message == f"{LABEL} could not be opened: InvalidURI", message
     assert TOKEN not in message
 
 
