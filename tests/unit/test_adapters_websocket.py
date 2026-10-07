@@ -10,7 +10,8 @@ from typing import Any, cast
 
 import pytest
 from websockets.asyncio.server import ServerConnection, serve
-from websockets.exceptions import ConnectionClosed, InvalidURI
+from websockets.exceptions import ConnectionClosed, ConnectionClosedError, InvalidURI
+from websockets.frames import CloseCode
 
 import usher.adapters
 from usher.adapters.websocket import (
@@ -143,7 +144,12 @@ async def test_a_frame_over_the_bound_is_refused_and_a_wider_bound_admits_it() -
         with pytest.raises(PortUnavailable) as caught:
             await narrow.recv(BOUND)
         await narrow.aclose()
-        assert "ConnectionClosed" in str(caught.value), "the premise: the bound, not a timeout"
+        cause = caught.value.__cause__
+        # The premise: this side refused the frame. `websockets` fails the connection on
+        # `PayloadTooBig` by *sending* 1009, then discards what the peer says back.
+        assert isinstance(cause, ConnectionClosedError), f"the premise: a failure, not {cause!r}"
+        sent = cause.sent.code if cause.sent is not None else None
+        assert sent == CloseCode.MESSAGE_TOO_BIG, f"the premise: the bound closed it, not {cause!r}"
 
         wide = await connect_websocket(
             url, label=LABEL, logger_name=LOGGER, proxy=None, max_size=4 * DEFAULT_MAX_FRAME_BYTES
