@@ -247,9 +247,9 @@ between commits, and before it starts closes its source's item walks still
 counts them; a whole-library walk closed this way is resumed all the same. A
 process paused that long rather than stopped — its machine suspended, say — is
 closed the same way; when it wakes, its next commit sets its run `running`
-again, and if a new walk has resumed that run meanwhile, both walk it: each unit
-keeps the furthest position either committed, but the run's counts can be
-wrong.
+again unless a walk has completed it meanwhile, and if a new walk has resumed
+that run, both walk it: each unit keeps the furthest position either committed,
+but the run's counts can be wrong.
 A run whose sweep was refused is not resumed, and neither is one that stopped
 before its units were stored: a fresh walk starts. A walk's claim reads only
 whole-library walks, so a single walk's run — the gap-closer's, say — never
@@ -282,9 +282,9 @@ raising and changing nothing. `1.0` disables the ceiling. The ceiling is a
 fraction of what *Usher* holds for that source, not of the source itself.
 
 An item that reappears in a walk is available again at that moment. An item
-keeps the start of the latest-begun walk that saw it, so a walk that began
-earlier and reads it again never exposes it to a later full walk's sweep. The
-sweep only ever sets `false`.
+keeps the latest instant it was seen at — a walk's start, or the moment a push
+event read it — so a walk that began earlier and reads it again never exposes
+it to a later full walk's sweep. The sweep only ever sets `false`.
 
 **A source is either a library this deployment owns or a *view* of somebody
 else's, and Usher does not model the difference.** Pointing Usher at a server
@@ -316,7 +316,9 @@ A watch run moves its heartbeat when it starts, with every batch it commits,
 and at least once a minute between commits, also while it waits on a page.
 Before it starts, a run closes its source's watch runs still `running` whose
 heartbeat is 10 minutes old or missing, `failed` with `abandoned: its process
-stopped before it finished`, and logs a WARNING counting them. One whose
+stopped before it finished`, and logs a WARNING counting them. A process paused
+that long rather than stopped is closed the same way; when it wakes, its next
+commit sets its run `running` again, and it walks on in that run. One whose
 heartbeat is younger is alive and is left alone: the new run walks beside it,
 in a run of its own.
 

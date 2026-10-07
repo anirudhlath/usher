@@ -109,7 +109,8 @@ Versioning is `0.x` while the wire contract may still move —
   none, `failed` with `abandoned: its process stopped before it finished`, and
   logs a WARNING that counts them.
 - **A full walk no longer retracts an item that a walk begun before it read
-  again meanwhile.** An item keeps the latest start of the walks that saw it.
+  again meanwhile.** An item keeps the latest instant it was seen at: a walk's
+  start, or the moment a push event read it.
 - **A watch merge that read newer state is no longer refused because an older
   read committed first.** The `watch_states` trigger keeps a source merge's own
   `updated_at` — its read's instant, which for a walk is the instant the walk

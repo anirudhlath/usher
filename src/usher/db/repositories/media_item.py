@@ -64,7 +64,7 @@ _COLUMNS = (
 
 # `last_seen_at` only moves forward: a walk that began earlier and reads an item again
 # would otherwise stamp it behind a later full walk's start, and that walk's sweep
-# would retract it. Every other column takes the latest write, since a resumed walk
+# would retract it. No other column is gated on the stamp, since a resumed walk
 # carries an old start but the freshest read.
 _UPSERT = """
 WITH deduped AS (
