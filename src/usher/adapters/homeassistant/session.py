@@ -19,11 +19,33 @@ from usher.ports.errors import PortAuthFailed, PortDataMalformed, PortUnavailabl
 #: transport's ping, so a quiet socket is a tick and never a failure.
 _TICK_SECONDS: Final = 30.0
 _CODE: Final = re.compile(r"[a-z0-9_]{1,64}")
-#: Why a waiting command failed; only a failed socket is blamed on Home Assistant.
-_HA_CLOSED: Final = "Home Assistant closed before answering {kind}"
-_HANDLER_RAISED: Final = "the event handler raised before {kind} was answered"
-_STOPPED_READING: Final = "the session stopped reading before {kind} was answered"
-_CLOSED_HERE: Final = "the session was closed before {kind} was answered"
+
+
+@dataclass(frozen=True, slots=True)
+class _Stop:
+    """Why the session stopped, as told to a waiting command and to one sent after."""
+
+    waiting: str
+    refused: str
+
+
+#: Only a failed socket is blamed on Home Assistant.
+_HA_CLOSED: Final = _Stop(
+    "Home Assistant closed before answering {kind}",
+    "the Home Assistant websocket closed before {kind}",
+)
+_HANDLER_RAISED: Final = _Stop(
+    "the event handler raised before {kind} was answered",
+    "the event handler raised before {kind} was sent",
+)
+_STOPPED_READING: Final = _Stop(
+    "the session stopped reading before {kind} was answered",
+    "the session stopped reading before {kind} was sent",
+)
+_CLOSED_HERE: Final = _Stop(
+    "the session was closed before {kind} was answered",
+    "the session was closed before {kind} was sent",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,7 +90,7 @@ class HomeAssistantSession:
         self._next_id = 1
         self._seq = 0
         self._pending: dict[int, tuple[str, asyncio.Future[Answer]]] = {}
-        self._closed = False
+        self._stop: _Stop | None = None
         self._pumping = False
         self.skipped = 0
 
@@ -98,11 +120,12 @@ class HomeAssistantSession:
         """Send one command and await its answer.
 
         `PortUnavailable` when HA does not answer within the command timeout or
-        the socket goes first; `PortAuthFailed` for a refusal coded
-        `unauthorized`; `PortDataMalformed` naming any other refusal's code.
+        the session stops first, naming why it stopped, as it does for a command
+        sent after; `PortAuthFailed` for a refusal coded `unauthorized`;
+        `PortDataMalformed` naming any other refusal's code.
         """
-        if self._closed:
-            raise PortUnavailable(f"the Home Assistant websocket closed before {kind}")
+        if self._stop is not None:
+            raise PortUnavailable(self._stop.refused.format(kind=kind))
         ident, self._next_id = self._next_id, self._next_id + 1
         answered: asyncio.Future[Answer] = asyncio.get_running_loop().create_future()
         self._pending[ident] = (kind, answered)
@@ -158,12 +181,16 @@ class HomeAssistantSession:
             self._pumping = False
             self._fail_pending(why)
 
-    def _fail_pending(self, why: str) -> None:
-        """Refuse every later command, and fail each waiting one at once, saying `why`."""
-        self._closed = True
+    def _fail_pending(self, why: _Stop) -> None:
+        """Refuse every later command and fail each waiting one at once; the first `why` stands.
+
+        After `aclose` the reader's socket fails too, and that is not Home Assistant's doing.
+        """
+        if self._stop is None:
+            self._stop = why
         for kind, answered in self._pending.values():
             if not answered.done():
-                answered.set_exception(PortUnavailable(why.format(kind=kind)))
+                answered.set_exception(PortUnavailable(self._stop.waiting.format(kind=kind)))
 
     def _event(self, frame: Mapping[str, object]) -> Event | None:
         event = frame.get("event")

@@ -26,7 +26,8 @@ SENSOR: Final = "sensor.hallway_temperature"
 #: Paths the fake emits that no capture has recorded, by frame kind; a capture that records one
 #: takes it out, and the session's shape case fails until it does.
 PENDING_FRAMES: Final[dict[str, frozenset[str]]] = {
-    # The capture writes nothing, so it never saw a write's dict answer.
+    # The capture files `config/entity_registry/get`'s dict answers under `entity`, never as a
+    # `result` frame; keeping one such frame whole under `result` would record this.
     "result": frozenset({"result: dict"}),
     "event": frozenset(
         {

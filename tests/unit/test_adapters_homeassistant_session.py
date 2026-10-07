@@ -1,7 +1,7 @@
 """The session: auth, numbered commands, one reader, and refusals that never echo HA's text."""
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager, suppress
 from typing import Any
 
@@ -244,11 +244,23 @@ async def test_a_result_whose_id_is_not_an_integer_answers_no_command(ident: obj
     assert answer.value == ["genuine"]
 
 
-async def test_an_answer_to_a_command_given_up_but_not_yet_unwound_is_dropped() -> None:
+async def test_an_answer_to_a_command_given_up_but_not_yet_unwound_is_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     server = FakeHomeAssistant()
     server.unanswered.add("get_states")
     pumps: list[asyncio.Task[None]] = []
+    met: list[tuple[bool, bool]] = []
     async with _session(server, timeout=10.0, pumps=pumps) as session:
+        settle = session._settle
+
+        def spy(frame: Mapping[str, object]) -> None:
+            if frame.get("id") == 1:
+                pending = session._pending.get(1)
+                met.append((pending is not None, pending is not None and pending[1].done()))
+            settle(frame)
+
+        monkeypatch.setattr(session, "_settle", spy)
         waiting = asyncio.create_task(session.command("get_states"))
         while not server.commands:
             await asyncio.sleep(0)
@@ -258,6 +270,7 @@ async def test_an_answer_to_a_command_given_up_but_not_yet_unwound_is_dropped() 
         waiting.cancel()
         with pytest.raises(asyncio.CancelledError):
             await waiting
+        assert met == [(True, True)], "the premise: the reader met the id given up, not yet gone"
         assert not pumps[0].done()
         assert (await session.command("config/area_registry/list")).value == server.areas
 
@@ -314,12 +327,17 @@ async def test_a_handler_that_raises_is_not_blamed_on_home_assistant() -> None:
                 await waiting
             with pytest.raises(ValueError, match="the handler's own failure"):
                 await pump
+        with pytest.raises(PortUnavailable) as refused:
+            await session.command("config/area_registry/list")
     finally:
         pump.cancel()
         with suppress(asyncio.CancelledError, ValueError, PortUnavailable):
             await pump
         await session.aclose()
     assert str(stopped.value) == "the event handler raised before get_states was answered"
+    assert str(refused.value) == (
+        "the event handler raised before config/area_registry/list was sent"
+    )
 
 
 async def test_a_cancelled_reader_is_not_blamed_on_home_assistant() -> None:
@@ -334,7 +352,25 @@ async def test_a_cancelled_reader_is_not_blamed_on_home_assistant() -> None:
         async with asyncio.timeout(1.0):
             with pytest.raises(PortUnavailable) as stopped:
                 await waiting
+        with pytest.raises(PortUnavailable) as refused:
+            await session.command("config/area_registry/list")
     assert str(stopped.value) == "the session stopped reading before get_states was answered"
+    assert str(refused.value) == (
+        "the session stopped reading before config/area_registry/list was sent"
+    )
+
+
+async def test_a_command_after_aclose_is_refused_naming_the_close_once_the_reader_ends() -> None:
+    server = FakeHomeAssistant()
+    pumps: list[asyncio.Task[None]] = []
+    async with _session(server, pumps=pumps) as session:
+        await session.aclose()
+        async with asyncio.timeout(1.0):
+            with pytest.raises(PortUnavailable, match="the fake connection is closed"):
+                await pumps[0]
+        with pytest.raises(PortUnavailable) as refused:
+            await session.command("get_states")
+    assert str(refused.value) == "the session was closed before get_states was sent"
 
 
 async def test_fields_cannot_replace_a_commands_id_or_type() -> None:
