@@ -162,11 +162,15 @@ async def test_a_frame_over_the_bound_is_refused_and_a_wider_bound_admits_it() -
 
 
 def test_the_default_frame_bound_is_the_librarys_own() -> None:
-    """Emby names no bound, so this default is what keeps its sockets' bound unchanged."""
+    """Emby names no bound, so these defaults are what keep its sockets' bound unchanged."""
     library_default = inspect.signature(connect).parameters["max_size"].default
     assert isinstance(library_default, int), f"the premise: a bound was read, {library_default!r}"
     assert library_default == DEFAULT_MAX_FRAME_BYTES, (
         f"the default bound {DEFAULT_MAX_FRAME_BYTES} is not the library's {library_default}"
+    )
+    ours = inspect.signature(connect_websocket).parameters["max_size"].default
+    assert ours == DEFAULT_MAX_FRAME_BYTES, (
+        f"connect_websocket defaults to {ours!r}, not the default bound {DEFAULT_MAX_FRAME_BYTES}"
     )
 
 

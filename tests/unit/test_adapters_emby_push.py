@@ -23,6 +23,7 @@ from usher.adapters.emby.push import (
     socket_logger,
     to_source_events,
 )
+from usher.adapters.websocket import DEFAULT_MAX_FRAME_BYTES
 from usher.config import Settings
 from usher.ports.errors import PortUnavailable
 from usher.ports.source import SourceEvent, SourceEventKind
@@ -1168,6 +1169,8 @@ async def test_connect_websocket_hands_the_library_the_silenced_logger(
     # with the socket already live, and at 16 buffered frames the client
     # stops reading and backpressures the server for the length of the walk.
     assert captured["max_queue"] == 256
+    # The bound this channel had before the transport was shared: the library's own.
+    assert captured["max_size"] == DEFAULT_MAX_FRAME_BYTES, f"Emby's bound: {captured['max_size']}"
 
 
 async def test_a_real_websockets_handshake_prints_no_token(
