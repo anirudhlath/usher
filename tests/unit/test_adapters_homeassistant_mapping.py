@@ -2,11 +2,9 @@
 
 import ast
 import inspect
-import sys
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
-from types import FrameType
 from typing import Any
 
 import pytest
@@ -338,18 +336,45 @@ _NOT_KEYS: dict[str, frozenset[str]] = {
     # The list's name, for an error message.
     "_rows": frozenset({"what"}),
 }
-#: One spelling of each form `_keys_named` reads a key from, and one it skips.
+#: One spelling of each form `_keys_named` reads a key from, and two it skips.
 _FORMS = """
 K: Final = "by-constant"
+J = "by-assign"
 def _rows(answer, read, what): ...
 def _reader(row, key): ...
+def _pick(row, name): ...
 _reader(row, "by-helper")
+_pick(row, name="by-helper-keyword")
 _rows(row, read, "skipped")
+_rows(row, read, what="skipped")
 row.get("by-get")
 row["by-subscript"]
 anything(row, key="by-keyword")
 row.get(K)
+row.get(J)
+"by-in" in row
+"by-not-in" not in row
 """
+_FORMS_NAMED = {
+    "by-constant",
+    "by-assign",
+    "by-helper",
+    "by-helper-keyword",
+    "by-get",
+    "by-subscript",
+    "by-keyword",
+    "by-in",
+    "by-not-in",
+}
+#: The list readers `_paths_read` runs, directly or through `_rows`.
+_LIST_READERS = (
+    "to_area",
+    "to_device",
+    "to_entity",
+    "to_state",
+    "registries_from_rows",
+    "states_from_rows",
+)
 #: Public functions in mapping.py that read no row, each with what it takes instead.
 _PURE = {
     "role_of": "an entry's labels, already read from its row",
@@ -427,6 +452,8 @@ def _string(node: ast.expr, constants: Mapping[str, str]) -> str | None:
 def _key_arguments(node: ast.AST, params: Mapping[str, list[str]]) -> list[ast.expr]:
     if isinstance(node, ast.Subscript):
         return [node.slice]
+    if isinstance(node, ast.Compare) and isinstance(node.ops[0], ast.In | ast.NotIn):
+        return [node.left] if isinstance(node.left, ast.Constant) else []
     if not isinstance(node, ast.Call):
         return []
     found = [keyword.value for keyword in node.keywords if keyword.arg == "key"]
@@ -442,11 +469,14 @@ def _key_arguments(node: ast.AST, params: Mapping[str, list[str]]) -> list[ast.e
     return found
 
 
+# A new read must also be reached from `_target`'s row; listing its key alone fails the recording.
 def _keys_named(source: str) -> list[tuple[str, int]]:
     """Each key `source` names, with its line: a string constant, or a module constant's name.
 
     A key is an argument to one of the module's own functions (less `_NOT_KEYS`), the first
-    argument of a `.get`, a subscript, or a `key=` keyword to anything.
+    argument of a `.get`, a subscript, a `key=` keyword to anything, or a string literal
+    tested with `in` or `not in`. A name tested with `in` is not resolved: `role_of`'s
+    `IGNORE_LABEL in held` tests a label set, not a row.
     """
     tree = ast.parse(source)
     constants: dict[str, str] = {}
@@ -467,23 +497,6 @@ def _keys_named(source: str) -> list[tuple[str, int]]:
         for argument in _key_arguments(node, params)
         if (key := _string(argument, constants)) is not None
     ]
-
-
-def _functions_entered(run: Callable[[], object]) -> set[str]:
-    """The names of mapping.py's functions `run` enters, off the interpreter's profile hook."""
-    entered: set[str] = set()
-
-    def profile(frame: FrameType, event: str, arg: object) -> None:
-        if event == "call" and frame.f_code.co_filename == mapping.__file__:
-            entered.add(frame.f_code.co_name)
-
-    previous = sys.getprofile()
-    sys.setprofile(profile)
-    try:
-        run()
-    finally:
-        sys.setprofile(previous)
-    return entered
 
 
 def _sample(path: str, type_name: str) -> object:
@@ -550,8 +563,8 @@ def test_each_reader_beside_the_lists_reads_only_its_own_paths() -> None:
 def test_every_key_the_mapping_names_is_a_listed_path() -> None:
     """A read no rendered row reaches, behind a short-circuit or a branch, still names its key."""
     forms = {key for key, _ in _keys_named(_FORMS)}
-    assert forms == {"by-constant", "by-helper", "by-get", "by-subscript", "by-keyword"}, (
-        "the premise: the scan reads every form, and skips a `_NOT_KEYS` parameter"
+    assert (sorted(_FORMS_NAMED - forms), sorted(forms - _FORMS_NAMED)) == ([], []), (
+        "the premise: it reads every form, and skips `_NOT_KEYS`"
     )
     listed = {
         path.rsplit(".", 1)[-1]
@@ -570,7 +583,6 @@ def test_every_public_function_that_reads_a_row_is_held_to_its_paths() -> None:
         for name, function in inspect.getmembers(mapping, inspect.isfunction)
         if function.__module__ == mapping.__name__ and not name.startswith("_")
     }
-    assert set(_PURE) | set(_READ_ELSEWHERE) <= public, "the premise: each exemption is public"
-    entered = _functions_entered(lambda: [_paths_read(kind) for kind in _READ_KEYS])
-    assert {"registries_from_rows", "states_from_rows"} <= entered, "the premise: both lists ran"
-    assert sorted(public - entered - set(_READ_ELSEWHERE) - set(_PURE)) == []
+    held = {*_LIST_READERS, *_READ_ELSEWHERE, *_PURE}
+    assert sorted(held - public) == [], "the premise: each held name is a public function"
+    assert sorted(public - held) == []
