@@ -4746,7 +4746,7 @@ git commit -m "homeassistant: read HA's registry and state rows, a bad row dropp
 """The session: auth, numbered commands, one reader, and refusals that never echo HA's text."""
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager, suppress
 from typing import Any
 
@@ -4754,29 +4754,38 @@ import pytest
 from pydantic import SecretStr
 
 from tests.fakes.home_assistant import (
+    PENDING_FRAMES,
     REFUSAL_MESSAGE,
     TOKEN,
     FakeHomeAssistant,
     FakeHomeAssistantConnector,
 )
-from tests.fakes.home_assistant_rows import missing_keys, unrecorded_paths
-from tests.fakes.house import APPLE_TV, APPLE_TV_DEVICE, BEDROOM
+from tests.fakes.home_assistant_rows import missing_keys, recorded, unrecorded_paths
+from tests.fakes.house import APPLE_TV, APPLE_TV_DEVICE, BEDROOM, LIVING_ROOM
 from usher.adapters.homeassistant.session import Event, HomeAssistantSession
 from usher.domain.house import HouseState
 from usher.ports.errors import PortAuthFailed, PortDataMalformed, PortUnavailable
 
 URL = "ws://192.0.2.1:8123/api/websocket"
+#: A player HA has never reported, so its first state has no old one.
+_ARRIVAL = HouseState(entity_id="media_player.synthetic_arrival", state="idle")
 
 
 @asynccontextmanager
 async def _session(
-    server: FakeHomeAssistant, *, timeout: float = 1.0, events: list[Event] | None = None
+    server: FakeHomeAssistant,
+    *,
+    timeout: float = 1.0,
+    events: list[Event] | None = None,
+    pumps: list[asyncio.Task[None]] | None = None,
 ) -> AsyncIterator[HomeAssistantSession]:
     session = await HomeAssistantSession.open(
         FakeHomeAssistantConnector(server), URL, TOKEN, command_timeout=timeout
     )
     seen: list[Event] = events if events is not None else []
     pump = asyncio.create_task(session.pump(seen.append))
+    if pumps is not None:
+        pumps.append(pump)
     try:
         yield session
     finally:
@@ -4788,8 +4797,10 @@ async def _session(
 
 async def test_open_sends_the_token_in_the_auth_frame_and_nothing_else() -> None:
     server = FakeHomeAssistant()
-    async with _session(server):
-        pass
+    async with _session(server) as session:
+        state = repr(vars(session))
+    assert "_socket" in state, "the premise: the repr holds the session's state"
+    assert TOKEN.get_secret_value() not in state
     assert server.connections[0].sent == [
         {"type": "auth", "access_token": TOKEN.get_secret_value()}
     ]
@@ -4939,14 +4950,206 @@ async def test_a_frame_that_is_not_a_json_object_is_skipped_and_counted() -> Non
     assert answer.value == server.areas
 
 
-async def test_the_fakes_frames_have_the_recorded_shapes() -> None:
+@pytest.mark.parametrize(
+    "frame",
+    [
+        {"type": "event", "event": "x"},
+        {"type": "event", "event": {"event_type": 3}},
+        {"type": "event"},
+    ],
+)
+async def test_an_event_frame_with_no_event_type_is_skipped_and_the_reader_runs_on(
+    frame: dict[str, Any],
+) -> None:
+    server = FakeHomeAssistant()
+    events: list[Event] = []
+    pumps: list[asyncio.Task[None]] = []
+    async with _session(server, events=events, pumps=pumps) as session:
+        server.connections[0].deliver(frame)
+        answer = await session.command("config/area_registry/list")
+        assert not pumps[0].done()
+    assert session.skipped == 1
+    assert answer.value == server.areas
+    assert events == []
+
+
+@pytest.mark.parametrize("ident", [True, 1.0, "1"])
+async def test_a_result_whose_id_is_not_an_integer_answers_no_command(ident: object) -> None:
+    server = FakeHomeAssistant()
+    server.unanswered.add("get_states")
+    async with _session(server) as session:
+        waiting = asyncio.create_task(session.command("get_states"))
+        while not server.commands:
+            await asyncio.sleep(0)
+        assert server.commands[0]["id"] == 1, "the premise: the id the impostor resembles"
+        connection = server.connections[0]
+        connection.deliver({"id": ident, "type": "result", "success": True, "result": ["impostor"]})
+        connection.deliver({"id": 1, "type": "result", "success": True, "result": ["genuine"]})
+        answer = await waiting
+    assert answer.value == ["genuine"]
+
+
+async def test_an_answer_to_a_command_given_up_but_not_yet_unwound_is_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = FakeHomeAssistant()
+    server.unanswered.add("get_states")
+    pumps: list[asyncio.Task[None]] = []
+    met: list[tuple[bool, bool]] = []
+    async with _session(server, timeout=10.0, pumps=pumps) as session:
+        settle = session._settle
+
+        def spy(frame: Mapping[str, object]) -> None:
+            if frame.get("id") == 1:
+                pending = session._pending.get(1)
+                met.append((pending is not None, pending is not None and pending[1].done()))
+            settle(frame)
+
+        monkeypatch.setattr(session, "_settle", spy)
+        waiting = asyncio.create_task(session.command("get_states"))
+        while not server.commands:
+            await asyncio.sleep(0)
+        # The answer is queued, then the command is cancelled: its future is done at once, and
+        # the reader settles the answer before the command's own `finally` forgets the id.
+        server.connections[0].deliver({"id": 1, "type": "result", "success": True, "result": []})
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        assert met == [(True, True)], "the premise: the reader met the id given up, not yet gone"
+        assert not pumps[0].done()
+        assert (await session.command("config/area_registry/list")).value == server.areas
+
+
+async def test_a_second_reader_is_refused_and_the_first_reads_on() -> None:
+    server = FakeHomeAssistant()
+    pumps: list[asyncio.Task[None]] = []
+    async with _session(server, pumps=pumps) as session:
+        await session.command("config/area_registry/list")
+        assert not pumps[0].done(), "the premise: the first reader is reading"
+        with pytest.raises(RuntimeError, match="already has a reader"):
+            async with asyncio.timeout(1.0):
+                await session.pump(lambda _event: None)
+        assert not pumps[0].done()
+        assert (await session.command("get_states")).value == server.states
+
+
+async def test_aclose_with_no_reader_fails_a_waiting_command_at_once() -> None:
+    server = FakeHomeAssistant()
+    server.unanswered.add("get_states")
+    session = await HomeAssistantSession.open(
+        FakeHomeAssistantConnector(server), URL, TOKEN, command_timeout=10.0
+    )
+    waiting = asyncio.create_task(session.command("get_states"))
+    while not server.commands:
+        await asyncio.sleep(0)
+    await session.aclose()
+    async with asyncio.timeout(1.0):
+        with pytest.raises(PortUnavailable) as closed:
+            await waiting
+    assert str(closed.value) == "the session was closed before get_states was answered"
+    assert server.connections[0].closed
+
+
+async def test_a_handler_that_raises_is_not_blamed_on_home_assistant() -> None:
+    server = FakeHomeAssistant()
+    server.unanswered.add("get_states")
+    session = await HomeAssistantSession.open(
+        FakeHomeAssistantConnector(server), URL, TOKEN, command_timeout=10.0
+    )
+
+    def explode(_event: Event) -> None:
+        raise ValueError("the handler's own failure")
+
+    pump = asyncio.create_task(session.pump(explode))
+    try:
+        await session.command("subscribe_events", event_type="state_changed")
+        waiting = asyncio.create_task(session.command("get_states"))
+        while len(server.commands) < 2:
+            await asyncio.sleep(0)
+        server.change_state(HouseState(entity_id=APPLE_TV, state="paused"))
+        async with asyncio.timeout(1.0):
+            with pytest.raises(PortUnavailable) as stopped:
+                await waiting
+            with pytest.raises(ValueError, match="the handler's own failure"):
+                await pump
+        with pytest.raises(PortUnavailable) as refused:
+            await session.command("config/area_registry/list")
+    finally:
+        pump.cancel()
+        with suppress(asyncio.CancelledError, ValueError, PortUnavailable):
+            await pump
+        await session.aclose()
+    assert str(stopped.value) == "the event handler raised before get_states was answered"
+    assert str(refused.value) == (
+        "the event handler raised before config/area_registry/list was sent"
+    )
+
+
+async def test_a_cancelled_reader_is_not_blamed_on_home_assistant() -> None:
+    server = FakeHomeAssistant()
+    server.unanswered.add("get_states")
+    pumps: list[asyncio.Task[None]] = []
+    async with _session(server, timeout=10.0, pumps=pumps) as session:
+        waiting = asyncio.create_task(session.command("get_states"))
+        while not server.commands:
+            await asyncio.sleep(0)
+        pumps[0].cancel()
+        async with asyncio.timeout(1.0):
+            with pytest.raises(PortUnavailable) as stopped:
+                await waiting
+        with pytest.raises(PortUnavailable) as refused:
+            await session.command("config/area_registry/list")
+    assert str(stopped.value) == "the session stopped reading before get_states was answered"
+    assert str(refused.value) == (
+        "the session stopped reading before config/area_registry/list was sent"
+    )
+
+
+async def test_a_command_after_aclose_is_refused_naming_the_close_once_the_reader_ends() -> None:
+    server = FakeHomeAssistant()
+    pumps: list[asyncio.Task[None]] = []
+    async with _session(server, pumps=pumps) as session:
+        await session.aclose()
+        async with asyncio.timeout(1.0):
+            with pytest.raises(PortUnavailable, match="the fake connection is closed"):
+                await pumps[0]
+        with pytest.raises(PortUnavailable) as refused:
+            await session.command("get_states")
+    assert str(refused.value) == "the session was closed before get_states was sent"
+
+
+async def test_fields_cannot_replace_a_commands_id_or_type() -> None:
     server = FakeHomeAssistant()
     async with _session(server) as session:
-        await session.command("subscribe_events", event_type="state_changed")
+        answer = await session.command("config/area_registry/list", id=99, type="get_states")
+    assert server.commands == [{"id": 1, "type": "config/area_registry/list"}]
+    assert answer.value == server.areas
+
+
+async def test_the_fakes_frames_have_the_recorded_shapes_or_are_pending() -> None:
+    server = FakeHomeAssistant()
+    async with _session(server) as session:
+        for event_type in (
+            "state_changed",
+            "area_registry_updated",
+            "device_registry_updated",
+            "entity_registry_updated",
+            "label_registry_updated",
+        ):
+            await session.command("subscribe_events", event_type=event_type)
         await session.command("get_states")
+        await session.command("config/entity_registry/get", entity_id=APPLE_TV)
         with pytest.raises(PortDataMalformed):
             await session.command("config/entity_registry/get", entity_id="media_player.nothing")
+        await session.command("config/entity_registry/update", entity_id=APPLE_TV, labels=[])
+        await session.command(
+            "config/device_registry/update", device_id=APPLE_TV_DEVICE, area_id=BEDROOM
+        )
+        await session.command("config/label_registry/create", name="Usher ignore")
         server.change_state(HouseState(entity_id=APPLE_TV, state="paused"))
+        server.change_state(_ARRIVAL)
+        server.remove_state(_ARRIVAL.entity_id)
+        server.rename_area(LIVING_ROOM, "Lounge")
         await session.command("config/area_registry/list")
     delivered = server.connections[0].delivered
     by_kind: dict[str, list[dict[str, Any]]] = {
@@ -4958,8 +5161,20 @@ async def test_the_fakes_frames_have_the_recorded_shapes() -> None:
     }
     for kind, frames in by_kind.items():
         assert frames, f"the premise: the fake delivered a {kind} frame"
-        assert unrecorded_paths(kind, frames) == [], kind
+        assert sorted(unrecorded_paths(kind, frames)) == sorted(PENDING_FRAMES.get(kind, ())), kind
         assert missing_keys(kind, frames) == [], kind
+
+
+def test_every_pending_frame_path_is_still_unrecorded() -> None:
+    shape = recorded()
+    pending = [(kind, entry) for kind, entries in PENDING_FRAMES.items() for entry in entries]
+    assert pending, "the premise: the fake emits a path no capture has recorded"
+    now_recorded = [
+        f"{kind}: {entry}"
+        for kind, entry in pending
+        if entry.rsplit(": ", 1)[1] in shape[kind].get(entry.rsplit(": ", 1)[0], [])
+    ]
+    assert now_recorded == []
 ```
 
 - [ ] **Step 2: Run them to verify they fail**
@@ -4997,9 +5212,32 @@ HA_VERSION: Final = "2026.10.0"
 REFUSAL_MESSAGE: Final = "refusal text that may carry a submitted value"
 #: A non-player in every list, so every read exercises the domain filter.
 SENSOR: Final = "sensor.hallway_temperature"
+#: Paths the fake emits that no capture has recorded, by frame kind; a capture that records one
+#: takes it out, and the session's shape case fails until it does.
+PENDING_FRAMES: Final[dict[str, frozenset[str]]] = {
+    # The capture files `config/entity_registry/get`'s dict answers under `entity`, never as a
+    # `result` frame; keeping one such frame whole under `result` would record this.
+    "result": frozenset({"result: dict"}),
+    "event": frozenset(
+        {
+            # The capture changed no registry while it listened.
+            "event.data.action: str",
+            "event.data.area_id: str",
+            "event.data.changes.area_id: str",
+            "event.data.changes.labels: list",
+            "event.data.changes.labels[]: str",
+            "event.data.changes: dict",
+            "event.data.device_id: str",
+            "event.data.label_id: str",
+            # No player arrived or left while it listened.
+            "event.data.new_state: NoneType",
+            "event.data.old_state: NoneType",
+        }
+    ),
+}
 _FIRED: Final = "2026-10-06T19:00:00.000000+00:00"
 _CONTEXT: Final = {"id": "01K0000000000000000000000E", "parent_id": None, "user_id": None}
-_DETAIL: Final = {
+_DETAIL: Final[dict[str, Any]] = {
     "aliases": [],
     "capabilities": {},
     "device_class": None,
@@ -5311,6 +5549,33 @@ _CODE: Final = re.compile(r"[a-z0-9_]{1,64}")
 
 
 @dataclass(frozen=True, slots=True)
+class _Stop:
+    """Why the session stopped, as told to a waiting command and to one sent after."""
+
+    waiting: str
+    refused: str
+
+
+#: Only a failed socket is blamed on Home Assistant.
+_HA_CLOSED: Final = _Stop(
+    "Home Assistant closed before answering {kind}",
+    "the Home Assistant websocket closed before {kind}",
+)
+_HANDLER_RAISED: Final = _Stop(
+    "the event handler raised before {kind} was answered",
+    "the event handler raised before {kind} was sent",
+)
+_STOPPED_READING: Final = _Stop(
+    "the session stopped reading before {kind} was answered",
+    "the session stopped reading before {kind} was sent",
+)
+_CLOSED_HERE: Final = _Stop(
+    "the session was closed before {kind} was answered",
+    "the session was closed before {kind} was sent",
+)
+
+
+@dataclass(frozen=True, slots=True)
 class Answer:
     """A command's `result`, and the number of the frame that carried it."""
 
@@ -5352,7 +5617,8 @@ class HomeAssistantSession:
         self._next_id = 1
         self._seq = 0
         self._pending: dict[int, tuple[str, asyncio.Future[Answer]]] = {}
-        self._closed = False
+        self._stop: _Stop | None = None
+        self._pumping = False
         self.skipped = 0
 
     @classmethod
@@ -5381,16 +5647,17 @@ class HomeAssistantSession:
         """Send one command and await its answer.
 
         `PortUnavailable` when HA does not answer within the command timeout or
-        the socket goes first; `PortAuthFailed` for a refusal coded
-        `unauthorized`; `PortDataMalformed` naming any other refusal's code.
+        the session stops first, naming why it stopped, as it does for a command
+        sent after; `PortAuthFailed` for a refusal coded `unauthorized`;
+        `PortDataMalformed` naming any other refusal's code.
         """
-        if self._closed:
-            raise PortUnavailable(f"the Home Assistant websocket closed before {kind}")
+        if self._stop is not None:
+            raise PortUnavailable(self._stop.refused.format(kind=kind))
         ident, self._next_id = self._next_id, self._next_id + 1
         answered: asyncio.Future[Answer] = asyncio.get_running_loop().create_future()
         self._pending[ident] = (kind, answered)
         try:
-            await self._socket.send(json.dumps({"id": ident, "type": kind, **fields}))
+            await self._socket.send(json.dumps({**fields, "id": ident, "type": kind}))
             async with asyncio.timeout(self._command_timeout):
                 return await answered
         except TimeoutError:
@@ -5404,43 +5671,65 @@ class HomeAssistantSession:
         """Read every frame until the socket fails, numbering each in arrival order.
 
         The only reader after `open`, so an event and an answer are ordered by
-        their numbers. A frame that is neither an event nor a result is counted
-        in `skipped`. On exit every command still waiting fails at once with
-        `PortUnavailable`, rather than at its timeout.
+        their numbers; a second call while one runs raises `RuntimeError`. A
+        frame that is neither an event nor a result is counted in `skipped`.
+        On exit every command still waiting fails at once with `PortUnavailable`,
+        rather than at its timeout, and the message blames Home Assistant only
+        when the socket failed: not for a raising `on_event` or a cancelled reader.
         """
+        if self._pumping:
+            raise RuntimeError("this Home Assistant session already has a reader")
+        self._pumping = True
+        why = _STOPPED_READING
         try:
             while True:
                 try:
                     text = await self._socket.recv(_TICK_SECONDS)
                 except TimeoutError:
                     continue
+                except PortUnavailable:
+                    why = _HA_CLOSED
+                    raise
                 self._seq += 1
                 frame = _parse(text)
                 if frame is not None and frame.get("type") == "event":
-                    self._deliver(frame, on_event)
+                    event = self._event(frame)
+                    try:
+                        if event is not None:
+                            on_event(event)
+                    except Exception:
+                        why = _HANDLER_RAISED
+                        raise
                 elif frame is not None and frame.get("type") == "result":
                     self._settle(frame)
                 else:
                     self.skipped += 1
         finally:
-            self._closed = True
-            for kind, answered in self._pending.values():
-                if not answered.done():
-                    answered.set_exception(
-                        PortUnavailable(f"Home Assistant closed before answering {kind}")
-                    )
+            self._pumping = False
+            self._fail_pending(why)
 
-    def _deliver(self, frame: Mapping[str, object], on_event: Callable[[Event], None]) -> None:
+    def _fail_pending(self, why: _Stop) -> None:
+        """Refuse every later command and fail each waiting one at once; the first `why` stands.
+
+        After `aclose` the reader's socket fails too, and that is not Home Assistant's doing.
+        """
+        if self._stop is None:
+            self._stop = why
+        for kind, answered in self._pending.values():
+            if not answered.done():
+                answered.set_exception(PortUnavailable(self._stop.waiting.format(kind=kind)))
+
+    def _event(self, frame: Mapping[str, object]) -> Event | None:
         event = frame.get("event")
         event_type = event.get("event_type") if isinstance(event, Mapping) else None
         if not isinstance(event, Mapping) or not isinstance(event_type, str):
             self.skipped += 1
-            return
-        on_event(Event(event_type=event_type, data=event.get("data"), seq=self._seq))
+            return None
+        return Event(event_type=event_type, data=event.get("data"), seq=self._seq)
 
     def _settle(self, frame: Mapping[str, object]) -> None:
         ident = frame.get("id")
-        waiting = self._pending.get(ident) if isinstance(ident, int) else None
+        waiting = self._pending.get(ident) if type(ident) is int else None
         if waiting is None or waiting[1].done():
             return
         kind, answered = waiting
@@ -5450,7 +5739,8 @@ class HomeAssistantSession:
             answered.set_exception(_refusal(kind, frame))
 
     async def aclose(self) -> None:
-        self._closed = True
+        """Close the socket; a command still waiting fails at once, reader or none."""
+        self._fail_pending(_CLOSED_HERE)
         await self._socket.aclose()
 
 
