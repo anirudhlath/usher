@@ -1,5 +1,6 @@
 """`usher.adapters.websocket` over a real `websockets` server on loopback."""
 
+import asyncio
 import logging
 import pkgutil
 import socket
@@ -9,7 +10,7 @@ from typing import Any, cast
 
 import pytest
 from websockets.asyncio.server import ServerConnection, serve
-from websockets.exceptions import InvalidURI
+from websockets.exceptions import ConnectionClosed, InvalidURI
 
 import usher.adapters
 from usher.adapters.websocket import (
@@ -24,6 +25,8 @@ LABEL = "/test-socket"
 LOGGER = "usher.test.socket"
 # Distinctive, so an absence assertion against it proves something.
 TOKEN = "tok-Wq9"
+# A close reason is the peer's text, and `ConnectionClosed.__str__` repeats it.
+REASON = "bye-Zr4"
 # Every await here is bounded: a socket test fails by hanging, not by answering wrongly.
 BOUND = 5.0
 
@@ -36,11 +39,12 @@ def _free_port() -> int:
     return port
 
 
-async def test_a_closed_socket_is_named_by_label_and_type_never_by_url() -> None:
-    async def handler(connection: ServerConnection) -> None:
-        await connection.close()
+async def _close_with_reason(connection: ServerConnection) -> None:
+    await connection.close(reason=REASON)
 
-    async with serve(handler, "127.0.0.1", 0, logger=silenced_logger(LOGGER)) as server:
+
+async def test_a_closed_socket_is_named_by_label_and_type_never_by_url() -> None:
+    async with serve(_close_with_reason, "127.0.0.1", 0, logger=silenced_logger(LOGGER)) as server:
         port = server.sockets[0].getsockname()[1]
         connection = await connect_websocket(
             f"ws://127.0.0.1:{port}/x?token={TOKEN}", label=LABEL, logger_name=LOGGER, proxy=None
@@ -50,8 +54,36 @@ async def test_a_closed_socket_is_named_by_label_and_type_never_by_url() -> None
                 await connection.recv(BOUND)
         await connection.aclose()
 
+    cause = caught.value.__cause__
+    # The premise: the library's own message carries the peer's reason, so its absence has teeth.
+    assert isinstance(cause, ConnectionClosed), repr(cause)
+    assert REASON in str(cause), str(cause)
     message = str(caught.value)
-    assert message.startswith(f"{LABEL} closed: ConnectionClosed"), message
+    assert message == f"{LABEL} closed: {type(cause).__name__}", message
+    assert REASON not in message
+    assert TOKEN not in message
+
+
+async def test_a_failed_send_is_named_by_label_and_type_never_by_its_reason() -> None:
+    async with serve(_close_with_reason, "127.0.0.1", 0, logger=silenced_logger(LOGGER)) as server:
+        port = server.sockets[0].getsockname()[1]
+        connection = await connect_websocket(
+            f"ws://127.0.0.1:{port}/x?token={TOKEN}", label=LABEL, logger_name=LOGGER, proxy=None
+        )
+        with pytest.raises(PortUnavailable) as caught:
+            # Bounded at `BOUND` seconds: the peer's close lands between two sends.
+            for _ in range(int(BOUND / 0.01)):
+                await connection.send("ping")
+                await asyncio.sleep(0.01)
+        await connection.aclose()
+
+    cause = caught.value.__cause__
+    # The premise: the library's own message carries the peer's reason, so its absence has teeth.
+    assert isinstance(cause, ConnectionClosed), repr(cause)
+    assert REASON in str(cause), str(cause)
+    message = str(caught.value)
+    assert message == f"{LABEL} send failed: {type(cause).__name__}", message
+    assert REASON not in message
     assert TOKEN not in message
 
 
