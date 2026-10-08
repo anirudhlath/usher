@@ -993,7 +993,12 @@ async def test_an_ids_listing_replays_the_recorded_version_group(driver: _Driver
         driver.server.add_item(replace(MOVIE, external_id=version), ADDED_AT)
     driver.server.group_versions(*versions)
     listings = recorded["listings"]
-    assert len(listings) == 4, "the premise: both orders, then each version alone"
+    assert {tuple(listing["asked"]) for listing in listings} == {
+        tuple(versions),
+        tuple(reversed(versions)),
+        (versions[0],),
+        (versions[1],),
+    }, "the premise: both orders, then each version alone"
     for listing in listings:
         asked = listing["asked"]
         assert await _listed(driver, Ids=",".join(asked), Limit=str(len(asked))) == [
@@ -1016,6 +1021,13 @@ async def test_a_version_group_changes_no_listing_but_one_by_ids(driver: _Driver
         driver.server.add_item(replace(MOVIE, external_id=version), ADDED_AT)
     driver.server.group_versions("v0", "v1")
     assert sorted(await _listed(driver)) == ["v0", "v1"]
+
+
+async def test_a_version_group_lists_by_its_own_order_not_the_ids(driver: _Driver) -> None:
+    for version in ("v0", "v1"):
+        driver.server.add_item(replace(MOVIE, external_id=version), ADDED_AT)
+    driver.server.group_versions("v1", "v0")
+    assert await _listed(driver, Ids="v0,v1", Limit="2") == ["v1"]
 
 
 def _given_next_up(driver: _Driver) -> None:
