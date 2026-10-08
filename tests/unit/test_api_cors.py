@@ -104,6 +104,7 @@ def test_origins_are_normalised() -> None:
         pytest.param("http://-h.example", "http://-h.example", id="hyphen-at-an-edge"),
         pytest.param("http://h.0xzz", "http://h.0xzz", id="ends-in-no-number"),
         pytest.param("http://my_host.example:8123", "http://my_host.example:8123", id="underscore"),
+        pytest.param("http://1.2.3.4_", "http://1.2.3.4_", id="underscore-in-last-label"),
     ],
 )
 def test_an_origin_is_written_as_a_browser_sends_it(value: str, written: str) -> None:
@@ -121,6 +122,7 @@ def test_an_origin_is_written_as_a_browser_sends_it(value: str, written: str) ->
         pytest.param("http://owner@homeassistant.example", id="userinfo"),
         pytest.param("http://homeassistant.example?panel=1", id="query"),
         pytest.param("http://home assistant.example", id="space"),
+        pytest.param("http://bücher.example", id="non-ascii-host"),
         pytest.param("http://h.example:\u0668\u0660", id="arabic-indic-digits"),
         pytest.param("http://h.example:\uff18\uff10\uff18\uff10", id="fullwidth-digits"),
         pytest.param("http://h.example:0", id="port-zero"),
