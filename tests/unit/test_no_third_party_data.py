@@ -349,6 +349,7 @@ def test_no_dataset_row_is_committed_anywhere() -> None:
         "tests/fixtures/emby/push_library_changed.json",
         "tests/fixtures/emby/push_sessions.json",
         "tests/fixtures/emby/view_item.json",
+        "tests/fixtures/emby/ids_version_group.json",
         "tests/fixtures/tmdb/movie.json",
         "tests/fixtures/tmdb/series.json",
         "tests/fixtures/tmdb/season.json",

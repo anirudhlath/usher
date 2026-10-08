@@ -3,7 +3,7 @@
 Read [`../README.md`](../README.md) first: it states the licensing rule, the
 reserved identifier bands, and the guard that enforces them.
 
-**Every value in these eight files is invented**, including the `ProviderIds`,
+**Every value in these nine files is invented**, including the `ProviderIds`,
 which until 2026-08-01 carried real TMDb/IMDb/TVDb ids for four real works.
 That is a licensing constraint, not a style, and a doubled one: a real Emby
 response *embeds TMDb-sourced metadata*, which TMDb's terms forbid
@@ -29,6 +29,7 @@ them would test nothing.
 | `episode_item.json` | an episode carrying **its own** provider ids rather than its series' — the payload fact behind "an episode never walks the match ladder" |
 | `multi_version_movie.json` | three `MediaSources`, the first transcode-only (`Protocol: Http`, `Size: 0`, `SupportsDirectPlay: false`), so `primary_media_source`'s selection rule has something to select |
 | `view_item.json` | one library view from `/Users/{id}/Views`: `CollectionType` says what the library holds, and `boxsets`/`playlists` views are not libraries |
+| `ids_version_group.json` | an `Ids` listing naming two versions of one item, asked both ways round, then each version alone: the request lists one of them, the same one in either order, and each alone lists itself. Only `Id` keys, both invented |
 
 `multi_version_movie.json` has been looked for twice against the live server,
 over disjoint slices totalling 1,400 movies, and has never met a real
@@ -123,6 +124,11 @@ empty, so the `Ids` row comes from a follow-up that took its series from a
 listing: a sign-in and three requests. The one shape kept is
 `view_item.json`, every value in it invented.
 
+The version-group row comes from a third read-only script, which asked the
+same server by `Ids` for pairs of versions an earlier probe had found,
+printed counts and booleans only, and wrote `ids_version_group.json` with
+both ids replaced by invented ones.
+
 | Behaviour | What the server does | What depends on it |
 |---|---|---|
 | `EnableTotalRecordCount=false` | `TotalRecordCount` is still present, as **0**, at the head of the listing and a million items deep | `OffsetWindow` reads the total from a walk's first page only; `FakeEmbyServer` renders 0 |
@@ -137,6 +143,7 @@ listing: a sign-in and three requests. The one shape kept is
 | Concurrent pages at the deployment gate | 1 walker 0.31/s, 2 walkers 0.34/s, 4 walkers 0.37/s | the `USHER_SYNC_WALKERS` default |
 | `/Shows/NextUp` | nothing on the recorded account (`TotalRecordCount` 0), so its paging and its entries' shape are unmeasured | the seed's third source |
 | `Ids=a,b,c` | without `Recursive`, 3 of 3 series asked came back, all of type `Series`; with it, 3 of 3 | the seed's series request |
+| `Ids` naming two versions of one item | **one** of them, the same one whichever order they are named in; asked alone, each is listed | `EmbyAdapter.confirm_gone` asks again, in rounds, for every id a round did not list; `FakeEmbyServer.group_versions`; `ids_version_group.json` |
 
 No source has been seen to cap `Limit`. `FakeEmbyServer.max_limit` exists for
 one that does, and so do two of the conditions on a short page that ends a
