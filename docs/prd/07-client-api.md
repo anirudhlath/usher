@@ -590,8 +590,11 @@ by default ([08](08-operations.md)).
   other playable way says what it `gives_up` against it, naming only the
   shortfalls its copy's facts show; `facts_known: false` marks a way whose
   copy lacks a fact its recipe checks. A way's
-  `id` is stable over screen, player, recipe and copy. `?screen=` takes an
-  area id; one that is not a screen is `422 validation_failed`.
+  `id` is stable over screen, player, recipe and copy. Every screen is listed,
+  in reading order, its `ways` empty when no copy can be ranked, so "nothing
+  plays here" needs no second call. `?screen=` takes an area id and lists that
+  screen alone, ways or none; one that is not a screen is `422
+  validation_failed`.
 - **`/ways` mints no ticket and calls no source**, unlike `/play`.
 - **With players off or HA unreachable**, `/screens` and confirm answer `503
   players_unavailable`, and `/ways` answers `200` with

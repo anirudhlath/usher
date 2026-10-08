@@ -254,6 +254,27 @@ async def test_a_named_screen_answers_alone_and_an_unknown_one_is_422(
     assert _problem(refused, 422, "validation_failed")["detail"] == "no screen has this id"
 
 
+@pytest.mark.parametrize("screen", [None, LIVING_ROOM], ids=["every-screen", "named"])
+async def test_a_title_with_no_way_answers_each_screen_with_no_ways(
+    library: _Library, client: httpx.AsyncClient, screen: str | None
+) -> None:
+    """A series' own row, which names no container, is the copy no screen has a way for."""
+    title = await library.add_title()
+    await library.add_copy("series-folder", title_id=title)
+    [row] = await library.media_items.list_for_title(title)
+    assert (row.available, row.container) == (True, None), "the premise: available, no container"
+    living_room = project(this_house()).screen(LIVING_ROOM)
+    assert [one.area_id for one in project(this_house()).screens] == [LIVING_ROOM], "the premise"
+    assert living_room is not None
+    params = {} if screen is None else {"screen": screen}
+    response = await client.get(f"/titles/{title}/ways", params=params)
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "screens_available": True,
+        "screens": [{"area_id": LIVING_ROOM, "name": living_room.name, "ways": []}],
+    }
+
+
 async def test_players_off_answer_200_with_no_screens(
     app: FastAPI, library: _Library, client: httpx.AsyncClient
 ) -> None:
@@ -278,7 +299,25 @@ def test_ways_on_two_screens_are_grouped_by_screen_in_the_ranking_s_order() -> N
     order = [BEDROOM, LIVING_ROOM]
     assert list(dict.fromkeys(way.screen.area_id for way in ways)) == order  # premise
     assert len(ways) > len(order)  # premise: a screen holds more than one way
-    answered = WaysResponse.of(WaysAnswer(screens_available=True, ways=ways))
+    answered = WaysResponse.of(WaysAnswer(screens_available=True, screens=screens, ways=ways))
     assert [(screen.area_id, [way.id for way in screen.ways]) for screen in answered.screens] == [
         (area_id, [way.id for way in ways if way.screen.area_id == area_id]) for area_id in order
+    ]
+
+
+def test_a_screen_with_no_way_keeps_its_place_among_the_screens() -> None:
+    house = this_house(shield=DeviceRole.USE)
+    placed = tuple(
+        replace(one, area_id=BEDROOM) if one.device_id == SHIELD_DEVICE else one
+        for one in house.devices
+    )
+    screens = project(house.with_registries(devices=placed)).screens
+    assert [screen.area_id for screen in screens] == [BEDROOM, LIVING_ROOM], "the premise"
+    copy = MediaItem(source_id=SOURCE, external_id="film", title_id=uuid.uuid4(), container="mp4")
+    ways = rank(screens[1:], [copy])
+    assert ways, "the premise: the Living Room has ways"
+    answered = WaysResponse.of(WaysAnswer(screens_available=True, screens=screens, ways=ways))
+    assert [(screen.area_id, screen.name, len(screen.ways)) for screen in answered.screens] == [
+        (BEDROOM, screens[0].name, 0),
+        (LIVING_ROOM, screens[1].name, len(ways)),
     ]

@@ -77,19 +77,21 @@ class ScreenWaysResponse(BaseModel):
 
 
 class WaysResponse(BaseModel):
-    """Ways grouped by screen, in the ranking's order, each screen's best first."""
+    """Every screen ranked on, in reading order, each with its ways in the ranking's order.
+
+    A screen's best way comes first. A screen is listed even with no way at
+    all, as for a title with no copy to rank.
+    """
 
     screens_available: bool
     screens: list[ScreenWaysResponse]
 
     @classmethod
     def of(cls, answer: WaysAnswer) -> Self:
-        grouped: dict[str, ScreenWaysResponse] = {}
+        grouped = {
+            screen.area_id: ScreenWaysResponse(area_id=screen.area_id, name=screen.name, ways=[])
+            for screen in answer.screens
+        }
         for way in answer.ways:
-            area_id = way.screen.area_id
-            if area_id not in grouped:
-                grouped[area_id] = ScreenWaysResponse(
-                    area_id=area_id, name=way.screen.name, ways=[]
-                )
-            grouped[area_id].ways.append(WayResponse.of(way))
+            grouped[way.screen.area_id].ways.append(WayResponse.of(way))
         return cls(screens_available=answer.screens_available, screens=list(grouped.values()))

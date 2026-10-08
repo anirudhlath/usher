@@ -2494,7 +2494,10 @@ export interface components {
         };
         /**
          * WaysResponse
-         * @description Ways grouped by screen, in the ranking's order, each screen's best first.
+         * @description Every screen ranked on, in reading order, each with its ways in the ranking's order.
+         *
+         *     A screen's best way comes first. A screen is listed even with no way at
+         *     all, as for a title with no copy to rank.
          */
         WaysResponse: {
             /** Screens Available */

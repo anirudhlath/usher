@@ -92,9 +92,10 @@ async def test_the_ways_are_the_domain_s_ranking_of_every_screen() -> None:
     media_items = await _copies()
     house = _two_screens()
     answer = await WaysService(FakePlayers(house), media_items).for_title(TITLE)
-    expected = rank(project(house).screens, await media_items.list_for_title(TITLE))
+    screens = project(house).screens
+    expected = rank(screens, await media_items.list_for_title(TITLE))
     assert {way.screen.area_id for way in expected} == {BEDROOM, LIVING_ROOM}  # premise
-    assert answer == WaysAnswer(screens_available=True, ways=expected)
+    assert answer == WaysAnswer(screens_available=True, screens=screens, ways=expected)
 
 
 async def test_a_title_s_ways_are_its_own_copies_and_an_episode_s_are_its_own() -> None:
@@ -109,6 +110,19 @@ async def test_a_named_screen_answers_its_ways_alone() -> None:
     answer = await service.for_title(TITLE, screen=BEDROOM)
     assert answer.ways  # premise: the Bedroom has ways at all
     assert {way.screen.area_id for way in answer.ways} == {BEDROOM}
+    assert [screen.area_id for screen in answer.screens] == [BEDROOM]
+
+
+@pytest.mark.parametrize("screen", [None, BEDROOM], ids=["every-screen", "named"])
+async def test_a_title_with_no_copy_answers_every_screen_it_ranked_on(screen: str | None) -> None:
+    house = _two_screens()
+    media_items = await _copies()
+    assert await media_items.list_for_title(SERIES) == [], "the premise: no copy of its own"
+    answer = await WaysService(FakePlayers(house), media_items).for_title(SERIES, screen=screen)
+    every = project(house).screens
+    assert [one.area_id for one in every] == [BEDROOM, LIVING_ROOM], "the premise: two screens"
+    expected = every if screen is None else tuple(one for one in every if one.area_id == screen)
+    assert answer == WaysAnswer(screens_available=True, screens=expected, ways=())
 
 
 @pytest.mark.parametrize("screen", [KITCHEN, "attic"], ids=["area-with-no-player", "no-area"])
@@ -125,5 +139,5 @@ async def test_no_house_answers_no_screens_and_no_ways(
 ) -> None:
     service = WaysService(players, await _copies())
     assert await service.for_title(TITLE, screen=screen) == WaysAnswer(
-        screens_available=False, ways=()
+        screens_available=False, screens=(), ways=()
     )
