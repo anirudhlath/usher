@@ -74,8 +74,13 @@ uv run python scripts/capture_ha_shape.py --listen 30 \
 - **`get_states` outgrows `websockets`' 1 MiB default** in a house with many
   integrations, which closes the socket on every sync. HA's connector sets
   16 MiB.
-- **No connection, no house.** `snapshot()` raises `PortUnavailable` rather
-  than serve a reading that has stopped updating.
+- **No connection, no house.** `snapshot()` and a write raise why the last
+  connection ended (`PortUnavailable` before one has) rather than serve a
+  reading that has stopped updating. A crash keeps no reason: its message is
+  not the port's.
+- **A refused token is not retried.** `auth_invalid` ends the loop until Usher
+  restarts, with one ERROR naming `USHER_HA_TOKEN`: the same token never
+  succeeds, and HA's `login_attempts_threshold` bans an address that keeps trying.
 - **A failed re-read closes the connection**, and the next one syncs from
   scratch. The one warning says Usher closed it, not HA.
 - **A session stops for one reason, the first.** A command still in `send`

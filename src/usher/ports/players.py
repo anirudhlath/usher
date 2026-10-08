@@ -11,14 +11,19 @@ class Players(ABC):
 
     The registry owns every area, device and player. An implementation writes
     only a player's role and a device's area, so the house never has two
-    owners. Writes raise `PortUnavailable` with no connection, `PortAuthFailed`
-    when the registry refuses the credential, and `PortDataMalformed` for any
-    other refusal.
+    owners. With no connection a write raises as `snapshot` does; a write the
+    registry refuses raises `PortAuthFailed` for the credential and
+    `PortDataMalformed` for any other refusal.
     """
 
     @abstractmethod
     def snapshot(self) -> HouseSnapshot:
-        """The latest reading. `PortUnavailable` until the first one is complete."""
+        """The latest reading, or why there is none.
+
+        With none current, the error that ended the last connection, such as
+        `PortAuthFailed` for a refused credential, or `PortUnavailable` before
+        any connection has ended.
+        """
 
     @abstractmethod
     async def set_role(self, entity_id: str, role: DeviceRole) -> None:

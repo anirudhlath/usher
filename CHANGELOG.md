@@ -45,7 +45,9 @@ Versioning is `0.x` while the wire contract may still move —
   `usher` or `usher_ignore` in HA, creating the two labels (`Usher` and
   `Usher ignore`) when HA lacks them, and places one in use that is in no area.
   `GET /titles/{id}/ways` and `GET /episodes/{id}/ways` rank every way the
-  copies could play on each screen. Nothing is sent to a screen yet.
+  copies could play on each screen. Nothing is sent to a screen yet. A token
+  HA refuses is not retried until Usher restarts, and one ERROR line names
+  `USHER_HA_TOKEN`.
 - A problem code, `players_unavailable` (503): players are off, or Home
   Assistant cannot be read or written now.
 - `USHER_CORS_ORIGINS` lets browser pages from the listed origins call Usher.

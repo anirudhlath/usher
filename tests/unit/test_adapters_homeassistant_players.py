@@ -468,7 +468,7 @@ async def test_a_dropped_connection_clears_the_house_until_the_next_sync() -> No
         await _until(lambda: adapter.syncs == 1)
         connector.latest.drop()
         await _until(lambda: len(delays) == 1)
-        with pytest.raises(PortUnavailable):
+        with pytest.raises(PortUnavailable, match=r"^connection closed by peer$"):
             adapter.snapshot()
         resume.set()
         await _until(lambda: adapter.syncs == 2)
@@ -507,22 +507,76 @@ async def test_backoff_doubles_until_a_connection_syncs_then_starts_again(
         await adapter.aclose()
 
 
-async def test_a_refused_token_backs_off_and_is_never_logged() -> None:
+_TOKEN_REFUSED = (
+    "ERROR|players: Home Assistant refused the token; check USHER_HA_TOKEN, then restart "
+    "Usher, which does not connect again until then"
+)
+
+
+async def test_a_refused_token_stops_the_loop_and_names_the_setting_never_the_token() -> None:
     server = FakeHomeAssistant(token=SecretStr("the-token-home-assistant-holds"))
     connector = FakeHomeAssistantConnector(server)
+    delays: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        delays.append(seconds)
+        await asyncio.sleep(0)
+
     lines: list[str] = []
-    handler = logger.add(lines.append, level="DEBUG", format="{message}")
-    adapter = _adapter(connector, sleep=lambda seconds: asyncio.sleep(0))
+    handler = logger.add(lines.append, level="DEBUG", format="{level}|{message}")
+    adapter = _adapter(connector, sleep=sleep)
     await adapter.start()
     try:
-        await _until(lambda: len(connector.urls) >= 3)
+        await _until(lambda: any("USHER_HA_TOKEN" in line for line in lines))
+        await _settle()
+        assert (connector.urls, delays) == ([URL], []), "the refused token was tried again"
+        refused = "^Home Assistant refused the token$"
+        with pytest.raises(PortAuthFailed, match=refused) as first:
+            adapter.snapshot()
+        with pytest.raises(PortAuthFailed, match=refused) as second:
+            await adapter.set_role(SHIELD, DeviceRole.USE)
+        assert first.value is not second.value, "each read raises an error of its own"
     finally:
         await adapter.aclose()
         logger.remove(handler)
-    assert [line for line in lines if "refused the token" in line], lines
+    assert [line.rstrip("\n") for line in lines if line.startswith("ERROR|")] == [_TOKEN_REFUSED]
     assert [line for line in lines if TOKEN.get_secret_value() in line] == []
-    with pytest.raises(PortUnavailable):
-        adapter.snapshot()
+
+
+async def test_with_no_house_a_read_and_a_write_say_why_the_last_connection_ended() -> None:
+    """A crash keeps no reason, since its message is not the port's."""
+    connector = FakeHomeAssistantConnector(FakeHomeAssistant())
+    connector.fail_next("connection refused")
+    connector.fail_next(RuntimeError("a defect in Usher"))
+    resume = asyncio.Event()
+    delays: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        delays.append(seconds)
+        await resume.wait()
+
+    def release() -> None:
+        resume.set()
+        resume.clear()
+
+    adapter = _adapter(connector, sleep=sleep)
+    await adapter.start()
+    try:
+        await _until(lambda: len(delays) == 1)
+        with pytest.raises(PortUnavailable, match=r"^connection refused$"):
+            adapter.snapshot()
+        with pytest.raises(PortUnavailable, match=r"^connection refused$"):
+            await adapter.set_role(SHIELD, DeviceRole.USE)
+        release()
+        await _until(lambda: len(delays) == 2)
+        assert len(connector.urls) == 2, "the premise: the second attempt crashed"
+        with pytest.raises(PortUnavailable, match=r"^Home Assistant is not answering$"):
+            adapter.snapshot()
+        release()
+        await _until(lambda: adapter.syncs == 1)
+        assert adapter.snapshot() == this_house()
+    finally:
+        await adapter.aclose()
 
 
 async def test_a_failed_re_read_drops_the_connection_and_the_next_sync_brings_the_change() -> None:
@@ -544,7 +598,8 @@ async def test_a_failed_re_read_drops_the_connection_and_the_next_sync_brings_th
         await _until(lambda: len(delays) == 1)
         assert len(_commands(server, "config/area_registry/list")) == 2, "the premise"
         assert connector.latest.closed, "the failed re-read closed its connection"
-        with pytest.raises(PortUnavailable):
+        unanswered = r"^Home Assistant did not answer config/area_registry/list within 0\.05s$"
+        with pytest.raises(PortUnavailable, match=unanswered):
             adapter.snapshot()
         server.unanswered.clear()
         resume.set()

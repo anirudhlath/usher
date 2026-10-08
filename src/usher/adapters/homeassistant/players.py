@@ -4,6 +4,7 @@ One socket held open and no rate gate, because a socket is not a request; reconn
 """
 
 import asyncio
+import copy
 import random
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
@@ -27,7 +28,7 @@ from usher.adapters.homeassistant.mapping import (
 from usher.adapters.homeassistant.session import Event, HomeAssistantSession
 from usher.adapters.websocket import WebSocketConnection, WebSocketConnector, connect_websocket
 from usher.domain.house import DeviceRole, HouseSnapshot
-from usher.ports.errors import PortDataMalformed, PortUnavailable, UsherPortError
+from usher.ports.errors import PortAuthFailed, PortDataMalformed, PortUnavailable, UsherPortError
 from usher.ports.players import Players
 
 WEBSOCKET_PATH: Final = "/api/websocket"
@@ -66,7 +67,9 @@ class HomeAssistantPlayers(Players):
     the first registry list starts one more registry read. After the sync,
     state changes apply as they come and registry changes coalesce into at most
     one pending re-read; a re-read that fails drops the connection, so the next
-    one syncs from scratch. With no connection there is no house.
+    one syncs from scratch. With no connection there is no house, and why the
+    last one ended is the error a read or a write raises. A refused token is
+    not retried until Usher restarts.
     """
 
     def __init__(
@@ -96,6 +99,7 @@ class HomeAssistantPlayers(Players):
         self._resync: asyncio.Task[None] | None = None
         self._resync_again = False
         self._closed_here = False
+        self._failure: UsherPortError | None = None
         self._labels_lock = asyncio.Lock()
         self._task: asyncio.Task[None] | None = None
         self.syncs = 0
@@ -118,7 +122,7 @@ class HomeAssistantPlayers(Players):
 
     def snapshot(self) -> HouseSnapshot:
         if self._house is None:
-            raise PortUnavailable(_NOT_ANSWERING)
+            raise self._no_house()
         return self._house
 
     async def set_role(self, entity_id: str, role: DeviceRole) -> None:
@@ -161,9 +165,19 @@ class HomeAssistantPlayers(Players):
             synced = self.syncs
             try:
                 await self._connection_once()
+            except PortAuthFailed as exc:
+                self._failure = exc
+                logger.error(
+                    "players: {}; check USHER_HA_TOKEN, then restart Usher, "
+                    "which does not connect again until then",
+                    exc,
+                )
+                return
             except UsherPortError as exc:
+                self._failure = exc
                 logger.warning("players: the Home Assistant connection ended: {}", exc)
             except Exception:
+                self._failure = None
                 logger.exception("players: the Home Assistant connection crashed")
             failures = 0 if self.syncs > synced else failures + 1
             await self._sleep(self._delay(failures))
@@ -281,6 +295,7 @@ class HomeAssistantPlayers(Players):
                 "closing the connection to sync again: {}",
                 exc,
             )
+            self._failure = exc
             self._closed_here = True
             await session.aclose()
 
@@ -297,8 +312,17 @@ class HomeAssistantPlayers(Players):
 
     def _live(self) -> HomeAssistantSession:
         if self._session is None or self._house is None:
-            raise PortUnavailable(_NOT_ANSWERING)
+            raise self._no_house()
         return self._session
+
+    def _no_house(self) -> UsherPortError:
+        """Why the last connection ended, in the port's own words, or that none has answered.
+
+        A copy, so the kept error gathers no traceback; a crash keeps nothing,
+        since its message is not the port's and may carry a value.
+        """
+        failure = self._failure
+        return PortUnavailable(_NOT_ANSWERING) if failure is None else copy.copy(failure)
 
     async def _ensure_labels(self, session: HomeAssistantSession) -> None:
         """Create whichever of Usher's labels HA lacks, refusing one HA files under another id."""
