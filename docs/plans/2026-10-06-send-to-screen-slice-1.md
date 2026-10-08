@@ -7651,7 +7651,7 @@ Six settings arrive here, each with its reader, because `test_every_setting_is_r
 - Modify: `src/usher/config.py` (six fields, the blank-to-none list, one validator)
 - Modify: `src/usher/composition.py` (`house_players`)
 - Modify: `src/usher/api/app.py` (the lifespan), `src/usher/api/deps.py` (`get_players`, `PlayersDep`)
-- Modify: `.env.example`, `web/src/features/operator/Config.settings.ts`
+- Modify: `.env.example`, `web/src/features/operator/Config.settings.ts`, `web/src/features/operator/Config.test.tsx` (`SECRET_KEYS` grows to six)
 - Modify: `docs/prd/08-operations.md` (Configuration, Secrets), `docs/prd/01-architecture.md` (the `Players` row), `CLAUDE.md` (the `SecretStr` list)
 - Test: `tests/unit/test_config_players.py`, `tests/unit/test_composition_players.py`
 
@@ -7747,22 +7747,33 @@ def test_a_blank_home_assistant_setting_is_unset(
 ```python
 """`house_players`: nothing while off; built, started and closed while on; never a gate."""
 
+import asyncio
+import os
 import socket
+import urllib.request
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Final
 
 import pytest
 from asgi_lifespan import LifespanManager
 from httpx import ASGITransport, AsyncClient
+from loguru import logger
 from starlette.requests import Request
 
 from tests.fakes.home_assistant import TOKEN, FakeHomeAssistant, FakeHomeAssistantConnector
 from tests.fakes.house import this_house
+from usher.adapters.homeassistant.players import HomeAssistantPlayers
 from usher.api.app import create_app
 from usher.api.deps import get_players
 from usher.composition import house_players, nothing
 from usher.config import Settings
 from usher.ports.errors import PortUnavailable
+
+# The adapter's WARNING when a connection attempt fails, and the whole line for a
+# refused dial: the prefix, then the transport's own `PortUnavailable`, which is a
+# fixed label and the exception's class name. No text in it is the OS's.
+_ENDED: Final = "players: the Home Assistant connection ended: "
+_REFUSED: Final = f"{_ENDED}Home Assistant websocket could not be opened: ConnectionRefusedError"
 
 
 def _settings(**fields: Any) -> Settings:
@@ -7805,26 +7816,63 @@ async def test_on_builds_starts_and_closes_one_adapter() -> None:
     assert connector.latest.closed
 
 
+async def test_each_bound_reaches_the_adapter_in_its_own_place() -> None:
+    settings = _settings(
+        players_enabled=True,
+        ha_url="http://192.0.2.1:8123",
+        ha_token=TOKEN.get_secret_value(),
+        players_command_timeout_seconds=3.5,
+        players_backoff_seconds=7.0,
+        players_max_backoff_seconds=70.0,
+    )
+    connector = FakeHomeAssistantConnector(FakeHomeAssistant())
+    players, close = await house_players(settings, connect=connector)
+    try:
+        assert isinstance(players, HomeAssistantPlayers)
+        built = (players._command_timeout, players._backoff, players._max_backoff)
+        assert built == (3.5, 7.0, 70.0)
+    finally:
+        await close()
+
+
 async def test_the_app_parks_players_as_none_while_off() -> None:
     app = create_app(_settings())
     async with LifespanManager(app):
         assert app.state.players is None
 
 
-async def test_an_unreachable_home_assistant_never_stops_the_app_serving() -> None:
+async def test_an_unreachable_home_assistant_never_stops_the_app_serving(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Loopback and refused: the one real dial a unit test may make."""
+    # websockets takes its proxy from `urllib.request.getproxies()`, which reads every
+    # variable named `<scheme>_proxy` in any case. A proxy would answer the dial
+    # instead of the refused port, so every such variable goes.
+    for name in [name for name in os.environ if name.lower().endswith("_proxy")]:
+        monkeypatch.delenv(name, raising=False)
+    assert urllib.request.getproxies() == {}
     settings = _settings(
         players_enabled=True,
         ha_url=f"http://127.0.0.1:{_free_port()}",
         ha_token=TOKEN.get_secret_value(),
     )
     app = create_app(settings)
-    async with LifespanManager(app) as manager:
-        transport = ASGITransport(app=manager.app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            assert (await client.get("/health")).status_code == 200
-        with pytest.raises(PortUnavailable):
-            app.state.players.snapshot()
+    # After `create_app`, whose telemetry setup removes every loguru handler.
+    lines: list[str] = []
+    handler = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        async with LifespanManager(app) as manager:
+            async with asyncio.timeout(5.0):
+                while not any(line.startswith(_ENDED) for line in lines):
+                    await asyncio.sleep(0.01)
+            assert {line.rstrip("\n") for line in lines if line.startswith(_ENDED)} == {_REFUSED}
+            transport = ASGITransport(app=manager.app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                assert (await client.get("/health")).status_code == 200
+            with pytest.raises(PortUnavailable):
+                app.state.players.snapshot()
+    finally:
+        logger.remove(handler)
 
 
 def test_the_dependency_refuses_an_app_whose_lifespan_never_ran() -> None:
@@ -7921,7 +7969,7 @@ In `src/usher/api/app.py`, import `house_players` from `usher.composition`. Dire
         app.state.players = players
 ```
 
-In the `finally`, add `await close_players()` directly before `await close_provider()`.
+In the comment directly below it, which lists the steps that leak whatever was already built, change "`llm_client` or `lanes.start()`" to "`llm_client`, `lanes.start()` or `house_players`". In the `finally`, add `await close_players()` directly before `await close_provider()`.
 
 In `src/usher/api/deps.py`, add the following directly after the `PlaybackServiceDep` alias. Import `Players` from `usher.ports.players`, and add `Final` to the `typing` import.
 
@@ -7969,7 +8017,7 @@ USHER_PLAYERS_BACKOFF_SECONDS=5.0
 USHER_PLAYERS_MAX_BACKOFF_SECONDS=300.0
 ```
 
-In `web/src/features/operator/Config.settings.ts`, change the module docstring's "the five `SecretStr` settings" to "the six". Then append a banner and six rows to `CONFIG`, before its closing `]`:
+In `web/src/features/operator/Config.test.tsx`, add `'USHER_HA_TOKEN'` to `SECRET_KEYS`. In `web/src/features/operator/Config.settings.ts`, change the module docstring's "the five `SecretStr` settings" to "the six". Then append a banner and six rows to `CONFIG`, before its closing `]`:
 
 ```ts
   /* -------------------------------------------------------------- players */
@@ -8072,7 +8120,8 @@ Each plant follows the cycle in "How to work this plan":
 
 ```bash
 git add src/usher/config.py src/usher/composition.py src/usher/api/app.py src/usher/api/deps.py \
-  .env.example web/src/features/operator/Config.settings.ts docs/prd/08-operations.md \
+  .env.example web/src/features/operator/Config.settings.ts web/src/features/operator/Config.test.tsx \
+  docs/prd/08-operations.md \
   docs/prd/01-architecture.md CLAUDE.md tests/unit/test_config_players.py \
   tests/unit/test_composition_players.py
 git commit -m "players: settings, composition and the lifespan, off by default"
