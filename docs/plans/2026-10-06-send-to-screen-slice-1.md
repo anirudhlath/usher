@@ -4757,6 +4757,7 @@ git commit -m "homeassistant: read HA's registry and state rows, a bad row dropp
 """The session: auth, numbered commands, one reader, and refusals that never echo HA's text."""
 
 import asyncio
+import gc
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager, suppress
 from typing import Any
@@ -5120,6 +5121,8 @@ async def test_a_command_after_aclose_is_refused_naming_the_close_once_the_reade
     server = FakeHomeAssistant()
     pumps: list[asyncio.Task[None]] = []
     async with _session(server, pumps=pumps) as session:
+        await session.command("config/area_registry/list")
+        assert not pumps[0].done(), "the premise: the reader is reading when the close comes"
         await session.aclose()
         async with asyncio.timeout(1.0):
             with pytest.raises(PortUnavailable, match="the fake connection is closed"):
@@ -5127,6 +5130,155 @@ async def test_a_command_after_aclose_is_refused_naming_the_close_once_the_reade
         with pytest.raises(PortUnavailable) as refused:
             await session.command("get_states")
     assert str(refused.value) == "the session was closed before get_states was sent"
+
+
+async def test_a_handler_that_raised_is_still_the_reason_after_aclose() -> None:
+    server = FakeHomeAssistant()
+    session = await HomeAssistantSession.open(
+        FakeHomeAssistantConnector(server), URL, TOKEN, command_timeout=1.0
+    )
+
+    def explode(_event: Event) -> None:
+        raise ValueError("the handler's own failure")
+
+    pump = asyncio.create_task(session.pump(explode))
+    await session.command("subscribe_events", event_type="state_changed")
+    server.change_state(HouseState(entity_id=APPLE_TV, state="paused"))
+    async with asyncio.timeout(1.0):
+        with pytest.raises(ValueError, match="the handler's own failure"):
+            await pump
+    await session.aclose()
+    with pytest.raises(PortUnavailable) as refused:
+        await session.command("get_states")
+    assert str(refused.value) == "the event handler raised before get_states was sent"
+
+
+async def test_a_dropped_socket_is_still_the_reason_after_aclose() -> None:
+    server = FakeHomeAssistant()
+    pumps: list[asyncio.Task[None]] = []
+    async with _session(server, pumps=pumps) as session:
+        server.connections[0].drop()
+        async with asyncio.timeout(1.0):
+            with pytest.raises(PortUnavailable, match="connection closed by peer"):
+                await pumps[0]
+        await session.aclose()
+        with pytest.raises(PortUnavailable) as refused:
+            await session.command("get_states")
+    assert str(refused.value) == "the Home Assistant websocket closed before get_states"
+
+
+async def test_a_stopped_session_refuses_a_new_reader_before_reading() -> None:
+    """Driven by hand: a reader that ran would park on `recv` instead of raising at once."""
+    server = FakeHomeAssistant()
+    pumps: list[asyncio.Task[None]] = []
+    async with _session(server, pumps=pumps) as session:
+        server.connections[0].drop()
+        async with asyncio.timeout(1.0):
+            with pytest.raises(PortUnavailable):
+                await pumps[0]
+        reading = session.pump(lambda _event: None)
+        try:
+            with pytest.raises(PortUnavailable) as refused:
+                reading.send(None)
+        finally:
+            reading.close()
+    assert str(refused.value) == (
+        "the Home Assistant websocket closed; this session cannot be read again"
+    )
+
+
+async def test_a_command_failed_in_send_leaves_no_exception_for_asyncio_to_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reader fails the command's future while the command still waits in `send`."""
+    loop = asyncio.get_running_loop()
+    reported: list[str] = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: reported.append(str(context["message"])))
+    server = FakeHomeAssistant()
+    pumps: list[asyncio.Task[None]] = []
+    try:
+        async with _session(server, pumps=pumps) as session:
+            connection = server.connections[0]
+            sending, release = asyncio.Event(), asyncio.Event()
+            send = connection.send
+
+            async def held(message: str) -> None:
+                sending.set()
+                await release.wait()
+                await send(message)
+
+            monkeypatch.setattr(connection, "send", held)
+            waiting = asyncio.create_task(session.command("get_states"))
+            await asyncio.wait_for(sending.wait(), 1.0)
+            connection.drop()
+            async with asyncio.timeout(1.0):
+                with pytest.raises(PortUnavailable):
+                    await pumps[0]
+            assert not waiting.done(), "the premise: the reader ended while it was in send"
+            release.set()
+            await asyncio.wait([waiting], timeout=1.0)
+            failure = waiting.exception()
+            message = str(failure)
+            del failure, waiting
+        gc.collect()
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(previous)
+    assert message == "connection closed by peer", "the premise: the send itself failed"
+    assert reported == []
+
+
+async def test_a_command_still_in_send_when_the_handler_raises_fails_at_once_once_sent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The socket stays open, so the send succeeds and only the ended reader can fail it."""
+    timeout = 10.0
+    server = FakeHomeAssistant()
+    server.unanswered.add("get_states")
+    session = await HomeAssistantSession.open(
+        FakeHomeAssistantConnector(server), URL, TOKEN, command_timeout=timeout
+    )
+
+    def explode(_event: Event) -> None:
+        raise ValueError("the handler's own failure")
+
+    tasks: list[asyncio.Task[Any]] = [asyncio.create_task(session.pump(explode))]
+    try:
+        await session.command("subscribe_events", event_type="state_changed")
+        connection = server.connections[0]
+        sending, release = asyncio.Event(), asyncio.Event()
+        send = connection.send
+
+        async def held(message: str) -> None:
+            sending.set()
+            await release.wait()
+            await send(message)
+
+        monkeypatch.setattr(connection, "send", held)
+        waiting = asyncio.create_task(session.command("get_states"))
+        tasks.append(waiting)
+        await asyncio.wait_for(sending.wait(), 1.0)
+        server.change_state(HouseState(entity_id=APPLE_TV, state="paused"))
+        async with asyncio.timeout(1.0):
+            with pytest.raises(ValueError, match="the handler's own failure"):
+                await tasks[0]
+        assert not waiting.done(), "the premise: the reader ended while it was in send"
+        release.set()
+        await asyncio.wait([waiting], timeout=timeout / 10)
+        assert [command["type"] for command in server.commands] == [
+            "subscribe_events",
+            "get_states",
+        ], "the premise: the send itself succeeded"
+        assert waiting.done(), "the command waited on for its timeout after the reader ended"
+        failure = waiting.exception()
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await session.aclose()
+    assert isinstance(failure, PortUnavailable)
+    assert str(failure) == "the event handler raised before get_states was answered"
 
 
 async def test_fields_cannot_replace_a_commands_id_or_type() -> None:
@@ -5269,17 +5421,23 @@ class FakeHomeAssistantConnection(WebSocketConnection):
         self._frames: asyncio.Queue[str | None] = asyncio.Queue()
         self._reason: str | None = None
         self._gone = False
+        self._unread = 0
         self.authenticated = False
         self.subscriptions: dict[str, int] = {}
         self.sent: list[dict[str, Any]] = []
         self.delivered: list[dict[str, Any]] = []
+        #: How many frames `recv` could still return, at each `send` that failed. A frame
+        #: queued behind the drop or close marker is never returned, so it is not counted.
+        self.unread_at_failed_sends: list[int] = []
         self.closed = False
 
     def deliver(self, frame: dict[str, Any]) -> None:
         self.delivered.append(frame)
-        self._frames.put_nowait(json.dumps(frame))
+        self.deliver_text(json.dumps(frame))
 
     def deliver_text(self, text: str) -> None:
+        if self._reason is None:
+            self._unread += 1
         self._frames.put_nowait(text)
 
     def drop(self, reason: str = "connection closed by peer") -> None:
@@ -5290,6 +5448,7 @@ class FakeHomeAssistantConnection(WebSocketConnection):
     async def send(self, message: str) -> None:
         await asyncio.sleep(0)
         if self._reason is not None or self.closed:
+            self.unread_at_failed_sends.append(self._unread)
             raise PortUnavailable(self._reason or "the fake connection is closed")
         frame = json.loads(message)
         self.sent.append(frame)
@@ -5303,6 +5462,7 @@ class FakeHomeAssistantConnection(WebSocketConnection):
         if text is None:
             self._gone = True
             raise PortUnavailable(self._reason or "the fake connection is closed")
+        self._unread -= 1
         return text
 
     async def aclose(self) -> None:
@@ -5352,7 +5512,7 @@ class FakeHomeAssistant:
             "type": "auth_required",
             "ha_version": HA_VERSION,
         }
-        self.after_answer: dict[str, list[Callable[[], None]]] = {}
+        self.after_answer: dict[str, list[Callable[[], object]]] = {}
         self.label_ids: dict[str, str] = {}
         self.connections: list[FakeHomeAssistantConnection] = []
 
@@ -5561,26 +5721,31 @@ _CODE: Final = re.compile(r"[a-z0-9_]{1,64}")
 
 @dataclass(frozen=True, slots=True)
 class _Stop:
-    """Why the session stopped, as told to a waiting command and to one sent after."""
+    """Why the session stopped, as told to a waiting command, one sent after, and a reader."""
 
+    cause: str
     waiting: str
     refused: str
 
 
 #: Only a failed socket is blamed on Home Assistant.
 _HA_CLOSED: Final = _Stop(
+    "the Home Assistant websocket closed",
     "Home Assistant closed before answering {kind}",
     "the Home Assistant websocket closed before {kind}",
 )
 _HANDLER_RAISED: Final = _Stop(
+    "the event handler raised",
     "the event handler raised before {kind} was answered",
     "the event handler raised before {kind} was sent",
 )
 _STOPPED_READING: Final = _Stop(
+    "the session stopped reading",
     "the session stopped reading before {kind} was answered",
     "the session stopped reading before {kind} was sent",
 )
 _CLOSED_HERE: Final = _Stop(
+    "the session was closed",
     "the session was closed before {kind} was answered",
     "the session was closed before {kind} was sent",
 )
@@ -5632,6 +5797,15 @@ class HomeAssistantSession:
         self._pumping = False
         self.skipped = 0
 
+    @property
+    def stopped(self) -> bool:
+        """Whether the reader ended, the session was closed or a send failed; nothing is sent after.
+
+        A failed send counts at once, while the reader may still be draining frames
+        queued before the socket went.
+        """
+        return self._stop is not None
+
     @classmethod
     async def open(
         cls, connect: WebSocketConnector, url: str, token: SecretStr, *, command_timeout: float
@@ -5668,7 +5842,7 @@ class HomeAssistantSession:
         answered: asyncio.Future[Answer] = asyncio.get_running_loop().create_future()
         self._pending[ident] = (kind, answered)
         try:
-            await self._socket.send(json.dumps({**fields, "id": ident, "type": kind}))
+            await self._send({**fields, "id": ident, "type": kind})
             async with asyncio.timeout(self._command_timeout):
                 return await answered
         except TimeoutError:
@@ -5677,6 +5851,10 @@ class HomeAssistantSession:
             ) from None
         finally:
             self._pending.pop(ident, None)
+            # A command that failed in `send` never awaited `answered`, which the reader
+            # may already have failed; retrieved here, or asyncio reports it when collected.
+            if answered.done() and not answered.cancelled():
+                answered.exception()
 
     async def pump(self, on_event: Callable[[Event], None]) -> None:
         """Read every frame until the socket fails, numbering each in arrival order.
@@ -5687,9 +5865,13 @@ class HomeAssistantSession:
         On exit every command still waiting fails at once with `PortUnavailable`,
         rather than at its timeout, and the message blames Home Assistant only
         when the socket failed: not for a raising `on_event` or a cancelled reader.
+        A session that has stopped refuses a new reader with `PortUnavailable`
+        naming why, before reading anything.
         """
         if self._pumping:
             raise RuntimeError("this Home Assistant session already has a reader")
+        if self._stop is not None:
+            raise PortUnavailable(f"{self._stop.cause}; this session cannot be read again")
         self._pumping = True
         why = _STOPPED_READING
         try:
@@ -5719,16 +5901,29 @@ class HomeAssistantSession:
             self._pumping = False
             self._fail_pending(why)
 
+    async def _send(self, frame: Mapping[str, object]) -> None:
+        """Send one frame; a send that fails means the socket is gone, so the session stops."""
+        try:
+            await self._socket.send(json.dumps(frame))
+        except PortUnavailable:
+            self._record(_HA_CLOSED)
+            raise
+
+    def _record(self, why: _Stop) -> _Stop:
+        """Keep the first reason the session stopped for, and answer the one that stands."""
+        if self._stop is None:
+            self._stop = why
+        return self._stop
+
     def _fail_pending(self, why: _Stop) -> None:
         """Refuse every later command and fail each waiting one at once; the first `why` stands.
 
         After `aclose` the reader's socket fails too, and that is not Home Assistant's doing.
         """
-        if self._stop is None:
-            self._stop = why
+        stop = self._record(why)
         for kind, answered in self._pending.values():
             if not answered.done():
-                answered.set_exception(PortUnavailable(self._stop.waiting.format(kind=kind)))
+                answered.set_exception(PortUnavailable(stop.waiting.format(kind=kind)))
 
     def _event(self, frame: Mapping[str, object]) -> Event | None:
         event = frame.get("event")
@@ -6271,6 +6466,8 @@ After the sync, state changes apply as they arrive, and registry changes coalesc
 import asyncio
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 
 import pytest
 import pytest_asyncio
@@ -6340,6 +6537,11 @@ async def _until(condition: Callable[[], bool], *, within: float = 1.0) -> None:
     async with asyncio.timeout(within):
         while not condition():
             await asyncio.sleep(0)
+
+
+async def _settle() -> None:
+    for _ in range(50):
+        await asyncio.sleep(0)
 
 
 async def _started(
@@ -6466,9 +6668,12 @@ async def test_a_sync_reads_the_house_and_nothing_from_another_domain() -> None:
     assert any(row["entity_id"] == SENSOR for row in server.entities), "the premise"
     adapter, connector = await _started(server)
     try:
+        await _settle()
         assert adapter.snapshot() == this_house()
         assert connector.urls == [URL]
         assert adapter.dropped == 0
+        assert adapter.resyncs == 0, "a clean sync started a re-read"
+        assert len(_commands(server, "config/area_registry/list")) == 1
     finally:
         await adapter.aclose()
 
@@ -6553,8 +6758,7 @@ async def test_registry_events_during_a_resync_cause_exactly_one_more_pass() -> 
         ]
         server.rename_area(LIVING_ROOM, "Lounge")
         await _until(lambda: adapter.resyncs >= 2)
-        for _ in range(50):
-            await asyncio.sleep(0)
+        await _settle()
         assert adapter.resyncs == 2
         assert len(_commands(server, "config/area_registry/list")) == 3
         house = adapter.snapshot()
@@ -6573,8 +6777,7 @@ async def test_a_burst_of_registry_events_is_read_at_most_twice() -> None:
         for name in names:
             server.rename_area(LIVING_ROOM, name)
         await _until(lambda: _area_name(adapter.snapshot(), LIVING_ROOM) == names[-1])
-        for _ in range(50):
-            await asyncio.sleep(0)
+        await _settle()
         assert 1 <= adapter.resyncs <= 2
         assert len(_commands(server, "config/area_registry/list")) == 1 + adapter.resyncs
     finally:
@@ -6637,10 +6840,25 @@ async def test_a_label_created_under_another_id_is_refused_before_anything_is_wr
 async def test_two_confirms_at_once_create_each_label_once() -> None:
     server = FakeHomeAssistant(this_house(apple_tv=None), labels={})
     adapter, _ = await _started(server)
+    started: list[str] = []
+    finished: list[str] = []
+    seen: list[tuple[list[str], list[str]]] = []
+    server.after_answer["config/label_registry/create"] = [
+        lambda: seen.append((list(started), list(finished)))
+    ]
+
+    async def confirm(entity_id: str, role: DeviceRole) -> None:
+        started.append(entity_id)
+        await adapter.set_role(entity_id, role)
+        finished.append(entity_id)
+
     try:
         await asyncio.gather(
-            adapter.set_role(SHIELD, DeviceRole.USE),
-            adapter.set_role(APPLE_TV, DeviceRole.IGNORE),
+            confirm(SHIELD, DeviceRole.USE),
+            confirm(APPLE_TV, DeviceRole.IGNORE),
+        )
+        assert seen[0] == ([SHIELD, APPLE_TV], []), (
+            "the premise: the second confirm began before the first create was answered"
         )
         assert len(_commands(server, "config/label_registry/create")) == 2
         assert len(_commands(server, "config/entity_registry/update")) == 2
@@ -6672,6 +6890,26 @@ async def test_with_no_connection_there_is_no_house_and_no_write() -> None:
         adapter.snapshot()
     with pytest.raises(PortUnavailable, match="not answering"):
         await adapter.set_role(SHIELD, DeviceRole.USE)
+
+
+async def test_a_connection_still_syncing_has_no_house_and_takes_no_write() -> None:
+    server = FakeHomeAssistant()
+    server.unanswered.add("get_states")
+    adapter = _adapter(FakeHomeAssistantConnector(server))
+    await adapter.start()
+    try:
+        await _until(lambda: bool(_commands(server, "get_states")))
+        with pytest.raises(PortUnavailable, match="not answering"):
+            await adapter.set_role(SHIELD, DeviceRole.USE)
+        written = {
+            "config/label_registry/list",
+            "config/label_registry/create",
+            "config/entity_registry/get",
+            "config/entity_registry/update",
+        }
+        assert [command for command in server.commands if command["type"] in written] == []
+    finally:
+        await adapter.aclose()
 
 
 # -- losing the connection --------------------------------------------------
@@ -6750,11 +6988,183 @@ async def test_a_refused_token_backs_off_and_is_never_logged() -> None:
         adapter.snapshot()
 
 
+async def test_a_failed_re_read_drops_the_connection_and_the_next_sync_brings_the_change() -> None:
+    server = FakeHomeAssistant()
+    connector = FakeHomeAssistantConnector(server)
+    resume = asyncio.Event()
+    delays: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        delays.append(seconds)
+        await resume.wait()
+
+    adapter = _adapter(connector, sleep=sleep, timeout=0.05)
+    await adapter.start()
+    try:
+        await _until(lambda: adapter.syncs == 1)
+        server.unanswered.add("config/area_registry/list")
+        server.rename_area(LIVING_ROOM, "Lounge")
+        await _until(lambda: len(delays) == 1)
+        assert len(_commands(server, "config/area_registry/list")) == 2, "the premise"
+        assert connector.latest.closed, "the failed re-read closed its connection"
+        with pytest.raises(PortUnavailable):
+            adapter.snapshot()
+        server.unanswered.clear()
+        resume.set()
+        await _until(lambda: adapter.syncs == 2)
+        assert _area_name(adapter.snapshot(), LIVING_ROOM) == "Lounge"
+        assert connector.urls == [URL, URL]
+    finally:
+        await adapter.aclose()
+
+
+@dataclass
+class _Watched:
+    adapter: HomeAssistantPlayers
+    connector: FakeHomeAssistantConnector
+    delays: list[float]
+    resume: asyncio.Event
+    lines: list[str]
+
+    def release(self) -> None:
+        """Let the backoff waiting now return; the next one waits again."""
+        self.resume.set()
+        self.resume.clear()
+
+    def warnings(self) -> list[str]:
+        return [line.rstrip("\n") for line in self.lines]
+
+
+@asynccontextmanager
+async def _watched(server: FakeHomeAssistant) -> AsyncIterator[_Watched]:
+    """A synced adapter whose backoffs wait for `release`, with every WARNING it logs."""
+    connector = FakeHomeAssistantConnector(server)
+    resume = asyncio.Event()
+    delays: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        delays.append(seconds)
+        await resume.wait()
+
+    adapter = _adapter(connector, sleep=sleep, timeout=0.05)
+    lines: list[str] = []
+    handler = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        await adapter.start()
+        await _until(lambda: adapter.syncs == 1)
+        yield _Watched(adapter, connector, delays, resume, lines)
+    finally:
+        await adapter.aclose()
+        logger.remove(handler)
+
+
+_CLOSED_AFTER_A_FAILED_RE_READ = (
+    "players: re-reading Home Assistant's registries failed; closing the connection to "
+    "sync again: Home Assistant did not answer config/area_registry/list within 0.05s"
+)
+_DROPPED = "players: the Home Assistant connection ended: connection closed by peer"
+
+
+async def test_a_failed_re_read_says_usher_closed_the_connection_and_nothing_else() -> None:
+    server = FakeHomeAssistant()
+    async with _watched(server) as watched:
+        server.unanswered.add("config/area_registry/list")
+        server.rename_area(LIVING_ROOM, "Lounge")
+        await _until(lambda: len(watched.delays) == 1)
+    assert watched.warnings() == [_CLOSED_AFTER_A_FAILED_RE_READ]
+
+
+async def test_a_drop_during_a_re_read_is_reported_once_as_the_drop() -> None:
+    server = FakeHomeAssistant()
+    async with _watched(server) as watched:
+        server.unanswered.add("config/area_registry/list")
+        server.rename_area(LIVING_ROOM, "Lounge")
+        await _until(lambda: len(_commands(server, "config/area_registry/list")) == 2)
+        watched.connector.latest.drop()
+        await _until(lambda: len(watched.delays) == 1)
+    assert watched.warnings() == [_DROPPED]
+
+
+async def test_a_re_read_whose_send_finds_the_socket_gone_reports_the_drop_once() -> None:
+    """HA queues three events and drops, so the next send fails while the reader drains."""
+    server = FakeHomeAssistant()
+
+    def three_events_then_drop() -> None:
+        del server.after_answer["config/area_registry/list"]
+        for reading in ("paused", "idle", "playing"):
+            server.change_state(HouseState(entity_id=APPLE_TV, state=reading))
+        server.connections[-1].drop()
+
+    async with _watched(server) as watched:
+        server.after_answer["config/area_registry/list"] = [three_events_then_drop]
+        server.rename_area(LIVING_ROOM, "Lounge")
+        await _until(lambda: len(watched.delays) == 1)
+    assert len(_commands(server, "config/area_registry/list")) == 2, "the premise: re-read"
+    assert len(_commands(server, "config/device_registry/list")) == 1, (
+        "the premise: the re-read's next send never reached Home Assistant"
+    )
+    unread = server.connections[0].unread_at_failed_sends
+    assert len(unread) == 1 and unread[0] > 0, (
+        "the premise: the reader was still draining frames when the send failed"
+    )
+    assert watched.warnings() == [_DROPPED]
+
+
+async def test_after_usher_closes_a_connection_a_drop_on_the_next_is_still_reported() -> None:
+    server = FakeHomeAssistant()
+    async with _watched(server) as watched:
+        server.unanswered.add("config/area_registry/list")
+        server.rename_area(LIVING_ROOM, "Lounge")
+        await _until(lambda: len(watched.delays) == 1)
+        server.unanswered.clear()
+        watched.release()
+        await _until(lambda: watched.adapter.syncs == 2)
+        assert len(server.connections) == 2, "the premise: the next sync is a new connection"
+        watched.connector.latest.drop()
+        await _until(lambda: len(watched.delays) == 2)
+    assert watched.warnings() == [_CLOSED_AFTER_A_FAILED_RE_READ, _DROPPED]
+
+
 async def test_aclose_closes_the_socket() -> None:
     server = FakeHomeAssistant()
     adapter, connector = await _started(server)
     await adapter.aclose()
     assert connector.latest.closed
+
+
+async def test_closing_while_a_failed_sync_unwinds_still_closes_the_socket() -> None:
+    server = FakeHomeAssistant()
+    server.unanswered.add("get_states")
+    connector = FakeHomeAssistantConnector(server)
+    delays: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        delays.append(seconds)
+        await asyncio.sleep(0)
+
+    adapter = _adapter(connector, sleep=sleep, timeout=0.05)
+    await adapter.start()
+    await _until(lambda: bool(_commands(server, "get_states")))
+    await _until(lambda: adapter._session is None)
+    await adapter.aclose()
+    assert delays == [], "the premise: aclose landed before the loop reached its backoff"
+    assert connector.latest.closed
+
+
+async def test_closing_during_a_re_read_logs_no_warning() -> None:
+    server = FakeHomeAssistant()
+    adapter, _ = await _started(server)
+    server.unanswered.add("config/area_registry/list")
+    server.rename_area(LIVING_ROOM, "Lounge")
+    await _until(lambda: len(_commands(server, "config/area_registry/list")) == 2)
+    assert adapter.resyncs == 0, "the premise: the re-read is still in flight"
+    lines: list[str] = []
+    handler = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        await adapter.aclose()
+    finally:
+        logger.remove(handler)
+    assert lines == []
 ```
 
 Let `ruff format` wrap the three lines it flags: `_started`'s signature, `_PROXY_VARIABLES` and the backoff `parametrize`.
@@ -6767,7 +7177,7 @@ Expected: ERROR at collection, `ModuleNotFoundError: No module named 'usher.adap
 - [ ] **Step 3: Write `src/usher/adapters/homeassistant/players.py`**
 
 ```python
-"""`Players` over Home Assistant's websocket: the registries read per connection, events after.
+"""`Players` over Home Assistant's websocket, its registries read on connect and on each change.
 
 One socket held open and no rate gate, because a socket is not a request; reconnects back off.
 """
@@ -6834,7 +7244,8 @@ class HomeAssistantPlayers(Players):
     numbered after the state list applies, and a registry change numbered after
     the first registry list starts one more registry read. After the sync,
     state changes apply as they come and registry changes coalesce into at most
-    one pending re-read. With no connection there is no house.
+    one pending re-read; a re-read that fails drops the connection, so the next
+    one syncs from scratch. With no connection there is no house.
     """
 
     def __init__(
@@ -6863,6 +7274,7 @@ class HomeAssistantPlayers(Players):
         self._held: list[Event] | None = None
         self._resync: asyncio.Task[None] | None = None
         self._resync_again = False
+        self._closed_here = False
         self._labels_lock = asyncio.Lock()
         self._task: asyncio.Task[None] | None = None
         self.syncs = 0
@@ -6937,27 +7349,34 @@ class HomeAssistantPlayers(Players):
 
     def _delay(self, failures: int) -> float:
         """Equal jitter: half the ceiling, plus up to half again."""
-        ceiling = min(self._max_backoff, self._backoff * 2 ** min(failures, 32))
+        ceiling = min(self._max_backoff, self._backoff * 2.0 ** min(failures, 32))
         return ceiling / 2 + self._jitter() * ceiling / 2
 
     async def _connection_once(self) -> None:
         session = await HomeAssistantSession.open(
             self._connect, self._url, self._token, command_timeout=self._command_timeout
         )
-        self._session, self._held = session, []
+        self._session, self._held, self._closed_here = session, [], False
         pump = asyncio.create_task(session.pump(self._on_event))
         try:
             await self._sync(session)
             await pump
+        except UsherPortError:
+            # A failed re-read closed the socket itself and said why; the reader's
+            # failure that follows is that close, so it is not reported as HA's.
+            if not self._closed_here:
+                raise
         finally:
             self._session, self._held = None, None
             self._publish(None)
-            tasks = [task for task in (pump, self._resync) if task is not None]
+            tasks = [task for task in (self._resync, pump) if task is not None]
             self._resync = None
             for task in tasks:
                 task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            await session.aclose()
+            try:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            finally:
+                await session.aclose()
 
     async def _sync(self, session: HomeAssistantSession) -> None:
         for event_type in (_STATE_EVENT, *_REGISTRY_EVENTS):
@@ -7009,7 +7428,13 @@ class HomeAssistantPlayers(Players):
             self._resync = asyncio.create_task(self._resync_registries(self._session))
 
     async def _resync_registries(self, session: HomeAssistantSession) -> None:
-        """Re-read the three registries until no registry event arrived during a read."""
+        """Re-read the three registries until no registry event arrived during a read.
+
+        A failed read closes the session: the reader then fails, the loop syncs
+        from scratch, and until it does there is no house rather than a stale one.
+        A read that failed because the session had already stopped is left to
+        whatever stopped it to report.
+        """
         try:
             while True:
                 self._resync_again = False
@@ -7028,7 +7453,15 @@ class HomeAssistantPlayers(Players):
                 if not self._resync_again:
                     return
         except UsherPortError as exc:
-            logger.warning("players: re-reading Home Assistant's registries failed: {}", exc)
+            if session.stopped:
+                return
+            logger.warning(
+                "players: re-reading Home Assistant's registries failed; "
+                "closing the connection to sync again: {}",
+                exc,
+            )
+            self._closed_here = True
+            await session.aclose()
 
     def _publish(self, house: HouseSnapshot | None) -> None:
         """Replace the reading and wake every waiter, swapping the event so the next wait sleeps."""
@@ -7084,10 +7517,10 @@ _PUSH = _Decision(
 _HOME_ASSISTANT = _Decision(
     upstream="Home Assistant's /api/websocket (`USHER_HA_URL`), a machine in the household",
     limiter=(
-        "none: `usher.adapters.homeassistant.players` holds one socket open, reads the "
-        "registries once per connection and follows events after; its only writes are an "
-        "owner's confirm. What limits it is the reconnect backoff "
-        "(`HomeAssistantPlayers._delay`, `USHER_PLAYERS_BACKOFF_SECONDS` doubling to "
+        "none: `usher.adapters.homeassistant.players` holds one socket open and reads the "
+        "registries on connect and again after each registry change, at most one re-read "
+        "pending; its only writes are an owner's confirm. What limits it is the reconnect "
+        "backoff (`HomeAssistantPlayers._delay`, `USHER_PLAYERS_BACKOFF_SECONDS` doubling to "
         "`USHER_PLAYERS_MAX_BACKOFF_SECONDS`)"
     ),
     recorded_in="src/usher/adapters/homeassistant/players.py",
@@ -7156,7 +7589,7 @@ seven deliberately are not.
 2. **The census table.** After the `/embywebsocket` row, add:
 
 ```markdown
-| Home Assistant's `/api/websocket` (`homeassistant/players.py`) | **none** — one socket held open; registries read once per connection; reconnects back off |
+| Home Assistant's `/api/websocket` (`homeassistant/players.py`) | **none** — one socket held open; registries read on connect and again after each registry change, at most one re-read pending; reconnects back off |
 ```
 
 3. **The ports table.** After the `LLMClient` row, add:
@@ -7166,6 +7599,17 @@ seven deliberately are not.
 ```
 
 4. **The repository layout.** Add `house.py, recipes.py, screens.py, ways.py` to the `domain/` line, wrapping as the block already does. Add `homeassistant/` to the `adapters/` line.
+5. **The layering diagram.** End the `ports/` line's list with `RowProvider · Players (all ABCs)`, wrap `homeassistant/` onto its own `adapters/` line, and give the box a second outbound arrow beside PostgreSQL's — every box line stays 61 columns:
+
+```
+└────────────────────────────┬──────────────────────┬───────┘
+                             ▼                      ▼  websocket
+                       [PostgreSQL]         [Home Assistant]
+             canonical catalog ·            registries and
+             search · vectors · job queue   players' states
+```
+
+6. **The adapter-naming paragraph** under the diagram. Add `homeassistant/` → `Players` to the named-for-the-upstream list, after `tmdb/` → `MetadataProvider`.
 
 - [ ] **Step 7: Run everything this task touched**
 
