@@ -578,7 +578,9 @@ by default ([08](08-operations.md)).
   `USHER_PLAYERS_CONFIRM_TIMEOUT_SECONDS` (default 10), is `503
   players_unavailable`, and the write may still land.
 - **`/ways` ranks every available copy on every device through every matching
-  recipe**, grouped by screen. Hands-free ways come first by quality
+  recipe**, grouped by screen. A copy with no container, such as a series' own
+  row, is no way at all, as `/play` finds no way to play it either. Hands-free
+  ways come first by quality
   (resolution, then HDR, then audio — lossless object audio, lossless, lossy
   multichannel, stereo, then the codec and its channels within a tier, unknown
   channels counting as stereo — then container), then ways that need a press at the

@@ -85,7 +85,8 @@ HDR10_MP4 = _copy(
     width=3840,
     height=2160,
 )
-H264_BARE = _copy("h264-bare", video_codec="h264")
+# An H.264 file with no stream metadata: its extension still names its container.
+H264_BARE = _copy("h264-bare", container="mp4", video_codec="h264")
 UNKNOWN = _copy("unknown", container="mkv")
 HD_MKV = _copy(
     "hd-mkv",
@@ -402,6 +403,29 @@ def test_a_retracted_copy_is_no_way_at_all() -> None:
     assert rank((living_room,), (_variant(HDR10_MP4, "retracted", available=False),)) == ()
 
 
+def test_a_series_shaped_row_with_no_facts_is_no_way_at_all() -> None:
+    """A series' own row names no container, so no source can stream it."""
+    living_room = _living_room()
+    series = _copy("series")
+    facts = ("container", "video_codec", "audio_codec", "width", "height", "hdr_format")
+    assert [getattr(series, fact) for fact in (*facts, "audio_channels")] == [None] * 7, (
+        "the premise: the row carries no fact at all"
+    )
+    assert series.available, "the premise: it is not skipped as retracted"
+    assert len(rank((living_room,), (HDR10_MP4,))) == 2, "the premise: a copy with one has ways"
+    assert rank((living_room,), (series,)) == ()
+
+
+def test_a_way_whose_copy_names_no_container_gives_up_no_container() -> None:
+    """`rank` makes no way of such a copy; `gives_up` alone still names no unknown a loss."""
+    lesser = _variant(FULL, "lesser", container="mp4")
+    _tall_enough("cast.shield", FULL, lesser)
+    best, other = rank(_shield_in_the_bedroom()[:1], (lesser, FULL))
+    assert other.gives_up == ("NO MKV",), "the premise: a known lesser container is a loss"
+    unnamed = replace(other, quality=replace(other.quality, container=None))
+    assert gives_up(unnamed, best) == ()
+
+
 def test_hands_free_ways_rank_above_ways_that_need_a_press_whatever_their_quality() -> None:
     assert not RECIPE["apple_tv.infuse"].hands_free, "the premise: Infuse needs a press"
     assert quality_of(DV_MKV).score > quality_of(HDR10_MP4).score, "the premise"
@@ -468,7 +492,6 @@ def test_gives_up_names_every_known_shortfall_against_the_best() -> None:
         pytest.param({"audio_channels": None}, (), id="channels_unknown"),
         pytest.param({"audio_channels": 0}, (), id="zero_channels"),
         pytest.param({"container": "mp4"}, ("NO MKV",), id="lesser_container"),
-        pytest.param({"container": None}, (), id="container_unknown"),
     ],
 )
 def test_a_way_gives_up_only_what_its_copy_is_known_to_lack(

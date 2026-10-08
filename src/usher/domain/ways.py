@@ -179,7 +179,9 @@ def refusal(item: MediaItem, recipe: Recipe) -> str | None:
     """Why this copy cannot direct-play through this recipe, in words, or `None`.
 
     Conservative only about what is known: a fact the copy does not carry is
-    never a reason, and `facts_known` says when the answer rests on less.
+    never a reason, and `facts_known` says when the answer rests on less. The
+    container is not such a fact: a copy with none has no stream to play, so
+    `rank` makes no way of it and never asks here.
     """
     profile, via = recipe.direct_play, recipe.name.upper()
     parts = _parts(item.container)
@@ -302,9 +304,10 @@ def rank(screens: Sequence[Screen], files: Sequence[MediaItem]) -> tuple[Way, ..
 
     Within a screen: hands-free ways by score, then ways that need a press by
     score, then the ways that cannot play; an equal score puts a proven recipe
-    first. A copy its source has retracted is no way at all. The first playable
-    way of each screen is its best, and every other playable way says what it
-    gives up against that one.
+    first. A copy its source has retracted is no way at all, nor is one with no
+    container, such as a series' own row: no source can stream it. The first
+    playable way of each screen is its best, and every other playable way says
+    what it gives up against that one.
     """
     ranked: list[Way] = []
     for screen in sorted(screens, key=lambda one: reading_key(one.name, one.area_id)):
@@ -314,7 +317,7 @@ def rank(screens: Sequence[Screen], files: Sequence[MediaItem]) -> tuple[Way, ..
                 for device in screen.devices
                 for recipe in device.recipes
                 for item in files
-                if item.available
+                if item.available and _parts(item.container)
             ),
             key=_order,
         )
