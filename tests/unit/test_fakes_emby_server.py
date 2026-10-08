@@ -993,6 +993,7 @@ async def test_an_ids_listing_replays_the_recorded_version_group(driver: _Driver
         driver.server.add_item(replace(MOVIE, external_id=version), ADDED_AT)
     driver.server.group_versions(*versions)
     listings = recorded["listings"]
+    assert len(listings) == 4, "the premise: both orders, then each version alone"
     assert {tuple(listing["asked"]) for listing in listings} == {
         tuple(versions),
         tuple(reversed(versions)),
