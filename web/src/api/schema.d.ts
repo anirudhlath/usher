@@ -3135,7 +3135,7 @@ export interface operations {
                     "application/json": components["schemas"]["ScreensResponse"];
                 };
             };
-            /** @description Players are off, or Home Assistant cannot be read or written now. Retryable, except while players are off or the token is refused. */
+            /** @description Players are off, or Home Assistant cannot be read or written now. `Retry-After` is present when asking again may succeed, and absent while players are off or the token is refused. */
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -3188,7 +3188,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["ProblemResponse"];
                 };
             };
-            /** @description Players are off, or Home Assistant cannot be read or written now. Retryable, except while players are off or the token is refused. */
+            /** @description Players are off, or Home Assistant cannot be read or written now. `Retry-After` is present when asking again may succeed, and absent while players are off or the token is refused. */
             503: {
                 headers: {
                     [name: string]: unknown;

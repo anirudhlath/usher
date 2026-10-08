@@ -7,7 +7,7 @@ from fastapi import APIRouter, status
 from usher.api.deps import ScreensServiceDep
 from usher.api.dto.problem import ProblemCode, ProblemResponse
 from usher.api.dto.screens import ConfirmRequest, ScreensResponse
-from usher.api.errors import ProblemException
+from usher.api.errors import RETRY_AFTER_SECONDS, ProblemException
 from usher.services.screens import (
     CannotPlace,
     PlayersUnavailable,
@@ -24,8 +24,9 @@ _UNAVAILABLE: Final[dict[int | str, dict[str, Any]]] = {
     503: {
         "model": ProblemResponse,
         "description": (
-            "Players are off, or Home Assistant cannot be read or written now. Retryable, "
-            "except while players are off or the token is refused."
+            "Players are off, or Home Assistant cannot be read or written now. `Retry-After` "
+            "is present when asking again may succeed, and absent while players are off or "
+            "the token is refused."
         ),
     },
 }
@@ -101,9 +102,13 @@ async def confirm_device(
 
 
 def _unavailable(error: PlayersUnavailable) -> ProblemException:
-    """The one 503 both routes answer. `detail` is the service's, which carries no input."""
+    """The one 503 both routes answer, with `Retry-After` only where asking again may help.
+
+    `detail` is the service's, which carries no input.
+    """
     return ProblemException(
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         code=ProblemCode.PLAYERS_UNAVAILABLE,
         detail=error.detail,
+        headers={"Retry-After": str(RETRY_AFTER_SECONDS)} if error.retryable else None,
     )

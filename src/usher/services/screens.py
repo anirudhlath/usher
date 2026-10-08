@@ -4,18 +4,23 @@ from typing import Final
 
 from usher.domain.house import DeviceRole, HouseSnapshot
 from usher.domain.screens import HouseView, ScreenDevice, project
-from usher.ports.errors import UsherPortError
+from usher.ports.errors import PortAuthFailed, UsherPortError
 from usher.ports.players import Players
 
 PLAYERS_OFF: Final = "players are off: USHER_PLAYERS_ENABLED is false"
 
 
 class PlayersUnavailable(Exception):
-    """The house cannot be read or written now. `detail` is safe to show."""
+    """The house cannot be read or written now. `detail` is safe to show.
 
-    def __init__(self, detail: str) -> None:
+    `retryable` is false while players are off or the registry refuses the
+    credential, where asking again gets the same answer.
+    """
+
+    def __init__(self, detail: str, *, retryable: bool) -> None:
         super().__init__(detail)
         self.detail = detail
+        self.retryable = retryable
 
 
 class UnknownCandidate(LookupError):
@@ -71,16 +76,21 @@ class ScreensService:
                 timeout=self._confirm_timeout,
             )
         except UsherPortError as error:
-            raise PlayersUnavailable(str(error)) from error
+            raise _unavailable(error) from error
         return project(landed)
 
     def _reading(self) -> tuple[Players, HouseSnapshot]:
         if self._players is None:
-            raise PlayersUnavailable(PLAYERS_OFF)
+            raise PlayersUnavailable(PLAYERS_OFF, retryable=False)
         try:
             return self._players, self._players.snapshot()
         except UsherPortError as error:
-            raise PlayersUnavailable(str(error)) from error
+            raise _unavailable(error) from error
+
+
+def _unavailable(error: UsherPortError) -> PlayersUnavailable:
+    """In the port's words; a refused credential is refused again however often it is asked."""
+    return PlayersUnavailable(str(error), retryable=not isinstance(error, PortAuthFailed))
 
 
 def _device_to_place(house: HouseSnapshot, player: ScreenDevice, area_id: str) -> str:

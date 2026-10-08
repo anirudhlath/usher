@@ -49,7 +49,8 @@ Versioning is `0.x` while the wire contract may still move —
   HA refuses is not retried until Usher restarts, and one ERROR line names
   `USHER_HA_TOKEN`.
 - A problem code, `players_unavailable` (503): players are off, or Home
-  Assistant cannot be read or written now.
+  Assistant cannot be read or written now. It carries `Retry-After` unless
+  players are off or the token is refused.
 - `USHER_CORS_ORIGINS` lets browser pages from the listed origins call Usher.
   Empty by default. Each origin is lowercased and loses its default port, and
   an origin a browser would write differently is refused at startup.

@@ -319,7 +319,7 @@ answer.
 | `source_unavailable` | 503 | at least one source could not be reached and nothing playable was found on the ones that answered — retryable |
 | `not_playable` | 409 | every source holding a copy answered and none offers a way to play it |
 | `ticket_invalid` | 404 | a playback ticket that is expired or forged — one answer for both, deliberately |
-| `players_unavailable` | 503 | players are off, or Home Assistant cannot be read, refused a write, or did not report it in time — retryable, except while players are off or the token is refused |
+| `players_unavailable` | 503 | players are off, or Home Assistant cannot be read, refused a write, or did not report it in time — with `Retry-After` when asking again may succeed, and without it while players are off or the token is refused |
 
 **404 is generic and there is no per-resource variant** — `instance` already
 carries the path. A title the household owns with no playable copy is separated

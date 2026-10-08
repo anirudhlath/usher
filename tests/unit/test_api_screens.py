@@ -24,9 +24,12 @@ from usher.api.app import create_app
 from usher.api.deps import get_players
 from usher.api.dto.problem import PROBLEM_MEDIA_TYPE
 from usher.api.dto.screens import DeviceResponse, RecipeResponse
+from usher.api.errors import RETRY_AFTER_SECONDS
 from usher.config import Settings
+from usher.domain.house import HouseSnapshot
 from usher.domain.recipes import RECIPES
 from usher.domain.screens import project
+from usher.ports.errors import PortAuthFailed, PortDataMalformed, PortUnavailable, UsherPortError
 from usher.services.screens import PLAYERS_OFF
 
 _CONFIRM_TIMEOUT = 0.05
@@ -73,6 +76,26 @@ def _problem(response: httpx.Response, status: int, code: str) -> dict[str, Any]
 
 def _confirm(entity_id: str) -> str:
     return f"/screens/devices/{entity_id}/confirm"
+
+
+class _Unread(FakePlayers):
+    """A house that does not read, for the reason it is handed."""
+
+    def __init__(self, failure: UsherPortError) -> None:
+        super().__init__()
+        self.failure = failure
+
+    def snapshot(self) -> HouseSnapshot:
+        raise self.failure
+
+
+# Each port failure, and whether asking again may help: a refused credential never does.
+_FAILURES = [
+    pytest.param(PortUnavailable("Home Assistant is not answering"), True, id="not-answering"),
+    pytest.param(PortUnavailable("connection closed by peer"), True, id="dropped"),
+    pytest.param(PortDataMalformed("Home Assistant answered with junk"), True, id="malformed"),
+    pytest.param(PortAuthFailed("Home Assistant refused the token"), False, id="token-refused"),
+]
 
 
 async def test_screens_answer_the_projection_with_home_assistant_s_reading(
@@ -142,6 +165,7 @@ async def test_players_off_answer_503_on_both_routes() -> None:
             write = await client.post(_confirm(APPLE_TV), json={"use": True})
     for response in (read, write):
         assert _problem(response, 503, "players_unavailable")["detail"] == PLAYERS_OFF
+        assert "retry-after" not in response.headers, "asking again gets the same answer"
 
 
 async def test_an_unread_house_answers_503_in_the_port_s_words(
@@ -149,8 +173,34 @@ async def test_an_unread_house_answers_503_in_the_port_s_words(
 ) -> None:
     unread = FakePlayers()
     app.dependency_overrides[get_players] = lambda: unread
-    body = _problem(await client.get("/screens"), 503, "players_unavailable")
+    response = await client.get("/screens")
+    body = _problem(response, 503, "players_unavailable")
     assert body["detail"] == "the fake house has not been published"
+    assert response.headers["retry-after"] == str(RETRY_AFTER_SECONDS)
+
+
+@pytest.mark.parametrize(("failure", "retryable"), _FAILURES)
+async def test_a_house_that_does_not_read_sends_retry_after_unless_the_token_is_refused(
+    app: FastAPI, client: httpx.AsyncClient, failure: UsherPortError, retryable: bool
+) -> None:
+    unread = _Unread(failure)
+    app.dependency_overrides[get_players] = lambda: unread
+    write = await client.post(_confirm(SHIELD), json={"use": True})
+    for response in (await client.get("/screens"), write):
+        assert _problem(response, 503, "players_unavailable")["detail"] == str(failure)
+        assert response.headers.get("retry-after") == (
+            str(RETRY_AFTER_SECONDS) if retryable else None
+        )
+
+
+@pytest.mark.parametrize(("failure", "retryable"), _FAILURES)
+async def test_a_refused_write_sends_retry_after_unless_the_token_is_refused(
+    players: FakePlayers, client: httpx.AsyncClient, failure: UsherPortError, retryable: bool
+) -> None:
+    players.refuse = failure
+    response = await client.post(_confirm(SHIELD), json={"use": True})
+    assert _problem(response, 503, "players_unavailable")["detail"] == str(failure)
+    assert response.headers.get("retry-after") == (str(RETRY_AFTER_SECONDS) if retryable else None)
 
 
 async def test_confirm_places_a_player_and_answers_the_house_after(
@@ -175,6 +225,7 @@ async def test_a_confirm_never_reported_answers_503_within_the_setting(
         response = await client.post(_confirm(SHIELD), json={"use": True})
     body = _problem(response, 503, "players_unavailable")
     assert body["detail"] == f"the house did not agree within {_CONFIRM_TIMEOUT:g}s"
+    assert response.headers["retry-after"] == str(RETRY_AFTER_SECONDS)
 
 
 @pytest.mark.parametrize(

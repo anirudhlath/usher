@@ -14,7 +14,8 @@ import { Button } from '../actions'
  * · source_unavailable (503)  → retryable, honour Retry-After.
  * · not_playable (409)        → no retry button. There is no playable file.
  * · ticket_invalid (404)      → one tap re-requests and plays.
- * · players_unavailable (503) → retryable, except while players are off or the token is refused.
+ * · players_unavailable (503) → retryable, honour Retry-After. The server sends none while
+ *                               players are off or the token is refused.
  *
  * `detail` is prose that may be reworded at any release: never parse it, always show it — it is
  * often the only thing that tells an operator what happened.
