@@ -245,8 +245,8 @@ class FakeEmbyServer:
         """Hold `external_ids` as versions of one item, in this order.
 
         An `Ids` listing then names one member of the group per request: the first, in
-        this order, of those the rest of the request would list. That is what
-        `ids_version_group.json` records Emby doing. Emby's full listing shows one
+        this order, of those the rest of the request matches, before paging. That is
+        what `ids_version_group.json` records Emby doing. Emby's full listing shows one
         version per group too; this fake does not model that, and no walk test groups
         versions.
         """
