@@ -348,10 +348,10 @@ anything" · Emby request latency · TMDb requests/sec against the
 `USHER_TMDB_REQUESTS_PER_SECOND` ceiling, with 429 count · **whole-library
 walks: the listing limit and the mean unit duration, by stage**.
 
-✅ **Every panel here is backed by real data as of M9, except the
-whole-library walk panel, which is unbacked until a planned walk runs against
-a real source.** ⚠️ A panel that drains the whole unmatched queue should page
-with the keyset cursor; the `OFFSET` form is quadratic in queue depth.
+✅ **Every panel here is backed by real data as of M9, and the whole-library
+walk panel as of the fast first sync's acceptance walk.** ⚠️ A panel that drains
+the whole unmatched queue should page with the keyset cursor; the `OFFSET` form
+is quadratic in queue depth.
 
 ### 4 — Performance
 
