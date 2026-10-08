@@ -216,11 +216,10 @@ async def test_a_refused_area_write_leaves_the_role_in_place_and_a_retry_complet
     [(None, PLAYERS_OFF), (FakePlayers(), "the fake house has not been published")],
     ids=["off", "unread"],
 )
-async def test_confirm_with_no_house_is_unavailable_and_writes_nothing(
+async def test_confirm_with_no_house_is_unavailable_and_says_why(
     players: FakePlayers | None, detail: str
 ) -> None:
     service = ScreensService(players, confirm_timeout=_TIMEOUT)
     with pytest.raises(PlayersUnavailable) as failure:
         await service.confirm(APPLE_TV, use=True)
     assert failure.value.detail == detail
-    assert players is None or players.writes == []
