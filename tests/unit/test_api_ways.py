@@ -32,7 +32,7 @@ from usher.domain.house import DeviceRole
 from usher.domain.screens import project
 from usher.domain.source import MediaItem
 from usher.domain.title import Title
-from usher.domain.ways import RESOLUTION_LABELS, rank
+from usher.domain.ways import rank
 from usher.ports.ingest import MediaItemUpsert
 from usher.services.ways import WaysAnswer
 
@@ -143,8 +143,8 @@ async def test_a_title_s_ways_are_the_ranking_grouped_by_screen(
         hdr_format=HdrFormat.DOLBY_VISION,
         audio_codec="truehd",
         audio_channels=8,
-        width=3840,
-        height=2160,
+        width=1920,
+        height=1080,
     )
     await library.add_copy(
         "film-hdr10",
@@ -177,6 +177,11 @@ async def test_a_title_s_ways_are_the_ranking_grouped_by_screen(
     numbers = (item.audio_channels, item.runtime_seconds)
     assert best.best and None not in (*facts, *numbers)  # premise: no field can pass as another
     assert len(set(facts)) == len(facts) and len(set(numbers)) == len(numbers)
+    labels: dict[int | None, str] = {2160: "4K", 1080: "1080P"}  # read off each copy's height
+    assert {way.file.height for way in expected} == set(labels)  # premise: two labels in play
+    assert [way["file"]["resolution"] for way in screen["ways"]] == [
+        labels[way.file.height] for way in expected
+    ]
     assert screen["ways"][0] == {
         "id": str(best.id),
         "entity_id": best.device.entity_id,
@@ -189,7 +194,7 @@ async def test_a_title_s_ways_are_the_ranking_grouped_by_screen(
         },
         "file": {
             "source_id": str(item.source_id),
-            "resolution": RESOLUTION_LABELS[best.quality.resolution],
+            "resolution": labels[item.height],
             "container": item.container,
             "video_codec": item.video_codec,
             "hdr_format": item.hdr_format,
