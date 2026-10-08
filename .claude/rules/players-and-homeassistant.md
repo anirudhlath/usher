@@ -52,8 +52,11 @@ uv run python scripts/capture_ha_shape.py --listen 30 \
   two confirms cannot create `usher` twice or adopt a label under another id.
 - **Label and area writes are admin-only in HA.** A non-admin token is refused
   per write with `unauthorized`, which is `PortAuthFailed`.
-- **A write is done when HA's registry event reports it**, not when the command
-  is answered. Confirm waits with `USHER_PLAYERS_CONFIRM_TIMEOUT_SECONDS`.
+- **An entity's label or a device's area is done when HA's registry event
+  reports it**, not when the command is answered; confirm waits for both with
+  `USHER_PLAYERS_CONFIRM_TIMEOUT_SECONDS`. A created label is done when HA's
+  answer carries the expected id, since `label_registry_updated` is not
+  subscribed.
 - **An entity's own `area_id` overrides its device's**, so confirm places only a
   player whose entity has none, and only one in use: an ignored player is never
   placed.
