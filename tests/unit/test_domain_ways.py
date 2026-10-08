@@ -2,8 +2,8 @@
 
 import unicodedata
 import uuid
-from collections.abc import Sequence
-from dataclasses import replace
+from collections.abc import Callable, Sequence
+from dataclasses import fields, replace
 from itertools import pairwise
 from typing import Any
 
@@ -12,7 +12,7 @@ import pytest
 from tests.fakes.house import APPLE_TV, BEDROOM, LIVING_ROOM, SHIELD_DEVICE, this_house
 from usher.domain.enums import HdrFormat
 from usher.domain.house import DeviceRole, HouseSnapshot
-from usher.domain.recipes import RECIPES, Recipe
+from usher.domain.recipes import RECIPES, DirectPlay, Recipe
 from usher.domain.screens import Screen, ScreenDevice, project
 from usher.domain.source import MediaItem
 from usher.domain.ways import (
@@ -22,6 +22,8 @@ from usher.domain.ways import (
     Resolution,
     _audio_rank,
     _codec,
+    _parts,
+    _video_codec,
     facts_known,
     gives_up,
     quality_of,
@@ -278,12 +280,24 @@ def test_a_profile_listing_pcm_admits_a_copy_in_a_pcm_sample_format() -> None:
     assert refusal(PCM_MOV, with_pcm) is None
 
 
-def test_every_shipped_profile_names_its_audio_codecs_by_family() -> None:
-    named = {
-        (recipe.key, codec) for recipe in RECIPES for codec in recipe.direct_play.audio_codecs or ()
+def test_every_shipped_profile_entry_reads_as_a_copy_s_fact_is_folded() -> None:
+    """An entry no fold yields never matches a copy: `matroska`, `HEVC`, `pcm_s16le`."""
+    folds: dict[str, Callable[[str], tuple[str, ...]]] = {
+        "containers": _parts,
+        "video_codecs": lambda entry: (_video_codec(entry),),
+        "audio_codecs": lambda entry: (_codec(entry),),
     }
-    assert named, "the premise: some shipped profile names its audio"
-    assert {(key, codec) for key, codec in named if _codec(codec) != codec} == set()
+    string_sets = {one.name for one in fields(DirectPlay) if one.type == frozenset[str] | None}
+    assert set(folds) == string_sets, "the premise: every field of names is folded here"
+    named = {
+        (recipe.key, field, entry)
+        for recipe in RECIPES
+        for field, fold in folds.items()
+        for entry in getattr(recipe.direct_play, field) or ()
+    }
+    assert {field for _, field, _ in named} == set(folds), "the premise: each field names some"
+    unfolded = {(key, field, one) for key, field, one in named if folds[field](one) != (one,)}
+    assert unfolded == set()
 
 
 def test_a_copy_taller_than_the_profile_is_refused_by_height() -> None:

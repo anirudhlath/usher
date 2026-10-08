@@ -100,6 +100,10 @@ def _hdr_rank(hdr: HdrFormat | None) -> int:
     return _HDR_RANK[hdr] if hdr is not None else 0
 
 
+def _video_codec(codec: str | None) -> str:
+    return (codec or "").lower()
+
+
 def _codec(codec: str | None) -> str:
     """A codec's name in lowercase, every PCM sample format named `pcm`."""
     name = (codec or "").lower()
@@ -187,7 +191,7 @@ def refusal(item: MediaItem, recipe: Recipe) -> str | None:
     parts = _parts(item.container)
     if profile.containers is not None and parts and not set(parts) & profile.containers:
         return f"{parts[0].upper()} OVER {via}"
-    codec = (item.video_codec or "").lower()
+    codec = _video_codec(item.video_codec)
     if profile.video_codecs is not None and codec and codec not in profile.video_codecs:
         return f"{codec.upper()} OVER {via}"
     if item.hdr_format is not None and item.hdr_format not in profile.hdr_formats:

@@ -22,8 +22,10 @@ class Handover(StrEnum):
 class DirectPlay:
     """What plays without transcoding. `None` constrains nothing about that fact.
 
-    Audio codecs are named by family, as a copy's codec is folded before the
-    check: PCM is `pcm`, never a sample format such as `pcm_s16le`.
+    Every entry is lowercase and folded as a copy's fact is folded before the
+    check, or it never matches: a container by the name its family folds to
+    (`mkv`, never `matroska`), a video codec in lowercase (`hevc`, never
+    `HEVC`), and PCM audio as `pcm`, never a sample format such as `pcm_s16le`.
     """
 
     containers: frozenset[str] | None
