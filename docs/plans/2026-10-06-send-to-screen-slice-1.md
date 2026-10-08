@@ -9965,7 +9965,7 @@ git commit -m "api: screens, confirm and ways, and players_unavailable"
   - `web/src/features/shared/NotFound.tsx`, `web/src/features/viewer/Browse.tsx`, `web/src/kit/specimens/feedback.tsx`
   - `web/docs/patterns.md` (§3)
   - `web/e2e/kit.spec.ts-snapshots/feedback-*.png` (regenerated)
-- Test: `web/src/api/problem.test.ts`, `web/src/api/client.test.ts`
+- Test: `web/src/api/problem.test.ts`, `web/src/api/client.test.ts`, `web/src/design-system/components/feedback/Problem.test.tsx`
 
 **Interfaces:**
 - Consumes: Task 13's `/openapi.json`.
@@ -10091,6 +10091,25 @@ In `web/src/api/problem.test.ts`:
   })
 ```
 
+In `web/src/design-system/components/feedback/Problem.test.tsx`, add a case for the treatment, which `satisfies` alone only proves exists:
+
+```tsx
+  it('gives players_unavailable a panel, its own sentence, and a retry that waits out Retry-After', () => {
+    vi.useFakeTimers()
+    const { container } = renderComponent(
+      <Problem
+        problem={{ code: 'players_unavailable', status: 503, retry_after: 5 }}
+        onRetry={vi.fn<() => void>()}
+      />,
+    )
+    expect(container.querySelector('.u-problem--panel')).not.toBeNull()
+    expect(screen.getByText("Screens aren't available right now.")).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Try again in 5 s' })).toBeDisabled()
+  })
+```
+
+Both new cases are added after their entries exist, so plant each once: `honourRetryAfter: false` on the `RECOVERY` entry, and a wrong `message` on the `TREATMENT` entry.
+
 - [ ] **Step 5: Correct every sentence that counts the codes**
 
 Each of these says "seven" about the vocabulary; it becomes "eight". "An eighth" becomes "a ninth" where it means a code the build predates.
@@ -10108,6 +10127,8 @@ Each of these says "seven" about the vocabulary; it becomes "eight". "An eighth"
 | `src/kit/specimens/feedback.tsx` | the blurb's "over a closed seven-code vocabulary" → "over a closed code vocabulary" |
 | `docs/patterns.md` | "**closed at seven codes**" → "**closed at eight codes**" |
 
+Three sentences name `source_unavailable` as the only code whose recovery is a retry, and become false: `parseRetryAfter`'s docblock in `src/api/problem.ts`, `problemHandler`'s in `src/test/fixtures/problems.ts`, and the Retry-After docblock in `src/api/client.ts`. Each names both codes instead. In `Problem.tsx`'s top docblock, pad the `→` column of the seven older lines by one space so the new, longer line aligns.
+
 The blurb drops its number instead of changing it, because it is rendered and the number would move the visual baselines again with every new code. Then confirm nothing was missed:
 
 ```bash
@@ -10123,13 +10144,19 @@ Expected: only lines about something else, plus one point-in-time document. The 
 cd ~/code/.worktrees/usher/send-to-screen-spec/web
 npm run verify
 npm run e2e
-npm run e2e:visual:docker:update
+docker run --rm -v "$PWD":/w -w /w --ipc=host mcr.microsoft.com/playwright:v1.62.1-noble \
+  bash -lc 'npm ci --no-audit --no-fund && npx playwright test --grep "feedback matches its baseline" \
+  --workers=1 --update-snapshots=all'
+npm run e2e:visual:docker
+# The image's npm ci runs as root in the bind mount; hand web/ back to the user.
+docker run --rm -v "$PWD":/w -w /w mcr.microsoft.com/playwright:v1.62.1-noble \
+  chown -R "$(id -u):$(id -g)" /w
 git status --porcelain e2e
 ```
 
 Expected:
 - `verify` and `e2e` are green.
-- The visual update rewrites the twelve `e2e/kit.spec.ts-snapshots/feedback-*.png` files and nothing else; the blurb is inside `#group-feedback`. A changed file outside that group means something else moved. Stop and find it.
+- The visual update rewrites the twelve `e2e/kit.spec.ts-snapshots/feedback-*.png` files and nothing else; the blurb is inside `#group-feedback`. It needs `--update-snapshots=all`: the blurb moves well under `maxDiffPixelRatio`, so a bare `--update-snapshots` rewrites nothing. The check run after it is 120 passed. A changed file outside that group means something else moved. Stop and find it.
 - Open two of the twelve, one phone and one desktop. Confirm the only difference is the blurb's line.
 
 - [ ] **Step 7: Commit**
