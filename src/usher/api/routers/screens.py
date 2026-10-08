@@ -24,7 +24,8 @@ _UNAVAILABLE: Final[dict[int | str, dict[str, Any]]] = {
     503: {
         "model": ProblemResponse,
         "description": (
-            "Players are off, or Home Assistant cannot be read or written now. Retryable."
+            "Players are off, or Home Assistant cannot be read or written now. Retryable, "
+            "except while players are off or the token is refused."
         ),
     },
 }

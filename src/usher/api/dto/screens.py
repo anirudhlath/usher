@@ -1,9 +1,8 @@
 """Response shapes for `GET /screens` and confirm, and the body confirm takes."""
 
-from datetime import datetime
 from typing import Self
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import AwareDatetime, BaseModel, ConfigDict, StrictBool
 
 from usher.domain.house import DeviceRole, HouseArea, HouseState
 from usher.domain.recipes import Recipe
@@ -44,7 +43,7 @@ class PlayerStateResponse(BaseModel):
     media_title: str | None
     media_duration_seconds: float | None
     media_position_seconds: float | None
-    media_position_updated_at: datetime | None
+    media_position_updated_at: AwareDatetime | None
 
     @classmethod
     def of(cls, state: HouseState) -> Self:
@@ -131,5 +130,5 @@ class ConfirmRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    use: bool
+    use: StrictBool
     area_id: str | None = None

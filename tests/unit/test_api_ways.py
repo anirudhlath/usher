@@ -1,7 +1,8 @@
-"""Both `/ways` routes, over the port fakes, through the shipped dependencies."""
+"""Both `/ways` routes over the port fakes and the shipped dependencies, and their DTO."""
 
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -11,7 +12,7 @@ from asgi_lifespan import LifespanManager
 from fastapi import FastAPI
 
 from tests.fakes.episode_repository import FakeEpisodeRepository
-from tests.fakes.house import KITCHEN, LIVING_ROOM, this_house
+from tests.fakes.house import BEDROOM, KITCHEN, LIVING_ROOM, SHIELD_DEVICE, this_house
 from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.players import FakePlayers
 from tests.fakes.title_repository import FakeTitleRepository
@@ -23,13 +24,17 @@ from usher.api.deps import (
     get_title_repository,
 )
 from usher.api.dto.problem import PROBLEM_MEDIA_TYPE
+from usher.api.dto.ways import WaysResponse
 from usher.config import Settings
 from usher.domain.enums import HdrFormat, TitleKind
 from usher.domain.episode import Episode, Season
+from usher.domain.house import DeviceRole
 from usher.domain.screens import project
+from usher.domain.source import MediaItem
 from usher.domain.title import Title
-from usher.domain.ways import rank
+from usher.domain.ways import RESOLUTION_LABELS, rank
 from usher.ports.ingest import MediaItemUpsert
+from usher.services.ways import WaysAnswer
 
 SOURCE = uuid.UUID("00000000-0000-4000-8000-0000000000aa")
 _SEEN = datetime(2026, 10, 6, 12, 0, tzinfo=UTC)
@@ -69,6 +74,7 @@ class _Library:
             "height": None,
             "hdr_format": None,
             "audio_channels": None,
+            "runtime_seconds": None,
         }
         await self.media_items.upsert_many(
             [
@@ -78,7 +84,6 @@ class _Library:
                     title_id=title_id,
                     episode_id=episode_id,
                     file_size_bytes=None,
-                    runtime_seconds=None,
                     added_at=None,
                     last_seen_at=_SEEN,
                     **(row | facts),
@@ -142,7 +147,16 @@ async def test_a_title_s_ways_are_the_ranking_grouped_by_screen(
         height=2160,
     )
     await library.add_copy(
-        "film-h264", title_id=title, container="mp4", video_codec="h264", width=1920, height=1080
+        "film-hdr10",
+        title_id=title,
+        container="mp4",
+        video_codec="hevc",
+        hdr_format=HdrFormat.HDR10,
+        audio_codec="eac3",
+        audio_channels=6,
+        width=3840,
+        height=2160,
+        runtime_seconds=7260,
     )
     response = await client.get(f"/titles/{title}/ways")
     assert response.status_code == 200, response.text
@@ -156,7 +170,39 @@ async def test_a_title_s_ways_are_the_ranking_grouped_by_screen(
     assert [way["best"] for way in screen["ways"]] == [way.best for way in expected]
     assert [way["gives_up"] for way in screen["ways"]] == [list(way.gives_up) for way in expected]
     assert [way["refusal"] for way in screen["ways"]] == [way.refusal for way in expected]
+    assert [way["playable"] for way in screen["ways"]] == [way.playable for way in expected]
     assert {way["recipe"]["proven"] for way in screen["ways"]} == {False}
+    best, item = expected[0], expected[0].file
+    facts = (item.container, item.video_codec, item.hdr_format, item.audio_codec)
+    numbers = (item.audio_channels, item.runtime_seconds)
+    assert best.best and None not in (*facts, *numbers)  # premise: no field can pass as another
+    assert len(set(facts)) == len(facts) and len(set(numbers)) == len(numbers)
+    assert screen["ways"][0] == {
+        "id": str(best.id),
+        "entity_id": best.device.entity_id,
+        "device": best.device.name,
+        "recipe": {
+            "key": best.recipe.key,
+            "name": best.recipe.name,
+            "hands_free": best.recipe.hands_free,
+            "proven": best.recipe.proven,
+        },
+        "file": {
+            "source_id": str(item.source_id),
+            "resolution": RESOLUTION_LABELS[best.quality.resolution],
+            "container": item.container,
+            "video_codec": item.video_codec,
+            "hdr_format": item.hdr_format,
+            "audio_codec": item.audio_codec,
+            "audio_channels": item.audio_channels,
+            "runtime_seconds": item.runtime_seconds,
+        },
+        "playable": best.playable,
+        "refusal": best.refusal,
+        "best": best.best,
+        "gives_up": list(best.gives_up),
+        "facts_known": best.facts_known,
+    }
     assert "/stream/" not in response.text  # a list mints no ticket
 
 
@@ -172,6 +218,11 @@ async def test_an_episode_s_ways_are_its_own_copies(
     [screen] = response.json()["screens"]
     assert {way["file"]["container"] for way in screen["ways"]} == {"mkv"}
     assert len(screen["ways"]) == 2  # the Apple TV's two recipes, one copy
+    # The copy carries no video codec and no height, so neither way knows its facts.
+    assert {(way["playable"], way["facts_known"]) for way in screen["ways"]} == {
+        (True, False),
+        (False, False),
+    }
 
 
 @pytest.mark.parametrize(
@@ -182,8 +233,9 @@ async def test_an_episode_s_ways_are_its_own_copies(
 async def test_an_unknown_title_or_episode_is_404(
     client: httpx.AsyncClient, kind: str, detail: str
 ) -> None:
-    body = _problem(await client.get(f"/{kind}/{uuid.uuid4()}/ways"), 404, "not_found")
-    assert body["detail"] == detail
+    """Judged before the screen, which here names no screen either."""
+    response = await client.get(f"/{kind}/{uuid.uuid4()}/ways", params={"screen": KITCHEN})
+    assert _problem(response, 404, "not_found")["detail"] == detail
 
 
 async def test_a_named_screen_answers_alone_and_an_unknown_one_is_422(
@@ -207,3 +259,21 @@ async def test_players_off_answer_200_with_no_screens(
     response = await client.get(f"/titles/{title}/ways", params={"screen": LIVING_ROOM})
     assert response.status_code == 200, response.text
     assert response.json() == {"screens_available": False, "screens": []}
+
+
+def test_ways_on_two_screens_are_grouped_by_screen_in_the_ranking_s_order() -> None:
+    house = this_house(shield=DeviceRole.USE)
+    placed = tuple(
+        replace(one, area_id=BEDROOM) if one.device_id == SHIELD_DEVICE else one
+        for one in house.devices
+    )
+    screens = project(house.with_registries(devices=placed)).screens
+    copy = MediaItem(source_id=SOURCE, external_id="film", title_id=uuid.uuid4(), container="mp4")
+    ways = rank(screens, [copy])
+    order = [BEDROOM, LIVING_ROOM]
+    assert list(dict.fromkeys(way.screen.area_id for way in ways)) == order  # premise
+    assert len(ways) > len(order)  # premise: a screen holds more than one way
+    answered = WaysResponse.of(WaysAnswer(screens_available=True, ways=ways))
+    assert [(screen.area_id, [way.id for way in screen.ways]) for screen in answered.screens] == [
+        (area_id, [way.id for way in ways if way.screen.area_id == area_id]) for area_id in order
+    ]

@@ -1,7 +1,8 @@
-"""`GET /screens` and confirm, over the port fake, through the shipped dependencies."""
+"""`GET /screens` and confirm over the port fake and the shipped dependencies, and their DTOs."""
 
 import asyncio
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from typing import Any
 
 import httpx
@@ -22,7 +23,10 @@ from tests.fakes.players import FakePlayers
 from usher.api.app import create_app
 from usher.api.deps import get_players
 from usher.api.dto.problem import PROBLEM_MEDIA_TYPE
+from usher.api.dto.screens import DeviceResponse, RecipeResponse
 from usher.config import Settings
+from usher.domain.recipes import RECIPES
+from usher.domain.screens import project
 from usher.services.screens import PLAYERS_OFF
 
 _CONFIRM_TIMEOUT = 0.05
@@ -90,8 +94,42 @@ async def test_screens_answer_the_projection_with_home_assistant_s_reading(
     assert {recipe["proven"] for recipe in device["recipes"]} == {False}
     assert device["state"]["app_name"] == "Example Player"
     assert device["state"]["media_position_seconds"] == 489.0
-    assert [player["entity_id"] for player in body["unconfirmed"]] == [SHIELD]
+    assert device["state"]["media_position_updated_at"] == "2026-10-06T19:00:00Z"
+    [shield] = body["unconfirmed"]
+    assert shield == {
+        "entity_id": SHIELD,
+        "name": "SHIELD",
+        "model": "SHIELD Android TV",
+        "area_id": None,
+        "role": None,
+        "recipes": [{"key": "cast.shield", "name": "Cast", "hands_free": True, "proven": False}],
+        "state": {
+            "state": "off",
+            "app_id": None,
+            "app_name": None,
+            "media_title": None,
+            "media_duration_seconds": None,
+            "media_position_seconds": None,
+            "media_position_updated_at": None,
+        },
+    }
     assert [area["area_id"] for area in body["areas"]] == [BEDROOM, KITCHEN, LIVING_ROOM]
+
+
+def test_a_player_home_assistant_reports_no_state_for_answers_a_null_state() -> None:
+    shield = project(this_house()).candidate(SHIELD)
+    assert shield is not None and shield.state is not None  # premise: a state to drop
+    assert DeviceResponse.of(replace(shield, state=None)).model_dump()["state"] is None
+
+
+def test_a_proven_recipe_answers_proven() -> None:
+    proven = replace(RECIPES[0], proven=True)
+    assert RecipeResponse.of(proven).model_dump() == {
+        "key": proven.key,
+        "name": proven.name,
+        "hands_free": proven.hands_free,
+        "proven": True,
+    }
 
 
 async def test_players_off_answer_503_on_both_routes() -> None:
@@ -126,6 +164,7 @@ async def test_confirm_places_a_player_and_answers_the_house_after(
     }
     assert screens == {BEDROOM: [SHIELD], LIVING_ROOM: [APPLE_TV]}
     assert players.writes == [("role", SHIELD, "use"), ("area", SHIELD_DEVICE, BEDROOM)]
+    assert response.json() == (await client.get("/screens")).json()  # its nulls kept too
 
 
 async def test_a_confirm_never_reported_answers_503_within_the_setting(
@@ -181,8 +220,8 @@ async def test_a_refused_confirm_writes_nothing_and_echoes_nothing(
 
 @pytest.mark.parametrize(
     "payload",
-    [{}, {"use": True, "area": BEDROOM}, {"use": "sometimes"}],
-    ids=["no-use", "unknown-field", "not-a-bool"],
+    [{}, {"use": True, "area": BEDROOM}, {"use": "sometimes"}, {"use": "no"}, {"use": 1}],
+    ids=["no-use", "unknown-field", "not-a-bool", "a-word-for-false", "a-number-for-true"],
 )
 async def test_a_malformed_confirm_is_422_and_writes_nothing(
     players: FakePlayers, client: httpx.AsyncClient, payload: dict[str, Any]

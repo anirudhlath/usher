@@ -86,9 +86,10 @@ class WaysResponse(BaseModel):
     def of(cls, answer: WaysAnswer) -> Self:
         grouped: dict[str, ScreenWaysResponse] = {}
         for way in answer.ways:
-            screen = grouped.setdefault(
-                way.screen.area_id,
-                ScreenWaysResponse(area_id=way.screen.area_id, name=way.screen.name, ways=[]),
-            )
-            screen.ways.append(WayResponse.of(way))
+            area_id = way.screen.area_id
+            if area_id not in grouped:
+                grouped[area_id] = ScreenWaysResponse(
+                    area_id=area_id, name=way.screen.name, ways=[]
+                )
+            grouped[area_id].ways.append(WayResponse.of(way))
         return cls(screens_available=answer.screens_available, screens=list(grouped.values()))
