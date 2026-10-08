@@ -3951,7 +3951,14 @@ def test_disabled_by_anyone_is_disabled(disabled_by: str | None, disabled: bool)
 
 @pytest.mark.parametrize(
     ("value", "seconds"),
-    [(489, 489.0), (489.5, 489.5), (True, None), ("489", None), (float("nan"), None)],
+    [
+        (489, 489.0),
+        (489.5, 489.5),
+        (True, None),
+        ("489", None),
+        (float("nan"), None),
+        pytest.param(10**400, None, id="beyond-a-float"),
+    ],
 )
 def test_a_position_is_a_finite_number_and_never_a_bool(
     value: object, seconds: float | None
@@ -4531,7 +4538,11 @@ def _seconds(attributes: Mapping[str, object], key: str) -> float | None:
     value = attributes.get(key)
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
-    return float(value) if math.isfinite(value) else None
+    try:
+        seconds = float(value)
+    except OverflowError:
+        return None
+    return seconds if math.isfinite(seconds) else None
 
 
 def _instant(attributes: Mapping[str, object], key: str) -> datetime | None:
