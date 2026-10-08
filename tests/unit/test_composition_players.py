@@ -1,7 +1,9 @@
 """`house_players`: nothing while off; built, started and closed while on; never a gate."""
 
 import asyncio
+import os
 import socket
+import urllib.request
 from types import SimpleNamespace
 from typing import Any, Final
 
@@ -92,8 +94,16 @@ async def test_the_app_parks_players_as_none_while_off() -> None:
         assert app.state.players is None
 
 
-async def test_an_unreachable_home_assistant_never_stops_the_app_serving() -> None:
+async def test_an_unreachable_home_assistant_never_stops_the_app_serving(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Loopback and refused: the one real dial a unit test may make."""
+    # websockets takes its proxy from `urllib.request.getproxies()`, which reads every
+    # variable named `<scheme>_proxy` in any case. A proxy would answer the dial
+    # instead of the refused port, so every such variable goes.
+    for name in [name for name in os.environ if name.lower().endswith("_proxy")]:
+        monkeypatch.delenv(name, raising=False)
+    assert urllib.request.getproxies() == {}
     settings = _settings(
         players_enabled=True,
         ha_url=f"http://127.0.0.1:{_free_port()}",
