@@ -38,6 +38,18 @@ Versioning is `0.x` while the wire contract may still move —
   live whole-library walk even when newer runs push it out of the five it
   shows. A histogram, `usher.sync.unit.duration`, and a new Dashboard 3 panel
   show how long each unit takes beside the listing limit's backoff.
+- Usher reads the house's screens from Home Assistant, off by default:
+  `USHER_PLAYERS_ENABLED`, with `USHER_HA_URL` and an administrator's
+  `USHER_HA_TOKEN`. `GET /screens` lists every screen and player with HA's
+  live reading. `POST /screens/devices/{entity_id}/confirm` labels a player
+  `usher` or `usher_ignore` in HA, and places one in use that is in no area.
+  `GET /titles/{id}/ways` and `GET /episodes/{id}/ways` rank every way the
+  copies could play on each screen. Nothing is sent to a screen yet.
+- A problem code, `players_unavailable` (503): players are off, or Home
+  Assistant cannot be read or written now.
+- `USHER_CORS_ORIGINS` lets browser pages from the listed origins call Usher.
+  Empty by default. Each origin is lowercased and loses its default port, and
+  an origin a browser would write differently is refused at startup.
 
 ### Changed
 

@@ -115,8 +115,8 @@ false. `tests/unit/test_docs_currency.py` reads it into the same union.
 ## Send to a screen (from docs/specs/2026-10-06-send-to-screen-design.md)
 | Task | What it delivers | Plan file | Status |
 |---|---|---|---|
-| 1–10 | Slice 1, the house: the websocket transport shared with Emby, the house and its projection onto screens, recipes and the ranking, HA's recorded shapes, and `HomeAssistantPlayers` behind the `Players` port | docs/plans/2026-10-06-send-to-screen-slice-1.md | 📋 planned |
-| 11–16 | Slice 1, the surface: settings and wiring, the screens and ways services, `GET /screens`, confirm and `/ways` with `players_unavailable`, the console's eighth code, `USHER_CORS_ORIGINS`, and the wrap-up | docs/plans/2026-10-06-send-to-screen-slice-1.md | 📋 planned |
+| 1–10 | Slice 1, the house: the websocket transport shared with Emby, the house and its projection onto screens, recipes and the ranking, HA's recorded shapes, and `HomeAssistantPlayers` behind the `Players` port | docs/plans/2026-10-06-send-to-screen-slice-1.md | 🔨 built on feat/send-to-screen-slice-1, awaiting merge |
+| 11–16 | Slice 1, the surface: settings and wiring, the screens and ways services, `GET /screens`, confirm and `/ways` with `players_unavailable`, the console's eighth code, `USHER_CORS_ORIGINS`, and the wrap-up | docs/plans/2026-10-06-send-to-screen-slice-1.md | 🔨 built on feat/send-to-screen-slice-1, awaiting merge |
 | 17 | Slice 1's live acceptance against this house's Home Assistant: the labels created, the Apple TV confirmed, the label registry's shape recorded — owner-gated | docs/plans/2026-10-06-send-to-screen-slice-1.md | 📋 planned |
 
 **A sixth table, for the fourth's reason.** Send to a screen has its own spec

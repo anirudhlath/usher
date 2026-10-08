@@ -110,6 +110,7 @@ trigger, just open it.
 | `rows-and-genome.md` | `services/rows/**`, `home.py`, `taste.py`, `similar.py`, `scripts/measure_{rows,pair_rates}.py` |
 | `curation-and-llm.md` | `adapters/llm/**`, `services/curation{,_pool,_prompt,_validate}.py` (literals, not a glob), `query_expansion.py`, `llm_ledger.py` |
 | `bootstrap-and-datasets.md` | `adapters/bulk/**`, `services/bootstrap.py`, `db/repositories/bulk.py`, `domain/{people,bootstrap}.py`, `scripts/measure_{bulk_load,imdb_people,people_provenance}.py` |
+| `players-and-homeassistant.md` | `adapters/homeassistant/**`, `adapters/websocket.py`, `ports/players.py`, `domain/{house,recipes,screens,ways}.py`, `services/{screens,ways}.py`, `scripts/capture_ha_shape.py`, and their fakes and fixture |
 | `ports-and-error-taxonomy.md` | `src/usher/ports/**`, `src/usher/adapters/**` |
 | `api-telemetry-and-lanes.md` | `api/**`, `telemetry.py`, `composition.py`, `services/{jobs,events,playback,playback_ticket,titles,visibility,sources}.py` |
 | `config-cli-and-deployment.md` | `config.py`, `cli.py`, `__main__.py`, `db/migrations/env.py`, `compose.yml`, `Dockerfile`, `.env.example`, `pyproject.toml`, `.github/workflows/**` |
