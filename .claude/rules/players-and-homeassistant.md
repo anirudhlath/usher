@@ -82,7 +82,8 @@ uv run python scripts/capture_ha_shape.py --listen 30 \
   restarts, with one ERROR naming `USHER_HA_TOKEN`: the same token never
   succeeds, and HA's `login_attempts_threshold` bans an address that keeps trying.
 - **A failed re-read closes the connection**, and the next one syncs from
-  scratch. The one warning says Usher closed it, not HA.
+  scratch. The one warning says Usher closed it, not HA. A re-read that
+  crashes is logged at ERROR with its traceback and closes it the same way.
 - **A session stops for one reason, the first.** A command still in `send`
   when the reader ends is failed at once, not at its timeout.
 - **An error names HA's code, never HA's message**, and the token travels only

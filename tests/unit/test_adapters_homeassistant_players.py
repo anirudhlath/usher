@@ -29,6 +29,7 @@ from tests.fakes.house import (
     SHIELD_DEVICE,
     this_house,
 )
+from usher.adapters.homeassistant import players as players_module
 from usher.adapters.homeassistant.players import (
     MAX_FRAME_BYTES,
     WEBSOCKET_PATH,
@@ -715,6 +716,61 @@ async def test_after_usher_closes_a_connection_a_drop_on_the_next_is_still_repor
         watched.connector.latest.drop()
         await _until(lambda: len(watched.delays) == 2)
     assert watched.warnings() == [_CLOSED_AFTER_A_FAILED_RE_READ, _DROPPED]
+
+
+_RE_READ_CRASHED = (
+    "ERROR|players: re-reading Home Assistant's registries crashed; "
+    "closing the connection to sync again"
+)
+
+
+async def test_a_re_read_that_raises_anything_else_is_logged_and_closes_the_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A defect in the re-read is no reason to serve a stale house, nor to hide it."""
+    server = FakeHomeAssistant()
+    connector = FakeHomeAssistantConnector(server)
+    connector.fail_next("connection refused")  # a reason the crash must not leave standing
+    resume = asyncio.Event()
+    delays: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        delays.append(seconds)
+        await resume.wait()
+
+    def release() -> None:
+        resume.set()
+        resume.clear()
+
+    def defect(*rows: object) -> object:
+        raise TypeError("a defect in the mapping")
+
+    lines: list[str] = []
+    handler = logger.add(lines.append, level="ERROR", format="{level}|{message}")
+    adapter = _adapter(connector, sleep=sleep)
+    await adapter.start()
+    try:
+        await _until(lambda: len(delays) == 1)
+        release()
+        await _until(lambda: adapter.syncs == 1)
+        with monkeypatch.context() as patched:
+            patched.setattr(players_module, "registries_from_rows", defect)
+            server.rename_area(LIVING_ROOM, "Lounge")
+            await _until(lambda: len(_commands(server, "config/entity_registry/list")) == 2)
+            await _settle()
+        errors = [line for line in lines if line.startswith("ERROR|")]
+        assert [line.split("\n")[0] for line in errors] == [_RE_READ_CRASHED]
+        assert "TypeError: a defect in the mapping" in errors[0], "the traceback is logged"
+        assert connector.latest.closed, "the crashed re-read closed its connection"
+        await _until(lambda: len(delays) == 2)
+        with pytest.raises(PortUnavailable, match=r"^Home Assistant is not answering$"):
+            adapter.snapshot()
+        release()
+        await _until(lambda: adapter.syncs == 2)
+        assert _area_name(adapter.snapshot(), LIVING_ROOM) == "Lounge"
+    finally:
+        await adapter.aclose()
+        logger.remove(handler)
 
 
 async def test_aclose_closes_the_socket() -> None:

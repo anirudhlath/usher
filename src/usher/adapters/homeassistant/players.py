@@ -268,7 +268,9 @@ class HomeAssistantPlayers(Players):
         A failed read closes the session: the reader then fails, the loop syncs
         from scratch, and until it does there is no house rather than a stale one.
         A read that failed because the session had already stopped is left to
-        whatever stopped it to report.
+        whatever stopped it to report. A re-read that raises anything else is
+        logged with its traceback and closes the session the same way, since its
+        task's exception would otherwise be discarded unread.
         """
         try:
             while True:
@@ -296,6 +298,14 @@ class HomeAssistantPlayers(Players):
                 exc,
             )
             self._failure = exc
+            self._closed_here = True
+            await session.aclose()
+        except Exception:
+            logger.exception(
+                "players: re-reading Home Assistant's registries crashed; "
+                "closing the connection to sync again"
+            )
+            self._failure = None
             self._closed_here = True
             await session.aclose()
 
