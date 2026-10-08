@@ -349,6 +349,8 @@ class Settings(BaseSettings):
     ha_token: SecretStr | None = None
     # How long one websocket command may wait for its answer.
     players_command_timeout_seconds: float = Field(default=10.0, gt=0)
+    # How long confirm waits for HA to report the change it wrote.
+    players_confirm_timeout_seconds: float = Field(default=10.0, gt=0)
     # The reconnect backoff's first ceiling, doubled per connection that never synced,
     players_backoff_seconds: float = Field(default=5.0, gt=0)
     # and where the doubling stops.

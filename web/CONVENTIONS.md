@@ -127,7 +127,7 @@ These come from `patterns.md` and the product brief. They are not style.
 - **A playback ticket URL is a secret.** No copy button, no share, no logging, no
   rendering. The request journal redacts it before it is stored.
 - **Errors show `code`, `status` and the server's `detail` verbatim, and never
-  parse `detail`.** Recovery is a lookup over the closed seven-code vocabulary.
+  parse `detail`.** Recovery is a lookup over the closed eight-code vocabulary.
 - **202 means queued.** Never "Done", never "Saved", never a bare checkmark.
 - **The UI must be fully correct if zero SSE frames ever arrive.** Live updates
   are delight, never mechanism.

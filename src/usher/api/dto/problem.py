@@ -26,6 +26,7 @@ class ProblemCode(StrEnum):
     SOURCE_UNAVAILABLE = "source_unavailable"
     NOT_PLAYABLE = "not_playable"
     TICKET_INVALID = "ticket_invalid"
+    PLAYERS_UNAVAILABLE = "players_unavailable"
 
 
 def problem_type(code: ProblemCode) -> str:

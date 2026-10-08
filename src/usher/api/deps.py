@@ -84,6 +84,7 @@ from usher.services.playback_ticket import build_ticket_cipher, mint
 from usher.services.reconcile import ReconcileService
 from usher.services.rows import enabled_row_providers, row_provider_settings
 from usher.services.rows.cache import RefreshQueue, RowCache
+from usher.services.screens import ScreensService
 from usher.services.search import SearchQueryBuffer, SearchService
 from usher.services.similar import SimilarityService
 from usher.services.sources import SourceService
@@ -92,6 +93,7 @@ from usher.services.titles import TitleReadService
 from usher.services.visibility import VisibilityService
 from usher.services.watch_sync import WatchStateSyncService
 from usher.services.watch_write import WatchWriteService
+from usher.services.ways import WaysService
 
 
 def get_app_settings(request: Request) -> Settings:
@@ -856,6 +858,22 @@ def get_players(request: Request) -> Players | None:
 
 
 PlayersDep = Annotated[Players | None, Depends(get_players)]
+
+
+def get_screens_service(players: PlayersDep, settings: SettingsDep) -> ScreensService:
+    """`ScreensService` over the process's players, confirm bounded by its setting."""
+    return ScreensService(players, confirm_timeout=settings.players_confirm_timeout_seconds)
+
+
+ScreensServiceDep = Annotated[ScreensService, Depends(get_screens_service)]
+
+
+def get_ways_service(players: PlayersDep, media_items: MediaItemRepositoryDep) -> WaysService:
+    """`WaysService` over the process's players and this request's copies."""
+    return WaysService(players, media_items)
+
+
+WaysServiceDep = Annotated[WaysService, Depends(get_ways_service)]
 
 
 # ---------------------------------------------------------------------------

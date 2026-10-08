@@ -848,6 +848,15 @@ export const CONFIG: readonly SettingRow[] = [
     measured: false,
   },
   {
+    key: 'USHER_PLAYERS_CONFIRM_TIMEOUT_SECONDS',
+    group: 'players',
+    def: '10.0',
+    about:
+      'How long confirming a player waits for Home Assistant to report the change Usher wrote. Past it the route answers 503 players_unavailable; the write may still land.',
+    secret: false,
+    measured: false,
+  },
+  {
     key: 'USHER_PLAYERS_BACKOFF_SECONDS',
     group: 'players',
     def: '5.0',

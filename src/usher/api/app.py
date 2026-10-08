@@ -31,12 +31,14 @@ from usher.api.routers import (
     people,
     playback,
     rows,
+    screens,
     search,
     series,
     sources,
     titles,
     unmatched,
     watch,
+    ways,
 )
 from usher.api.trace_response import TraceResponseMiddleware
 from usher.composition import (
@@ -223,12 +225,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(people.router)
     app.include_router(playback.router)
     app.include_router(rows.router)
+    app.include_router(screens.router)
     app.include_router(search.router)
     app.include_router(series.router)
     app.include_router(sources.router)
     app.include_router(titles.router)
     app.include_router(unmatched.router)
     app.include_router(watch.router)
+    app.include_router(ways.router)
     # **Last, and that ordering is the whole safety argument.** The console's history
     # fallback answers any navigation-shaped miss under `/console` -- Starlette matches
     # in registration order, so a miss outside it still falls through to the 404.
