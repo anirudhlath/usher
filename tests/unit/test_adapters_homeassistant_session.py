@@ -459,8 +459,7 @@ async def test_a_command_failed_in_send_leaves_no_exception_for_asyncio_to_repor
             async with asyncio.timeout(1.0):
                 with pytest.raises(PortUnavailable):
                     await pumps[0]
-            failed = [future.done() for _, future in session._pending.values()]
-            assert failed == [True], "the premise: the reader failed it while it was in send"
+            assert not waiting.done(), "the premise: the reader ended while it was in send"
             release.set()
             await asyncio.wait([waiting], timeout=1.0)
             failure = waiting.exception()

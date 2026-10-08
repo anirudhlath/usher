@@ -101,7 +101,11 @@ class HomeAssistantSession:
 
     @property
     def stopped(self) -> bool:
-        """Whether the reader ended or the session was closed; nothing is sent after."""
+        """Whether the reader ended, the session was closed or a send failed; nothing is sent after.
+
+        A failed send counts at once, while the reader may still be draining frames
+        queued before the socket went.
+        """
         return self._stop is not None
 
     @classmethod
@@ -140,7 +144,7 @@ class HomeAssistantSession:
         answered: asyncio.Future[Answer] = asyncio.get_running_loop().create_future()
         self._pending[ident] = (kind, answered)
         try:
-            await self._socket.send(json.dumps({**fields, "id": ident, "type": kind}))
+            await self._send({**fields, "id": ident, "type": kind})
             async with asyncio.timeout(self._command_timeout):
                 return await answered
         except TimeoutError:
@@ -199,16 +203,29 @@ class HomeAssistantSession:
             self._pumping = False
             self._fail_pending(why)
 
+    async def _send(self, frame: Mapping[str, object]) -> None:
+        """Send one frame; a send that fails means the socket is gone, so the session stops."""
+        try:
+            await self._socket.send(json.dumps(frame))
+        except PortUnavailable:
+            self._record(_HA_CLOSED)
+            raise
+
+    def _record(self, why: _Stop) -> _Stop:
+        """Keep the first reason the session stopped for, and answer the one that stands."""
+        if self._stop is None:
+            self._stop = why
+        return self._stop
+
     def _fail_pending(self, why: _Stop) -> None:
         """Refuse every later command and fail each waiting one at once; the first `why` stands.
 
         After `aclose` the reader's socket fails too, and that is not Home Assistant's doing.
         """
-        if self._stop is None:
-            self._stop = why
+        stop = self._record(why)
         for kind, answered in self._pending.values():
             if not answered.done():
-                answered.set_exception(PortUnavailable(self._stop.waiting.format(kind=kind)))
+                answered.set_exception(PortUnavailable(stop.waiting.format(kind=kind)))
 
     def _event(self, frame: Mapping[str, object]) -> Event | None:
         event = frame.get("event")

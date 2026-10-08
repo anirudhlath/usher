@@ -3,6 +3,8 @@
 import asyncio
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 
 import pytest
 import pytest_asyncio
@@ -553,10 +555,26 @@ async def test_a_failed_re_read_drops_the_connection_and_the_next_sync_brings_th
         await adapter.aclose()
 
 
-async def _warnings_until_the_backoff(
-    server: FakeHomeAssistant, end: Callable[[FakeHomeAssistantConnector], None]
-) -> list[str]:
-    """Every WARNING from a synced adapter whose re-read is in flight when `end` runs."""
+@dataclass
+class _Watched:
+    adapter: HomeAssistantPlayers
+    connector: FakeHomeAssistantConnector
+    delays: list[float]
+    resume: asyncio.Event
+    lines: list[str]
+
+    def release(self) -> None:
+        """Let the backoff waiting now return; the next one waits again."""
+        self.resume.set()
+        self.resume.clear()
+
+    def warnings(self) -> list[str]:
+        return [line.rstrip("\n") for line in self.lines]
+
+
+@asynccontextmanager
+async def _watched(server: FakeHomeAssistant) -> AsyncIterator[_Watched]:
+    """A synced adapter whose backoffs wait for `release`, with every WARNING it logs."""
     connector = FakeHomeAssistantConnector(server)
     resume = asyncio.Event()
     delays: list[float] = []
@@ -571,30 +589,73 @@ async def _warnings_until_the_backoff(
     try:
         await adapter.start()
         await _until(lambda: adapter.syncs == 1)
-        server.unanswered.add("config/area_registry/list")
-        server.rename_area(LIVING_ROOM, "Lounge")
-        await _until(lambda: len(_commands(server, "config/area_registry/list")) == 2)
-        end(connector)
-        await _until(lambda: len(delays) == 1)
+        yield _Watched(adapter, connector, delays, resume, lines)
     finally:
         await adapter.aclose()
         logger.remove(handler)
-    return [line.rstrip("\n") for line in lines]
+
+
+_CLOSED_AFTER_A_FAILED_RE_READ = (
+    "players: re-reading Home Assistant's registries failed; closing the connection to "
+    "sync again: Home Assistant did not answer config/area_registry/list within 0.05s"
+)
+_DROPPED = "players: the Home Assistant connection ended: connection closed by peer"
 
 
 async def test_a_failed_re_read_says_usher_closed_the_connection_and_nothing_else() -> None:
-    lines = await _warnings_until_the_backoff(FakeHomeAssistant(), lambda _connector: None)
-    assert lines == [
-        "players: re-reading Home Assistant's registries failed; closing the connection to "
-        "sync again: Home Assistant did not answer config/area_registry/list within 0.05s"
-    ]
+    server = FakeHomeAssistant()
+    async with _watched(server) as watched:
+        server.unanswered.add("config/area_registry/list")
+        server.rename_area(LIVING_ROOM, "Lounge")
+        await _until(lambda: len(watched.delays) == 1)
+    assert watched.warnings() == [_CLOSED_AFTER_A_FAILED_RE_READ]
 
 
 async def test_a_drop_during_a_re_read_is_reported_once_as_the_drop() -> None:
-    lines = await _warnings_until_the_backoff(
-        FakeHomeAssistant(), lambda connector: connector.latest.drop()
+    server = FakeHomeAssistant()
+    async with _watched(server) as watched:
+        server.unanswered.add("config/area_registry/list")
+        server.rename_area(LIVING_ROOM, "Lounge")
+        await _until(lambda: len(_commands(server, "config/area_registry/list")) == 2)
+        watched.connector.latest.drop()
+        await _until(lambda: len(watched.delays) == 1)
+    assert watched.warnings() == [_DROPPED]
+
+
+async def test_a_re_read_whose_send_finds_the_socket_gone_reports_the_drop_once() -> None:
+    """HA queues three events and drops, so the next send fails while the reader drains."""
+    server = FakeHomeAssistant()
+
+    def three_events_then_drop() -> None:
+        del server.after_answer["config/area_registry/list"]
+        for reading in ("paused", "idle", "playing"):
+            server.change_state(HouseState(entity_id=APPLE_TV, state=reading))
+        server.connections[-1].drop()
+
+    async with _watched(server) as watched:
+        server.after_answer["config/area_registry/list"] = [three_events_then_drop]
+        server.rename_area(LIVING_ROOM, "Lounge")
+        await _until(lambda: len(watched.delays) == 1)
+    assert len(_commands(server, "config/area_registry/list")) == 2, "the premise: re-read"
+    assert len(_commands(server, "config/device_registry/list")) == 1, (
+        "the premise: the re-read's next send never reached Home Assistant"
     )
-    assert lines == ["players: the Home Assistant connection ended: connection closed by peer"]
+    assert watched.warnings() == [_DROPPED]
+
+
+async def test_after_usher_closes_a_connection_a_drop_on_the_next_is_still_reported() -> None:
+    server = FakeHomeAssistant()
+    async with _watched(server) as watched:
+        server.unanswered.add("config/area_registry/list")
+        server.rename_area(LIVING_ROOM, "Lounge")
+        await _until(lambda: len(watched.delays) == 1)
+        server.unanswered.clear()
+        watched.release()
+        await _until(lambda: watched.adapter.syncs == 2)
+        assert len(server.connections) == 2, "the premise: the next sync is a new connection"
+        watched.connector.latest.drop()
+        await _until(lambda: len(watched.delays) == 2)
+    assert watched.warnings() == [_CLOSED_AFTER_A_FAILED_RE_READ, _DROPPED]
 
 
 async def test_aclose_closes_the_socket() -> None:
