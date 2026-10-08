@@ -181,9 +181,7 @@ class HomeAssistantPlayers(Players):
         pump = asyncio.create_task(session.pump(self._on_event))
         try:
             await self._sync(session)
-            # Shielded so a cancelled loop leaves the reader to the `finally`, which
-            # stops a re-read before the reader: the re-read ends cancelled, not failed.
-            await asyncio.shield(pump)
+            await pump
         except UsherPortError:
             # A failed re-read closed the socket itself and said why; the reader's
             # failure that follows is that close, so it is not reported as HA's.
