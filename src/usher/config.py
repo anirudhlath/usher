@@ -47,13 +47,15 @@ DEFAULT_LLM_BASE_URL = "http://localhost:8000/v1"
 _PLACEHOLDER_SECRET_KEY = "change-me-to-a-long-random-string"  # noqa: S105
 _ASYNCPG_DRIVER_PREFIX = "postgresql+asyncpg://"
 # An origin's shape once lowercased; `_is_browser_host` and `_is_browser_port`
-# refuse what a browser would rewrite. `[0-9]`, never `\d`, which admits any
+# refuse what no `Origin` can match. `[0-9]`, never `\d`, which admits any
 # Unicode digit and lets `int()` read a port no browser writes.
 _BARE_ORIGIN = re.compile(r"(https?)://([a-z0-9.-]+)(?::([0-9]{1,5}))?")
 _DEFAULT_PORT = {"http": "80", "https": "443"}
 _HIGHEST_PORT = 65535
 _OCTET = r"(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])"
 _DOTTED_QUAD = re.compile(rf"{_OCTET}(?:\.{_OCTET}){{3}}")
+# WHATWG's "ends in a number": a last label of ASCII digits, or `0x` and hex digits.
+_NUMERIC_LABEL = re.compile(r"[0-9]+|0x[0-9a-f]*")
 _CORS_ORIGINS_REFUSED = (
     "USHER_CORS_ORIGINS takes comma-separated origins such as "
     "http://homeassistant.local:8123: a scheme, a host and an optional port from "
@@ -68,18 +70,18 @@ COMPOSE_ONLY_PREFIX = "USHER_COMPOSE_"
 
 
 def _is_browser_host(host: str) -> bool:
-    """Whether a browser keeps `host` exactly as written, so its `Origin` can match.
+    """Whether a page can be served from `host` and a browser keeps it as written.
 
     One trailing dot is kept, and makes a distinct origin; any other empty
-    label names no host a page is served from. A host whose last label is all
-    digits or starts with `0x` is IPv4 to a browser, which rewrites shorthand
-    (`127.1`), hex and leading zeros, so it must already be a dotted quad of
-    decimal octets.
+    label names no host a page is served from. A host whose last label is a
+    number, all digits or `0x` and hex digits, is IPv4 to a browser, which
+    rewrites shorthand (`127.1`), hex and leading zeros, so it must already be
+    a dotted quad of decimal octets. `h.0xzz` ends in no number and is kept.
     """
     labels = host.removesuffix(".").split(".")
     if "" in labels:
         return False
-    if labels[-1].isdigit() or labels[-1].startswith("0x"):
+    if _NUMERIC_LABEL.fullmatch(labels[-1]):
         return _DOTTED_QUAD.fullmatch(host) is not None
     return True
 

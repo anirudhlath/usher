@@ -102,6 +102,7 @@ def test_origins_are_normalised() -> None:
         pytest.param("http://h.example.:8123", "http://h.example.:8123", id="trailing-dot"),
         pytest.param("http://home-assistant.example", "http://home-assistant.example", id="hyphen"),
         pytest.param("http://-h.example", "http://-h.example", id="hyphen-at-an-edge"),
+        pytest.param("http://h.0xzz", "http://h.0xzz", id="ends-in-no-number"),
     ],
 )
 def test_an_origin_is_written_as_a_browser_sends_it(value: str, written: str) -> None:
