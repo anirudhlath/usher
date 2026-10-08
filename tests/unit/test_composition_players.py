@@ -20,8 +20,11 @@ from usher.composition import house_players, nothing
 from usher.config import Settings
 from usher.ports.errors import PortUnavailable
 
-# The adapter's WARNING when a connection attempt fails; what follows it is the OS's.
+# The adapter's WARNING when a connection attempt fails, and the whole line for a
+# refused dial: the prefix, then the transport's own `PortUnavailable`, which is a
+# fixed label and the exception's class name. No text in it is the OS's.
 _ENDED: Final = "players: the Home Assistant connection ended: "
+_REFUSED: Final = f"{_ENDED}Home Assistant websocket could not be opened: ConnectionRefusedError"
 
 
 def _settings(**fields: Any) -> Settings:
@@ -105,6 +108,7 @@ async def test_an_unreachable_home_assistant_never_stops_the_app_serving() -> No
             async with asyncio.timeout(5.0):
                 while not any(line.startswith(_ENDED) for line in lines):
                     await asyncio.sleep(0.01)
+            assert {line.rstrip("\n") for line in lines if line.startswith(_ENDED)} == {_REFUSED}
             transport = ASGITransport(app=manager.app)
             async with AsyncClient(transport=transport, base_url="http://test") as client:
                 assert (await client.get("/health")).status_code == 200
