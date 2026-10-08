@@ -1,9 +1,9 @@
 /**
- * The seven-code vocabulary, and the table recovery is looked up in.
+ * The eight-code vocabulary, and the table recovery is looked up in.
  *
  * The point of these is not that a lookup returns what it was written to
  * return. It is that the *closure* holds: the table is total over the schema's
- * enum, an eighth code cannot be silently untested, and the one distinction a
+ * enum, a ninth code cannot be silently untested, and the one distinction a
  * component would otherwise get wrong — two codes share status 404 and only one
  * of them may offer a retry — is asserted rather than assumed.
  */
@@ -29,14 +29,15 @@ const ALL_CODES: ProblemCode[] = [
   'source_unavailable',
   'not_playable',
   'ticket_invalid',
+  'players_unavailable',
 ]
 
 describe('the closed vocabulary', () => {
-  it('has exactly seven members and the table covers all of them', () => {
+  it('has exactly eight members and the table covers all of them', () => {
     // Spelled out rather than derived from `RECOVERY`, or this asserts only
     // that an object has the keys it was written with.
     expect(Object.keys(RECOVERY).sort()).toEqual([...ALL_CODES].sort())
-    expect(ALL_CODES).toHaveLength(7)
+    expect(ALL_CODES).toHaveLength(8)
   })
 
   it('rejects anything outside it', () => {
@@ -110,6 +111,14 @@ describe('patterns.md §3, one case per row of the table', () => {
     expect(entry.scale).toBe('inline')
     expect(entry.retryable).toBe(true)
     expect(entry.recovery.kind).toBe('re-request')
+  })
+
+  it('players_unavailable retries and honours Retry-After, like source_unavailable', () => {
+    const entry = RECOVERY.players_unavailable
+    expect(entry.status).toBe(503)
+    expect(entry.scale).toBe('panel')
+    expect(entry.retryable).toBe(true)
+    expect(entry.recovery).toEqual({ kind: 'retry', honourRetryAfter: true })
   })
 
   it('separates the two 404s, which status alone cannot', () => {

@@ -457,6 +457,53 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/screens": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Every screen in the house, and every player waiting on the owner
+         * @description Home Assistant's registry projected onto screens, from the latest reading.
+         *
+         *     Recomputed on every request and never stored, so a rename or a move in
+         *     Home Assistant shows on the next one.
+         */
+        get: operations["list_screens_screens_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/screens/devices/{entity_id}/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Use or ignore a player, placing it in an area when asked
+         * @description Write the player's label, and its device's area, to Home Assistant.
+         *
+         *     The answer is the house once Home Assistant reports every write. Nothing
+         *     is written when the request is refused; an area write Home Assistant refuses
+         *     leaves the label in place, and confirming again is safe.
+         */
+        post: operations["confirm_device_screens_devices__entity_id__confirm_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/search": {
         parameters: {
             query?: never;
@@ -850,10 +897,60 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/titles/{title_id}/ways": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Every way to play a title, per screen, the best of each marked
+         * @description Every copy on every player through every recipe, on one screen or every one.
+         *
+         *     A read: it mints no ticket and calls no source. With no house to read it
+         *     still answers, with `screens_available: false` and no screens.
+         */
+        get: operations["title_ways_titles__title_id__ways_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/episodes/{episode_id}/ways": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Every way to play an episode, per screen, the best of each marked
+         * @description The same for one episode.
+         */
+        get: operations["episode_ways_episodes__episode_id__ways_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** AreaResponse */
+        AreaResponse: {
+            /** Area Id */
+            area_id: string;
+            /** Name */
+            name: string;
+        };
         /**
          * AttributionEntry
          * @description One required attribution string and the source it belongs to.
@@ -1087,6 +1184,16 @@ export interface components {
             titles: components["schemas"]["CollectionMemberResponse"][];
         };
         /**
+         * ConfirmRequest
+         * @description Use or ignore the player; `area_id` places one in use that is in no area.
+         */
+        ConfirmRequest: {
+            /** Use */
+            use: boolean;
+            /** Area Id */
+            area_id?: string | null;
+        };
+        /**
          * CreditResponse
          * @description One person's involvement in this title, as a client renders it.
          */
@@ -1103,6 +1210,30 @@ export interface components {
             /** Job */
             job: string | null;
         };
+        /**
+         * DeviceResponse
+         * @description A player Usher could play on. `state` is null while HA reports none for it.
+         */
+        DeviceResponse: {
+            /** Entity Id */
+            entity_id: string;
+            /** Name */
+            name: string;
+            /** Model */
+            model: string | null;
+            /** Area Id */
+            area_id: string | null;
+            role: components["schemas"]["DeviceRole"] | null;
+            /** Recipes */
+            recipes: components["schemas"]["RecipeResponse"][];
+            state: components["schemas"]["PlayerStateResponse"] | null;
+        };
+        /**
+         * DeviceRole
+         * @description What the owner decided about a player, as a label in Home Assistant carries it.
+         * @enum {string}
+         */
+        DeviceRole: "use" | "ignore";
         /**
          * DisplayHint
          * @description The whole of the client vocabulary: a row carries a hint, never a layout.
@@ -1509,11 +1640,31 @@ export interface components {
             source: components["schemas"]["PlaySourceResponse"];
         };
         /**
+         * PlayerStateResponse
+         * @description Home Assistant's live reading of a player, passed through rather than reinterpreted.
+         */
+        PlayerStateResponse: {
+            /** State */
+            state: string;
+            /** App Id */
+            app_id: string | null;
+            /** App Name */
+            app_name: string | null;
+            /** Media Title */
+            media_title: string | null;
+            /** Media Duration Seconds */
+            media_duration_seconds: number | null;
+            /** Media Position Seconds */
+            media_position_seconds: number | null;
+            /** Media Position Updated At */
+            media_position_updated_at: string | null;
+        };
+        /**
          * ProblemCode
          * @description The machine-readable `code`, and the vocabulary is closed.
          * @enum {string}
          */
-        ProblemCode: "not_found" | "validation_failed" | "method_not_allowed" | "invalid_cursor" | "source_unavailable" | "not_playable" | "ticket_invalid";
+        ProblemCode: "not_found" | "validation_failed" | "method_not_allowed" | "invalid_cursor" | "source_unavailable" | "not_playable" | "ticket_invalid" | "players_unavailable";
         /**
          * ProblemResponse
          * @description RFC 9457's five members, plus PRD 07's `code`.
@@ -1569,6 +1720,20 @@ export interface components {
             status: string;
             checks: components["schemas"]["ReadinessChecks"];
             lanes: components["schemas"]["LaneReport"];
+        };
+        /**
+         * RecipeResponse
+         * @description One way a player can be handed a title. `proven` is false until a send shows it.
+         */
+        RecipeResponse: {
+            /** Key */
+            key: string;
+            /** Name */
+            name: string;
+            /** Hands Free */
+            hands_free: boolean;
+            /** Proven */
+            proven: boolean;
         };
         /**
          * RegenerateResponse
@@ -1700,6 +1865,40 @@ export interface components {
             display_hint: components["schemas"]["DisplayHint"];
             /** Cards */
             cards: components["schemas"]["RowCardResponse"][];
+        };
+        /** ScreenResponse */
+        ScreenResponse: {
+            /** Area Id */
+            area_id: string;
+            /** Name */
+            name: string;
+            /** Devices */
+            devices: components["schemas"]["DeviceResponse"][];
+        };
+        /** ScreenWaysResponse */
+        ScreenWaysResponse: {
+            /** Area Id */
+            area_id: string;
+            /** Name */
+            name: string;
+            /** Ways */
+            ways: components["schemas"]["WayResponse"][];
+        };
+        /**
+         * ScreensResponse
+         * @description Every candidate in exactly one of four places, and every area to place one in.
+         */
+        ScreensResponse: {
+            /** Screens */
+            screens: components["schemas"]["ScreenResponse"][];
+            /** Unconfirmed */
+            unconfirmed: components["schemas"]["DeviceResponse"][];
+            /** No Area */
+            no_area: components["schemas"]["DeviceResponse"][];
+            /** Ignored */
+            ignored: components["schemas"]["DeviceResponse"][];
+            /** Areas */
+            areas: components["schemas"]["AreaResponse"][];
         };
         /**
          * SearchMode
@@ -2238,6 +2437,70 @@ export interface components {
             position_seconds: number;
             /** Played */
             played: boolean;
+        };
+        /**
+         * WayFileResponse
+         * @description The copy a way plays, as the facts its ranking read. No `external_id`, no path.
+         */
+        WayFileResponse: {
+            /**
+             * Source Id
+             * Format: uuid
+             */
+            source_id: string;
+            /** Resolution */
+            resolution: string;
+            /** Container */
+            container: string | null;
+            /** Video Codec */
+            video_codec: string | null;
+            hdr_format: components["schemas"]["HdrFormat"] | null;
+            /** Audio Codec */
+            audio_codec: string | null;
+            /** Audio Channels */
+            audio_channels: number | null;
+            /** Runtime Seconds */
+            runtime_seconds: number | null;
+        };
+        /**
+         * WayResponse
+         * @description One copy on one player through one recipe.
+         *
+         *     `refusal` is null exactly when `playable` is true. `gives_up` is empty on
+         *     the best way and on every way that cannot play.
+         */
+        WayResponse: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Entity Id */
+            entity_id: string;
+            /** Device */
+            device: string;
+            recipe: components["schemas"]["RecipeResponse"];
+            file: components["schemas"]["WayFileResponse"];
+            /** Playable */
+            playable: boolean;
+            /** Refusal */
+            refusal: string | null;
+            /** Best */
+            best: boolean;
+            /** Gives Up */
+            gives_up: string[];
+            /** Facts Known */
+            facts_known: boolean;
+        };
+        /**
+         * WaysResponse
+         * @description Ways grouped by screen, in the ranking's order, each screen's best first.
+         */
+        WaysResponse: {
+            /** Screens Available */
+            screens_available: boolean;
+            /** Screens */
+            screens: components["schemas"]["ScreenWaysResponse"][];
         };
     };
     responses: never;
@@ -2842,6 +3105,88 @@ export interface operations {
             };
             /** @description The request was rejected. */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    list_screens_screens_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScreensResponse"];
+                };
+            };
+            /** @description Players are off, or Home Assistant cannot be read or written now. Retryable, except while players are off or the token is refused. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    confirm_device_screens_devices__entity_id__confirm_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                entity_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConfirmRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScreensResponse"];
+                };
+            };
+            /** @description No player Usher could play on has this id. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description The request was rejected, names no area, or names a player that cannot be placed. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Players are off, or Home Assistant cannot be read or written now. Retryable, except while players are off or the token is refused. */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -3564,6 +3909,90 @@ export interface operations {
                 };
             };
             /** @description The request was rejected. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    title_ways_titles__title_id__ways_get: {
+        parameters: {
+            query?: {
+                screen?: string | null;
+            };
+            header?: never;
+            path: {
+                title_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WaysResponse"];
+                };
+            };
+            /** @description No such title or episode. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description The request was rejected, or `screen` names no screen. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    episode_ways_episodes__episode_id__ways_get: {
+        parameters: {
+            query?: {
+                screen?: string | null;
+            };
+            header?: never;
+            path: {
+                episode_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WaysResponse"];
+                };
+            };
+            /** @description No such title or episode. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description The request was rejected, or `screen` names no screen. */
             422: {
                 headers: {
                     [name: string]: unknown;

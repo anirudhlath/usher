@@ -69,7 +69,7 @@ export function FeedbackSpecimens() {
     <GroupSection
       id="feedback"
       title="Feedback"
-      blurb="One error surface at four scales over a closed seven-code vocabulary, receipts that say “queued” and never “done”, skeletons shaped like the thing that is coming, and a confirm that names the consequence instead of asking whether you are sure."
+      blurb="One error surface at four scales over a closed code vocabulary, receipts that say “queued” and never “done”, skeletons shaped like the thing that is coming, and a confirm that names the consequence instead of asking whether you are sure."
     >
       <Specimen
         name="Problem/panel-source-unavailable"

@@ -815,7 +815,7 @@ function codeOf(error: unknown): string | null {
 }
 
 /**
- * The seven-code table decides the scale, with one translation: `field` scale
+ * The eight-code table decides the scale, with one translation: `field` scale
  * assumes a field to attach to, and browse's inputs are URL parameters. The
  * panel lists `errors[].loc`/`.msg`, which names the field the other way round.
  */

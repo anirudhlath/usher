@@ -6,7 +6,7 @@ import { Button } from '../actions'
  * The one error component, at four scales: `inline` (a field hint), `panel` (a failed section),
  * `page` (a failed route), `toast` (a background failure).
  *
- * The API's error set is closed — seven codes — and each has exactly one correct recovery:
+ * The API's error set is closed — eight codes — and each has exactly one correct recovery:
  * · not_found (404)          → back / search. No retry.
  * · validation_failed (422)  → field errors from errors[].loc/.msg.
  * · method_not_allowed (405) → generic. Developer error.
@@ -14,6 +14,7 @@ import { Button } from '../actions'
  * · source_unavailable (503) → retryable, honour Retry-After.
  * · not_playable (409)       → no retry button. There is no playable file.
  * · ticket_invalid (404)     → one tap re-requests and plays.
+ * · players_unavailable (503) → retryable, except while players are off or the token is refused.
  *
  * `detail` is prose that may be reworded at any release: never parse it, always show it — it is
  * often the only thing that tells an operator what happened.
@@ -22,7 +23,7 @@ import { Button } from '../actions'
 /**
  * The vocabulary is declared here rather than imported from `src/api/` on purpose: the
  * design-system boundary forbids that import, and a component that knew the transport would not be
- * reusable. `src/api/problem.ts` declares the same seven members; they are checked against each
+ * reusable. `src/api/problem.ts` declares the same eight members; they are checked against each
  * other by the feature layer that maps one onto the other.
  */
 export type ProblemCode =
@@ -33,6 +34,7 @@ export type ProblemCode =
   | 'source_unavailable'
   | 'not_playable'
   | 'ticket_invalid'
+  | 'players_unavailable'
 
 export type ProblemScale = 'inline' | 'panel' | 'page' | 'toast'
 
@@ -151,6 +153,13 @@ const TREATMENT = {
     rendered: true,
     message: 'That link expired.',
     retryLabel: 'Play again',
+  },
+  players_unavailable: {
+    scale: 'panel',
+    retry: true,
+    rendered: true,
+    message: "Screens aren't available right now.",
+    retryLabel: 'Try again',
   },
 } as const satisfies Record<ProblemCode, ProblemTreatment>
 
