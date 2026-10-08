@@ -10,6 +10,9 @@ Versioning is `0.x` while the wire contract may still move —
 
 ### Added
 
+- The counter `usher.sync.retraction.checks` counts the items a sweep or a
+  push removal asked the server about, by `path` (`sweep` or `push`) and
+  `outcome` (`gone` or `served`).
 - Listing requests to a source are capped at `USHER_SYNC_WALKERS` (default 4)
   and back off on their own: an outage or a 429 drops the cap to one,
   and every ten pages that succeed raise it by one. The gauge
@@ -101,6 +104,13 @@ Versioning is `0.x` while the wire contract may still move —
 
 ### Fixed
 
+- **A full walk no longer marks items unavailable that the server still
+  serves.** Emby's listing shows one version of a film with several, so every
+  full walk retracted the alternate versions a delta or a push event had
+  stored. The sweep now asks the server about the items the walk did not list,
+  retracts only those it confirms gone, and records the rest as seen. If the
+  server cannot answer, nothing is retracted, and the next full walk resumes
+  the run and only sweeps.
 - **Items deleted from the source mid-walk no longer hide others from the
   walk.** Each page re-reads the end of the page before, so a full walk no
   longer marks a file that is still there unavailable.

@@ -104,7 +104,7 @@ trigger, just open it.
 | `fixtures-and-fakes.md` | `tests/{fixtures,fakes,contract}/**`, both `conftest.py`s, `scripts/capture_{tmdb,emby}_fixture.py` |
 | `mutation-sweeps.md` | `docs/plans/**` |
 | `db-and-sql.md` | `src/usher/db/**`, `alembic.ini`, `scripts/measure_browse.py` |
-| `emby-push-and-ingest.md` | `adapters/emby/**`, `services/{push,ingest,matching,reconcile,watch_sync,watch_write}.py`, `scripts/measure_ingest.py` |
+| `emby-push-and-ingest.md` | `adapters/emby/**`, `services/{push,ingest,matching,reconcile,retraction,watch_sync,watch_write}.py`, `scripts/measure_ingest.py` |
 | `tmdb-and-enrichment.md` | `adapters/tmdb/**`, `services/{enrich,handlers}.py`, `scripts/measure_worker_lane.py`, `scripts/enqueue_tier_enrichment.py` |
 | `search-and-embeddings.md` | `adapters/{search,embedding}/**`, `services/{search,similar,index,genres}.py`, `domain/genres.py`, `db/repositories/search.py`, `api/routers/search.py`, `scripts/measure_{suggest_tiers,exact_name_rank,fusion_coverage_bias}.py` |
 | `rows-and-genome.md` | `services/rows/**`, `home.py`, `taste.py`, `similar.py`, `scripts/measure_{rows,pair_rates}.py` |

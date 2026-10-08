@@ -106,7 +106,7 @@ control that does nothing.
 
 ### Metrics — OpenTelemetry → Prometheus
 
-**Every row is emitted today. 44 rows: 43 instruments Usher declares, plus one
+**Every row is emitted today. 45 rows: 44 instruments Usher declares, plus one
 `FastAPIInstrumentor` supplies.**
 
 | Metric | Type | Labels | Emitted |
@@ -129,6 +129,7 @@ control that does nothing.
 | `usher.match.result` | counter | method, confident | ✅ M4 |
 | `usher.sync.run.duration` | histogram | source, kind, status | ✅ M4 |
 | `usher.sync.retraction.fraction` | histogram | source, outcome | ✅ M10 |
+| `usher.sync.retraction.checks` | counter | source, path, outcome | ✅ confirmed retraction |
 | `usher.sync.unit.duration` | histogram | source, stage | ✅ fast first sync |
 | `usher.watch_state.run.duration` | histogram | source, status | ✅ M4 |
 | `usher.watch_state.backfilled` | counter | source | ✅ M4 |

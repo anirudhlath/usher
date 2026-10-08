@@ -5,6 +5,7 @@ paths:
   - "src/usher/services/ingest.py"
   - "src/usher/services/matching.py"
   - "src/usher/services/reconcile.py"
+  - "src/usher/services/retraction.py"
   - "src/usher/services/watch_sync.py"
   - "src/usher/services/watch_write.py"
   - "src/usher/api/routers/unmatched.py"
@@ -190,7 +191,8 @@ job is enqueued at `BACKFILL` for that remote search.
   no retraction test fails; what breaks is the column's meaning. **Assert
   `stored.last_seen_at == run.started_at`.**
 - **A resumed whole-library walk keeps its run's `started_at`**: every item an
-  earlier attempt saw carries that instant, and a fresh one retracts them all.
+  earlier attempt saw carries that instant, and a fresh one makes every one of
+  them a sweep candidate.
 - **An episode's `MediaItem` carries two ids and its `WatchState` may carry one**
   (`num_nonnulls(title_id, episode_id) = 1`), so `_watch_target` collapses the
   pair with the episode winning: passing both raises `PortDataMalformed` and

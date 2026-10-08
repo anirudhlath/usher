@@ -71,11 +71,11 @@ class MediaItemTarget:
 class MediaItemUpsert:
     """One row for the staged `media_items` upsert.
 
-    `last_seen_at` has no default. It is the availability sweep's only
-    input, and it must be the *run's* start instant rather than each row's
-    own write instant -- a per-row `now()` would make the sweep's
-    `last_seen_at < run.started_at` comparison race against the batch it is
-    sweeping over.
+    `last_seen_at` has no default. It decides which rows the availability
+    sweep asks the source about, and it must be the *run's* start instant
+    rather than each row's own write instant -- a per-row `now()` would make
+    the sweep's `last_seen_at < run.started_at` comparison race against the
+    batch it is sweeping over.
 
     `title_id`/`episode_id` are `None` for an unmatched item, which is a
     legitimate and common state (PRD 02) -- but the upsert statement must
@@ -195,15 +195,15 @@ class Retraction:
 
 
 class AvailabilitySweepRefused(UsherPortError):
-    """The sweep would retract more of a source than the ceiling permits, so it retracted nothing.
+    """A walk left more of a source unlisted than the ceiling permits, so its sweep stopped.
 
-    `SourceAdapter.list_items` already guarantees a walk raises rather than
-    truncating, and `ReconcileService` refuses to sweep after a run that
-    raised. This covers the residual: a walk that *completes* and returns far
-    less than the library holds -- an unmounted drive, a library removed by
-    accident, a permissions change on the source's account. No adapter can
-    tell that from a genuine mass deletion and Usher cannot undo one, so the
-    sweep declines and says so.
+    `SourceAdapter.list_items` already guarantees a walk raises rather than truncating,
+    and `ReconcileService` refuses to sweep after a run that raised. This covers the
+    residual: a walk that *completes* and lists far less than the library holds -- an
+    unmounted drive, a library removed by accident, a permissions change on the
+    source's account. Confirmation cannot tell those from a genuine mass deletion
+    either -- the source no longer serves the items in every one of them -- so above
+    the ceiling the sweep asks nothing, retracts nothing, and says so.
 
     Carries the numbers, not just a message: the operator's next question is
     whether the library really shrank by that much.

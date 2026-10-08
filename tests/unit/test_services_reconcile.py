@@ -3,7 +3,7 @@
 import asyncio
 import contextlib
 import uuid
-from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Collection, Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from itertools import groupby, pairwise
 
@@ -12,7 +12,11 @@ import pytest
 from loguru import logger
 from opentelemetry import metrics, trace
 from opentelemetry.sdk.metrics import MeterProvider
-from opentelemetry.sdk.metrics.export import HistogramDataPoint, InMemoryMetricReader
+from opentelemetry.sdk.metrics.export import (
+    HistogramDataPoint,
+    InMemoryMetricReader,
+    NumberDataPoint,
+)
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -390,6 +394,7 @@ async def test_a_refused_sweep_fails_the_run_and_changes_nothing(
     assert run.items_retracted == 0
     stored = await fixture.media_items.get_by_external_id(fixture.source.id, "m5")
     assert stored is not None and stored.available is True
+    assert fixture.adapter.confirm_calls == [], "the source was asked before the ceiling refused"
 
 
 async def test_a_refused_sweep_keeps_the_upserts_the_walk_made(
@@ -414,6 +419,152 @@ async def test_a_refused_sweep_keeps_the_upserts_the_walk_made(
     newcomer = await fixture.media_items.get_by_external_id(fixture.source.id, "m9")
     assert newcomer is not None, "the refusal rolled back the walk's own upserts"
     assert newcomer.available is True
+
+
+# -- the sweep asks before it retracts ---------------------------------------
+
+
+async def test_a_sweep_retracts_what_the_source_confirms_gone_and_stamps_what_it_serves(
+    fixture: _Fixture,
+) -> None:
+    """m9 is gone. m8 is still served by id but in no listing, as an alternate version is."""
+    for index in range(10):
+        fixture.adapter.seed(_item(f"m{index}"), T0)
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    fixture.adapter.forget("m9")
+    fixture.adapter.unlist("m8")
+    lines: list[str] = []
+    sink = logger.add(lines.append, level="INFO", format="{message}")
+    try:
+        second = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    finally:
+        logger.remove(sink)
+    assert fixture.adapter.confirm_calls == [frozenset({"m8", "m9"})]
+    assert second.status is SyncRunStatus.COMPLETED
+    assert second.items_retracted == 1
+    gone = await fixture.media_items.get_by_external_id(fixture.source.id, "m9")
+    assert gone is not None and gone.available is False
+    served = await fixture.media_items.get_by_external_id(fixture.source.id, "m8")
+    assert served is not None
+    assert (served.available, served.last_seen_at) == (True, second.started_at)
+    assert [line.rstrip("\n") for line in lines if "sweep found" in line] == [
+        "Living Room Emby's sweep found 2 rows the walk did not list: 1 gone, 1 still served"
+    ]
+
+
+async def test_a_sweep_with_nothing_unseen_asks_nothing_and_says_so(fixture: _Fixture) -> None:
+    for index in range(4):
+        fixture.adapter.seed(_item(f"m{index}"), T0)
+    lines: list[str] = []
+    sink = logger.add(lines.append, level="INFO", format="{message}")
+    try:
+        run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    finally:
+        logger.remove(sink)
+    assert run.status is SyncRunStatus.COMPLETED
+    assert fixture.adapter.confirm_calls == []
+    assert [line.rstrip("\n") for line in lines if "sweep found" in line] == [
+        "Living Room Emby's sweep found 0 rows the walk did not list: 0 gone, 0 still served"
+    ]
+
+
+async def test_a_sweep_the_source_cannot_answer_fails_and_the_next_walk_only_sweeps() -> None:
+    """Nothing retracted or stamped, a resumable failure, and a resume that walks no unit."""
+    fixture = _Fixture()
+    _shelve(fixture, "Films", range(10))
+    first = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    assert first.status is SyncRunStatus.COMPLETED, "the premise: the first walk completed"
+    fixture.adapter.forget("m9")
+    fixture.adapter.unlist("m8")
+    fixture.adapter.fail_confirm()
+
+    failed = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+
+    assert failed.status is SyncRunStatus.FAILED
+    assert (failed.error_code, failed.items_retracted) == (None, 0)
+    assert "while confirming removals" in (failed.error or "")
+    for external_id in ("m8", "m9"):
+        stored = await fixture.media_items.get_by_external_id(fixture.source.id, external_id)
+        assert stored is not None
+        assert (stored.available, stored.last_seen_at) == (True, first.started_at), external_id
+
+    fixture.adapter.clear_failure()
+    fixture.adapter.unit_starts.clear()
+    resumed = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+
+    assert (resumed.id, resumed.started_at) == (failed.id, failed.started_at)
+    assert resumed.status is SyncRunStatus.COMPLETED
+    assert fixture.adapter.unit_starts == [], "the resume walked a unit again"
+    assert resumed.items_retracted == 1
+    gone = await fixture.media_items.get_by_external_id(fixture.source.id, "m9")
+    assert gone is not None and gone.available is False
+    served = await fixture.media_items.get_by_external_id(fixture.source.id, "m8")
+    assert served is not None
+    assert (served.available, served.last_seen_at) == (True, resumed.started_at)
+
+
+async def test_a_row_read_since_the_walk_began_survives_a_gone_answer(fixture: _Fixture) -> None:
+    """The guard is the run's `started_at`, so a read after the walk began wins over it."""
+    for index in range(10):
+        fixture.adapter.seed(_item(f"m{index}"), T0)
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    fixture.adapter.forget("m9")
+    original = fixture.adapter.confirm_gone
+
+    async def _read_back_first(external_ids: Collection[str]) -> frozenset[str]:
+        await fixture.ingest.ingest_batch(
+            fixture.source.id, [_item("m9")], observed_at=datetime.now(UTC)
+        )
+        return await original(external_ids)
+
+    fixture.adapter.confirm_gone = _read_back_first  # type: ignore[method-assign]
+    second = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    stored = await fixture.media_items.get_by_external_id(fixture.source.id, "m9")
+    assert stored is not None
+    assert stored.last_seen_at > second.started_at, "the premise: read after the walk began"
+    assert stored.available is True
+    assert second.items_retracted == 0
+
+
+async def test_the_heartbeat_beats_while_the_source_confirms_removals() -> None:
+    """Confirming a long unseen list can take as long as a plan, so the sweep beats too."""
+    fixture = _Fixture(heartbeat_seconds=0.01)
+    _shelve(fixture, "Films", range(10))
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    fixture.adapter.forget("m9")
+    asked, release = asyncio.Event(), asyncio.Event()
+    original = fixture.adapter.confirm_gone
+
+    async def _held(external_ids: Collection[str]) -> frozenset[str]:
+        asked.set()
+        await release.wait()
+        return await original(external_ids)
+
+    fixture.adapter.confirm_gone = _held  # type: ignore[method-assign]
+    walk = asyncio.create_task(
+        fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    )
+    try:
+        async with asyncio.timeout(5):
+            await asked.wait()
+        start = len(fixture.checkpoints)
+        with contextlib.suppress(TimeoutError):
+            async with asyncio.timeout(5):
+                while len(fixture.checkpoints) < start + 3:
+                    await asyncio.sleep(0.01)
+        beats = [beat for _, beat in fixture.checkpoints[start : start + 3] if beat is not None]
+        assert len(beats) == 3, "fewer than three beats while the source was asked"
+        assert beats == sorted(set(beats)), "a beat that did not move the heartbeat"
+        held = await fixture.media_items.get_by_external_id(fixture.source.id, "m9")
+        assert held is not None and held.available is True, "retracted before the answer"
+    finally:
+        release.set()
+        run = await walk
+    assert run.status is SyncRunStatus.COMPLETED
+    assert run.items_retracted == 1
+    assert run.heartbeat_at is not None and run.heartbeat_at >= beats[-1], (
+        "the completing row moved the heartbeat back past a beat"
+    )
 
 
 async def test_a_bug_is_not_recorded_as_an_upstream_failure(fixture: _Fixture) -> None:
@@ -527,6 +678,7 @@ async def test_a_delta_walk_never_sweeps(fixture: _Fixture) -> None:
         stored = await fixture.media_items.get_by_external_id(fixture.source.id, f"m{index}")
         assert stored is not None
         assert stored.available is True
+    assert fixture.adapter.confirm_calls == []
 
 
 async def test_a_delta_walk_under_the_ceiling_still_never_sweeps() -> None:
@@ -896,7 +1048,7 @@ async def test_the_sweep_window_is_the_runs_own_start_instant(
     then refuses, turning every successful walk into a failed run.
     """
     seen: list[datetime] = []
-    original = fixture.media_items.mark_unseen_unavailable
+    original = fixture.media_items.list_unseen
 
     async def _record(
         source_id: uuid.UUID, *, seen_since: datetime, max_retract_fraction: float
@@ -906,7 +1058,7 @@ async def test_the_sweep_window_is_the_runs_own_start_instant(
             source_id, seen_since=seen_since, max_retract_fraction=max_retract_fraction
         )
 
-    fixture.media_items.mark_unseen_unavailable = _record  # type: ignore[method-assign, assignment]
+    fixture.media_items.list_unseen = _record  # type: ignore[method-assign, assignment]
     fixture.adapter.seed(_item("m1"), T0)
     run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
     assert seen == [run.started_at]
@@ -2389,6 +2541,39 @@ def _unit_durations(reader: InMemoryMetricReader) -> dict[tuple[str, str], tuple
                     labels = dict(point.attributes or {})
                     found[(str(labels["source"]), str(labels["stage"]))] = (point.count, point.sum)
     return found
+
+
+def _retraction_checks(reader: InMemoryMetricReader) -> dict[tuple[str, str, str], float]:
+    """`usher.sync.retraction.checks` as `{(source, path, outcome): value}`."""
+    found: dict[tuple[str, str, str], float] = {}
+    data = reader.get_metrics_data()
+    for resource in data.resource_metrics if data is not None else []:
+        for scope in resource.scope_metrics:
+            for metric in scope.metrics:
+                if metric.name != "usher.sync.retraction.checks":
+                    continue
+                for point in metric.data.data_points:
+                    assert isinstance(point, NumberDataPoint)
+                    labels = dict(point.attributes or {})
+                    key = (str(labels["source"]), str(labels["path"]), str(labels["outcome"]))
+                    found[key] = float(point.value)
+    return found
+
+
+async def test_a_sweep_counts_each_id_it_asked_about_on_the_sweep_path(
+    meter_reader: InMemoryMetricReader,
+) -> None:
+    fixture = _Fixture()
+    for index in range(10):
+        fixture.adapter.seed(_item(f"m{index}"), T0)
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    fixture.adapter.forget("m9")
+    fixture.adapter.unlist("m8")
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    assert _retraction_checks(meter_reader) == {
+        ("Living Room Emby", "sweep", "gone"): 1.0,
+        ("Living Room Emby", "sweep", "served"): 1.0,
+    }
 
 
 async def test_every_frame_of_a_planned_walk_says_where_its_plan_stands() -> None:

@@ -192,7 +192,7 @@ Push is the fast path, never the only path.
 |---|---|---|
 | **Push** | WebSocket event | Apply it inline when it is small; defer to a delta when it is large. A `WATCH_STATE_CHANGED` carrying its own payload merges with no request at all; one naming more than `push_max_items_per_event` items with no payload becomes a delta walk |
 | **Reconnect delta** | Socket re-established, or a push event deferred to a delta | Items changed since the last cursor. Bounded by `USHER_PUSH_GAP_MAX_ITEMS`, and **refused outright when there is no cursor** under `USHER_PUSH_GAP_CLOSE`'s `cursored` default |
-| **Full reconcile** | An operator's `POST /admin/sources/{id}/sync` or `usher sync`. Nothing in Usher schedules it; run it nightly from cron | Walk the source; upsert everything; mark unseen items `available = false` |
+| **Full reconcile** | An operator's `POST /admin/sources/{id}/sync` or `usher sync`. Nothing in Usher schedules it; run it nightly from cron | Walk the source; upsert everything; ask the source about the rows the walk did not list, and mark those it confirms gone `available = false` |
 
 **A triggered sync is a queued job, never a walk run inside the request.** The
 route enqueues `JobKind.SYNC` — the item lane then the watch lane — and its 202
@@ -274,12 +274,17 @@ watch lane owns its own cursor and still walks whole.
 **A push `ITEM_REMOVED` retracts nothing.** The event is counted and logged;
 the row stays available until a walk sweeps it.
 
-**Retraction is a separate step, and it can decline.** Marking unseen items
-unavailable happens only after a walk returns normally — after a whole-library
-walk, once every unit has completed — and even then it refuses to retract more
-than `sync_max_retract_fraction` (default `0.25`) of a source in one run,
-raising and changing nothing. `1.0` disables the ceiling. The ceiling is a
-fraction of what *Usher* holds for that source, not of the source itself.
+**Retraction is a separate step, and it can decline.** It runs only after a
+walk returns normally — after a whole-library walk, once every unit has
+completed. The rows the walk did not list are its candidates. If they are more
+than `sync_max_retract_fraction` (default `0.25`) of a source's rows, it
+refuses, raising and changing nothing, before asking the source anything.
+`1.0` disables the ceiling. The ceiling is a fraction of what *Usher* holds
+for that source, not of the source itself. Otherwise it asks the source about
+each candidate. It marks unavailable those the source confirms gone, and
+records the rest as seen at the walk's start, since the source still serves
+them. If the source cannot answer, the sweep changes nothing and the run
+fails; the next whole-library walk resumes it and only sweeps.
 
 An item that reappears in a walk is available again at that moment. An item
 keeps the latest instant it was seen at — a walk's start, or the moment a push
@@ -289,8 +294,9 @@ it to a later full walk's sweep. The sweep only ever sets `false`.
 **A source is either a library this deployment owns or a *view* of somebody
 else's, and Usher does not model the difference.** Pointing Usher at a server
 somebody else runs is supported, with two consequences: the retraction ceiling
-treats removals as the operator's to authorise, and the watch write-back writes
-play state to an account on a server the operator does not administer.
+treats a walk that left many of a source's rows unlisted as the operator's to
+authorise, and the watch write-back writes play state to an account on a server
+the operator does not administer.
 
 **Only a full walk sweeps.**
 

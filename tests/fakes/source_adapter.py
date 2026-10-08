@@ -116,6 +116,8 @@ class FakeSourceAdapter(SourceAdapter):
         #: Every `confirm_gone` question, in order, an empty one included.
         self.confirm_calls: list[frozenset[str]] = []
         self._confirm_fails = False
+        # Served by id but in no listing: what Emby does with an alternate version.
+        self._unlisted: set[str] = set()
 
     # -- harness-facing state ------------------------------------------
 
@@ -154,7 +156,19 @@ class FakeSourceAdapter(SourceAdapter):
     def forget(self, external_id: str) -> None:
         self._items.pop(external_id, None)
         self._changed_at.pop(external_id, None)
+        self._unlisted.discard(external_id)
         # Out of every library too, or seeding the id again would silently re-place it.
+        for placed in self._libraries.values():
+            if external_id in placed:
+                placed.remove(external_id)
+
+    def unlist(self, external_id: str) -> None:
+        """Keep serving `external_id` by id, but leave it out of every listing.
+
+        Emby's full listing shows one version of a film while a read by id serves each,
+        so a walk never lists an alternate it can still read.
+        """
+        self._unlisted.add(external_id)
         for placed in self._libraries.values():
             if external_id in placed:
                 placed.remove(external_id)
@@ -310,6 +324,8 @@ class FakeSourceAdapter(SourceAdapter):
         await self._ready()
         yielded = 0
         for external_id, item in list(self._items.items()):
+            if external_id in self._unlisted:
+                continue
             if since is not None and self._changed_at[external_id] < since:
                 continue
             if self._fail_after is not None and yielded >= self._fail_after:
@@ -321,11 +337,12 @@ class FakeSourceAdapter(SourceAdapter):
         await self._ready()
         if not self._libraries:
             return WHOLE_LIBRARY
+        listed = [one for one in self._items if one not in self._unlisted]
         in_a_library = {one for placed in self._libraries.values() for one in placed}
-        if not in_a_library.issuperset(self._items):
+        if not in_a_library.issuperset(listed):
             # An item in no library would be in no unit, and a plan must cover every
             # item, so a partly placed source walks as one unit.
-            return WalkPlan(WHOLE_LIBRARY.units, expected_total=len(self._items))
+            return WalkPlan(WHOLE_LIBRARY.units, expected_total=len(listed))
         units = tuple(
             WalkUnit(
                 f"library:{name}",
@@ -335,7 +352,7 @@ class FakeSourceAdapter(SourceAdapter):
             )
             for name, placed in self._libraries.items()
         )
-        return WalkPlan(units, expected_total=len(self._items))
+        return WalkPlan(units, expected_total=len(listed))
 
     def list_unit(
         self, key: str, *, start_index: int = 0, checkpoint: str | None = None
