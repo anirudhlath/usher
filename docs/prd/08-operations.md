@@ -33,11 +33,14 @@ area, which HA allows to admins only, and a non-admin token is refused per write
 
 **`USHER_CORS_ORIGINS` is empty by default**, and no browser page outside
 Usher's own origin may call it. A comma-separated list of bare origins
-(`http://homeassistant.local:8123`) lets pages there call every route, read
-`traceresponse` and `Retry-After`, and send JSON bodies; a path or a wildcard is
-refused at startup. There is no authentication, so every listed origin can
-reach the admin routes too. A page served over `https` cannot call Usher over
-`http`; a panel in an `https` Home Assistant needs Usher behind `https` as well.
+(`http://homeassistant.local:8123`) lets pages there call every route with no
+request header beyond `Content-Type`, and read `traceresponse` and
+`Retry-After`. Each origin is lowercased and loses a default port (`:80` on
+`http`, `:443` on `https`), as a browser's `Origin` header writes it; a path, a
+wildcard, userinfo or a query is refused at startup. There is no
+authentication, so every listed origin can reach the admin routes too. A page
+served over `https` cannot call Usher over `http`; a panel in an `https` Home
+Assistant needs Usher behind `https` as well.
 
 🔶 **`USHER_LLM_MAX_OUTPUT_TOKENS` shares that context window, and nothing
 couples the two.** The endpoint requires `prompt_tokens + llm_max_output_tokens

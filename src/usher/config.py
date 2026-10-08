@@ -1,5 +1,6 @@
 """Application configuration, read from the environment."""
 
+import re
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
@@ -45,6 +46,14 @@ DEFAULT_LLM_BASE_URL = "http://localhost:8000/v1"
 # Not a credential -- a placeholder value kept only to detect and reject it.
 _PLACEHOLDER_SECRET_KEY = "change-me-to-a-long-random-string"  # noqa: S105
 _ASYNCPG_DRIVER_PREFIX = "postgresql+asyncpg://"
+# An origin as a browser's `Origin` header writes it, once lowercased.
+_BARE_ORIGIN = re.compile(r"^(https?)://([a-z0-9.-]+)(:\d{1,5})?$")
+_DEFAULT_PORT = {"http": ":80", "https": ":443"}
+_CORS_ORIGINS_REFUSED = (
+    "USHER_CORS_ORIGINS takes comma-separated origins such as "
+    "http://homeassistant.local:8123: a scheme, a host and an optional port, "
+    "with no path, no wildcard and nothing else"
+)
 
 _ENV_PREFIX = "USHER_"
 
@@ -104,7 +113,8 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"  # noqa: S104  intentional: default bind-all for a containerized service
     port: int = Field(default=8000, ge=1, le=65535)
     # Browser origins allowed to call the API, comma-separated: `http://host:port`,
-    # no path and no wildcard. Empty adds no CORS at all.
+    # no path and no wildcard. Each is lowercased and loses a default port, as a
+    # browser's `Origin` does. Empty adds no CORS at all.
     cors_origins: str = ""
 
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
@@ -509,15 +519,25 @@ class Settings(BaseSettings):
     @field_validator("cors_origins")
     @classmethod
     def _origins_are_bare_origins(cls, value: str) -> str:
-        """Each entry a bare `http(s)://host[:port]`, returned joined with no spaces."""
-        origins = [part.strip() for part in value.split(",") if part.strip()]
-        for origin in origins:
-            scheme, _, rest = origin.partition("://")
-            if scheme not in ("http", "https") or not rest or "/" in rest or "*" in rest:
-                raise ValueError(
-                    "USHER_CORS_ORIGINS takes comma-separated origins such as "
-                    "http://homeassistant.local:8123, with no path and no wildcard"
-                )
+        """Each entry a bare `http(s)://host[:port]`, written as a browser sends it.
+
+        `CORSMiddleware` compares the `Origin` header as a string, and a browser
+        lowercases the scheme and host and omits a scheme's default port. An
+        entry written any other way could never match, so each is lowercased
+        and loses `:80` on http or `:443` on https. Anything left that is not a
+        bare origin is refused. Returned joined with no spaces.
+        """
+        origins = []
+        for part in value.split(","):
+            entry = part.strip().lower()
+            if not entry:
+                continue
+            match = _BARE_ORIGIN.fullmatch(entry)
+            if match is None:
+                raise ValueError(_CORS_ORIGINS_REFUSED)
+            scheme, host, port = match.groups()
+            kept = "" if port in (None, _DEFAULT_PORT[scheme]) else port
+            origins.append(f"{scheme}://{host}{kept}")
         return ",".join(origins)
 
     @field_validator("secret_key")
