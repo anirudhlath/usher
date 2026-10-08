@@ -197,9 +197,9 @@ measurement is a claim about a dataset, not a copy of one. Matching on **shape**
 (a tconst followed by a tab; a JSON object carrying `original_title`) is what
 lets it scan prose without noise.
 
-**Keep the two cases that fail if the scans stop scanning**, because a guard
+**Keep the three cases that fail if the scans stop scanning**, because a guard
 that scans nothing passes exactly like a guard that passes. Mutation-verify
 them: a real id back in each fixture kind, a real row back in a plan, a real
 record back in a shipped docstring, `_SCANNED_ROOTS` narrowed, the repo-wide
-walk emptied, each matcher made to match nothing. `tests/fixtures/README.md`
-holds the bands and the allocation table.
+walk emptied, an id list's members left unwalked, each matcher made to match
+nothing. `tests/fixtures/README.md` holds the bands and the allocation table.

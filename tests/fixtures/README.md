@@ -44,8 +44,8 @@ Enforced by `tests/unit/test_no_third_party_data.py`. Three checks scan
 fixture, and a hashed regression list of the identifiers this repository is
 known to have committed. A fourth scans the **whole repository**, `docs/`
 included, for a dataset *row*: an IMDb TSV line or a TMDb id-export record,
-matched on shape. Two more fail if the scans stop scanning. Mutation-
-verified: eleven mutations, eleven killed.
+matched on shape. Three more fail if the scans stop scanning. Mutation-
+verified: thirteen mutations, thirteen killed.
 
 The split is deliberate. `docs/` and `CLAUDE.md` are the project's
 engineering record and neither ships, so a sentence naming a real row as the
