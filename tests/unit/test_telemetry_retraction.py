@@ -33,8 +33,12 @@ def meter_reader() -> Iterator[InMemoryMetricReader]:
     yield reader
 
 
-def _checks(reader: InMemoryMetricReader) -> dict[tuple[str, str, str], float]:
-    """`usher.sync.retraction.checks` as `{(source, path, outcome): value}`."""
+def retraction_checks(reader: InMemoryMetricReader) -> dict[tuple[str, str, str], float]:
+    """`usher.sync.retraction.checks` as `{(source, path, outcome): value}`.
+
+    Exported because `tests/unit/test_services_reconcile.py` reads the same counter
+    off a sweep, and a second copy of this reader would stop tracking the first.
+    """
     found: dict[tuple[str, str, str], float] = {}
     data = reader.get_metrics_data()
     for resource in data.resource_metrics if data is not None else []:
@@ -81,7 +85,7 @@ async def test_each_asked_id_is_counted_once_by_path_and_outcome(
         adapter, ["kept-1", "gone-1", "gone-2"], source=SOURCE.name, path=path
     )
     assert gone == {"gone-1", "gone-2"}
-    assert _checks(meter_reader) == {
+    assert retraction_checks(meter_reader) == {
         (SOURCE.name, path, "gone"): 2.0,
         (SOURCE.name, path, "served"): 1.0,
     }
@@ -93,13 +97,16 @@ async def test_an_id_nobody_asked_about_is_neither_returned_nor_counted(
     """And an outcome with no id adds nothing: no `served` series at all, not a zero."""
     gone = await confirmed_gone(_StrayAdapter(SOURCE), ["gone-1"], source=SOURCE.name, path="sweep")
     assert gone == {"gone-1"}
-    assert _checks(meter_reader) == {(SOURCE.name, "sweep", "gone"): 1.0}
+    assert retraction_checks(meter_reader) == {(SOURCE.name, "sweep", "gone"): 1.0}
 
 
 async def test_an_empty_question_asks_nothing_and_counts_nothing(
     meter_reader: InMemoryMetricReader,
 ) -> None:
+    premise = _serving()
+    await premise.confirm_gone([])
+    assert premise.confirm_calls == [frozenset()], "the premise: the fake records an empty question"
     adapter = _serving()
     assert await confirmed_gone(adapter, [], source=SOURCE.name, path="push") == frozenset()
     assert adapter.confirm_calls == []
-    assert _checks(meter_reader) == {}
+    assert retraction_checks(meter_reader) == {}

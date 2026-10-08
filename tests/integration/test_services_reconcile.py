@@ -414,6 +414,7 @@ async def test_a_walk_retracts_only_what_the_source_confirms_gone(
     del adapter.items["m6"]
     adapter.unlisted.add("m7")
     second = await service.reconcile(source, SyncRunKind.FULL, adapter)  # type: ignore[arg-type]
+    assert second.items_seen == 8, "the premise: the walk listed neither m6 nor m7"
     assert second.status is SyncRunStatus.COMPLETED
     assert second.items_retracted == 1
     gone = await media_items.get_by_external_id(source.id, "m6")

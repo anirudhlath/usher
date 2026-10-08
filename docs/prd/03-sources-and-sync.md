@@ -284,7 +284,7 @@ for that source, not of the source itself. Otherwise it asks the source about
 each candidate. It marks unavailable those the source confirms gone, and
 records the rest as seen at the walk's start, since the source still serves
 them. If the source cannot answer, the sweep changes nothing and the run
-fails; the next whole-library walk resumes it and only sweeps.
+fails; the next full walk resumes it and only sweeps.
 
 An item that reappears in a walk is available again at that moment. An item
 keeps the latest instant it was seen at — a walk's start, or the moment a push

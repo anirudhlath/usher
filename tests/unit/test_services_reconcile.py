@@ -12,11 +12,7 @@ import pytest
 from loguru import logger
 from opentelemetry import metrics, trace
 from opentelemetry.sdk.metrics import MeterProvider
-from opentelemetry.sdk.metrics.export import (
-    HistogramDataPoint,
-    InMemoryMetricReader,
-    NumberDataPoint,
-)
+from opentelemetry.sdk.metrics.export import HistogramDataPoint, InMemoryMetricReader
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -32,6 +28,7 @@ from tests.fakes.source_adapter import FakeSourceAdapter
 from tests.fakes.sync_run_repository import FakeSyncRunRepository
 from tests.fakes.title_match_repository import FakeTitleMatchRepository
 from tests.fakes.title_repository import FakeTitleRepository
+from tests.unit.test_telemetry_retraction import retraction_checks
 from usher.adapters.emby.adapter import EmbyAdapter
 from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
@@ -450,6 +447,27 @@ async def test_a_sweep_retracts_what_the_source_confirms_gone_and_stamps_what_it
     assert [line.rstrip("\n") for line in lines if "sweep found" in line] == [
         "Living Room Emby's sweep found 2 rows the walk did not list: 1 gone, 1 still served"
     ]
+
+
+async def test_an_unlisted_item_placed_again_stays_out_of_its_library_unit() -> None:
+    """`place` after `unlist` lists m8 in neither the unit nor its count, so the sweep asks."""
+    fixture = _Fixture()
+    _shelve(fixture, "Films", range(10))
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    fixture.adapter.unlist("m8")
+    fixture.adapter.place("m8", "Films")
+    fixture.adapter.unit_starts.clear()
+    second = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    assert fixture.adapter.unit_starts == [("library:Films", 0)], (
+        "the premise: Films walked as a unit of its own"
+    )
+    units = await fixture.runs.units_for(second.id)
+    assert [unit.expected_items for unit in units] == [9]
+    assert second.items_seen == 9
+    assert fixture.adapter.confirm_calls == [frozenset({"m8"})]
+    served = await fixture.media_items.get_by_external_id(fixture.source.id, "m8")
+    assert served is not None
+    assert (served.available, served.last_seen_at) == (True, second.started_at)
 
 
 async def test_a_sweep_with_nothing_unseen_asks_nothing_and_says_so(fixture: _Fixture) -> None:
@@ -2543,23 +2561,6 @@ def _unit_durations(reader: InMemoryMetricReader) -> dict[tuple[str, str], tuple
     return found
 
 
-def _retraction_checks(reader: InMemoryMetricReader) -> dict[tuple[str, str, str], float]:
-    """`usher.sync.retraction.checks` as `{(source, path, outcome): value}`."""
-    found: dict[tuple[str, str, str], float] = {}
-    data = reader.get_metrics_data()
-    for resource in data.resource_metrics if data is not None else []:
-        for scope in resource.scope_metrics:
-            for metric in scope.metrics:
-                if metric.name != "usher.sync.retraction.checks":
-                    continue
-                for point in metric.data.data_points:
-                    assert isinstance(point, NumberDataPoint)
-                    labels = dict(point.attributes or {})
-                    key = (str(labels["source"]), str(labels["path"]), str(labels["outcome"]))
-                    found[key] = float(point.value)
-    return found
-
-
 async def test_a_sweep_counts_each_id_it_asked_about_on_the_sweep_path(
     meter_reader: InMemoryMetricReader,
 ) -> None:
@@ -2570,7 +2571,7 @@ async def test_a_sweep_counts_each_id_it_asked_about_on_the_sweep_path(
     fixture.adapter.forget("m9")
     fixture.adapter.unlist("m8")
     await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
-    assert _retraction_checks(meter_reader) == {
+    assert retraction_checks(meter_reader) == {
         ("Living Room Emby", "sweep", "gone"): 1.0,
         ("Living Room Emby", "sweep", "served"): 1.0,
     }

@@ -141,9 +141,9 @@ usher sync-status                       # recent walks and their plans, queue de
 - **The retraction guard** refuses a walk that left more than
   `USHER_SYNC_MAX_RETRACT_FRACTION` (25%) of a source's items unlisted, and
   changes nothing. If you really did remove that much, run the walk with
-  `--allow-full-retraction`. Under the guard, a walk marks an item unavailable
-  only once the server confirms it is gone. An item the server still serves
-  but did not list, such as a film's second version, stays available.
+  `--allow-full-retraction`. A walk marks an item unavailable only once the
+  server confirms it is gone. An item the server still serves but did not
+  list, such as a film's second version, stays available.
 - **You don't have to own the server.** Pointing Usher at a server you don't
   administer is supported. Marking a title played writes to your account on
   that server.

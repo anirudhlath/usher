@@ -158,17 +158,19 @@ class FakeSourceAdapter(SourceAdapter):
         self._changed_at.pop(external_id, None)
         self._unlisted.discard(external_id)
         # Out of every library too, or seeding the id again would silently re-place it.
-        for placed in self._libraries.values():
-            if external_id in placed:
-                placed.remove(external_id)
+        self._unplace(external_id)
 
     def unlist(self, external_id: str) -> None:
         """Keep serving `external_id` by id, but leave it out of every listing.
 
         Emby's full listing shows one version of a film while a read by id serves each,
-        so a walk never lists an alternate it can still read.
+        so a walk never lists an alternate it can still read. A later `place` does not
+        list it again.
         """
         self._unlisted.add(external_id)
+        self._unplace(external_id)
+
+    def _unplace(self, external_id: str) -> None:
         for placed in self._libraries.values():
             if external_id in placed:
                 placed.remove(external_id)
@@ -348,7 +350,7 @@ class FakeSourceAdapter(SourceAdapter):
                 f"library:{name}",
                 self._stages.get(name, WalkStage.TITLES),
                 f"library {name}",
-                None if name in self._uncounted else len(placed),
+                None if name in self._uncounted else len(set(placed) - self._unlisted),
             )
             for name, placed in self._libraries.items()
         )
@@ -375,7 +377,7 @@ class FakeSourceAdapter(SourceAdapter):
         yielded = 0
         for external_id in list(self._libraries[name]):
             item = self._items.get(external_id)
-            if item is None:
+            if item is None or external_id in self._unlisted:
                 continue
             if yielded == self._unit_failures.get(name):
                 raise PortUnavailable(f"library {name} went away mid-walk")
