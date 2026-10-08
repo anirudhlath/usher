@@ -2,6 +2,7 @@
 
 import asyncio
 from contextlib import aclosing
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -345,6 +346,50 @@ class SourceAdapterContract:
         await harness.go_offline()
         with pytest.raises(PortUnavailable):
             await harness.adapter.get_item("movie-1")
+
+    # --- confirming removals -------------------------------------------
+
+    async def test_confirm_gone_returns_what_the_source_no_longer_serves(
+        self, harness: SourceHarness
+    ) -> None:
+        """A removed id and one the source never had are gone; a served one is not."""
+        await harness.given_item(MOVIE, changed_at=T0)
+        await harness.given_item(_filler(0), changed_at=T0)
+        await harness.remove_item("movie-1")
+        gone = await harness.adapter.confirm_gone(["movie-1", "filler-0", "never-existed"])
+        assert gone == {"movie-1", "never-existed"}
+
+    async def test_confirm_gone_returns_none_of_a_served_items_versions(
+        self, harness: SourceHarness
+    ) -> None:
+        """Three versions asked together: a listing that names one must not condemn two."""
+        versions = [replace(MOVIE, external_id=f"movie-1-v{index}") for index in range(3)]
+        await harness.given_versions(versions, changed_at=T0)
+        gone = await harness.adapter.confirm_gone([version.external_id for version in versions])
+        assert gone == frozenset()
+
+    async def test_confirm_gone_returns_a_removed_version_beside_a_served_one(
+        self, harness: SourceHarness
+    ) -> None:
+        versions = [replace(MOVIE, external_id=f"movie-1-v{index}") for index in range(2)]
+        await harness.given_versions(versions, changed_at=T0)
+        await harness.remove_item("movie-1-v0")
+        gone = await harness.adapter.confirm_gone(["movie-1-v0", "movie-1-v1"])
+        assert gone == {"movie-1-v0"}
+
+    async def test_confirm_gone_of_nothing_asks_nothing(self, harness: SourceHarness) -> None:
+        """Offline first: an implementation that asked anyway would raise, not answer."""
+        await harness.go_offline()
+        assert await harness.adapter.confirm_gone([]) == frozenset()
+
+    async def test_confirm_gone_raises_when_the_source_is_unreachable(
+        self, harness: SourceHarness
+    ) -> None:
+        """Never "nothing came back, so all gone": a transport failure must raise."""
+        await harness.given_item(MOVIE, changed_at=T0)
+        await harness.go_offline()
+        with pytest.raises(PortUnavailable):
+            await harness.adapter.confirm_gone(["movie-1"])
 
     # --- authentication ------------------------------------------------
 

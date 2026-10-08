@@ -2,7 +2,7 @@
 
 import asyncio
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Collection, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from urllib.parse import quote
 
@@ -113,6 +113,9 @@ class FakeSourceAdapter(SourceAdapter):
         self._push_now = 0.0
         self._push_reconnects = 0
         self.push_stale_after = 90.0
+        #: Every `confirm_gone` question, in order, an empty one included.
+        self.confirm_calls: list[frozenset[str]] = []
+        self._confirm_fails = False
 
     # -- harness-facing state ------------------------------------------
 
@@ -167,7 +170,7 @@ class FakeSourceAdapter(SourceAdapter):
         self._fail_after = count
 
     def clear_failure(self) -> None:
-        """Undo `fail_after` and `fail_unit_after`.
+        """Undo `fail_after`, `fail_unit_after` and `fail_confirm`.
 
         `ReconcileService`'s cursor case needs a run that failed *followed by* one that
         succeeds, which is the only way to show that a delta walk resumes from the last
@@ -175,6 +178,11 @@ class FakeSourceAdapter(SourceAdapter):
         """
         self._fail_after = None
         self._unit_failures.clear()
+        self._confirm_fails = False
+
+    def fail_confirm(self) -> None:
+        """Make every non-empty `confirm_gone` raise, as a source lost mid-question would."""
+        self._confirm_fails = True
 
     def reject_credentials(self) -> None:
         self._credentials_valid = False
@@ -363,6 +371,18 @@ class FakeSourceAdapter(SourceAdapter):
     async def get_item(self, external_id: str) -> SourceItem | None:
         await self._ready()
         return self._items.get(external_id)
+
+    async def confirm_gone(self, external_ids: Collection[str]) -> frozenset[str]:
+        asked = frozenset(external_ids)
+        self.confirm_calls.append(asked)
+        if not asked:
+            return frozenset()
+        await self._ready()
+        if self._confirm_fails:
+            raise PortUnavailable("source went away while confirming removals")
+        # A turn of the loop, as a request gives, so a caller's heartbeat can run.
+        await asyncio.sleep(0)
+        return frozenset(external_id for external_id in asked if external_id not in self._items)
 
     async def stream_targets(self, external_id: str) -> list[StreamTarget]:
         await self._ready()
@@ -580,6 +600,13 @@ class FakeSourceHarness(SourceHarness):
     ) -> None:
         self._adapter.seed(item, changed_at)
         self._adapter.place(item.external_id, *libraries)
+
+    async def given_versions(
+        self, items: Sequence[SourceItem], *, changed_at: AwareDatetime
+    ) -> None:
+        # The fake answers by id alone, so versions are just items.
+        for item in items:
+            self._adapter.seed(item, changed_at)
 
     async def given_watch_state(self, state: SourceWatchState) -> None:
         self._adapter.seed_state(state)

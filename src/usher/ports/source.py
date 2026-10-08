@@ -3,7 +3,7 @@
 import asyncio
 import uuid
 from abc import ABC, abstractmethod
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Collection
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field, fields
 from enum import StrEnum
@@ -375,10 +375,23 @@ class SourceAdapter(ABC):
     async def get_item(self, external_id: str) -> SourceItem | None:
         """Fetch one item.
 
-        `None` means gone from the source, and reconcile marks it
-        `available = false`. A transient failure to reach the source must
-        raise (`PortUnavailable`), never return `None` -- conflating the two
-        marks healthy items unavailable on a flaky network.
+        `None` means the source no longer serves it. A transient failure to reach the
+        source must raise (`PortUnavailable`), never return `None`: conflating the two
+        would read a flaky network as a deletion.
+        """
+
+    @abstractmethod
+    async def confirm_gone(self, external_ids: Collection[str]) -> frozenset[str]:
+        """The subset of `external_ids` this source no longer serves.
+
+        "Serves" means the account can read the item by its id. Never returns an id the
+        source still serves, and raises a `UsherPortError` when it cannot decide: a
+        partial answer is never returned as a whole one. Only asked ids come back, and an
+        empty input returns an empty set without a request.
+
+        Abstract on purpose: a default answering "none gone" would quietly switch
+        retraction off for a new adapter, and one built on `get_item` would read an item
+        the mapper cannot model as gone.
         """
 
     @abstractmethod
