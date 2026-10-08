@@ -1,21 +1,27 @@
 """`house_players`: nothing while off; built, started and closed while on; never a gate."""
 
+import asyncio
 import socket
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Final
 
 import pytest
 from asgi_lifespan import LifespanManager
 from httpx import ASGITransport, AsyncClient
+from loguru import logger
 from starlette.requests import Request
 
 from tests.fakes.home_assistant import TOKEN, FakeHomeAssistant, FakeHomeAssistantConnector
 from tests.fakes.house import this_house
+from usher.adapters.homeassistant.players import HomeAssistantPlayers
 from usher.api.app import create_app
 from usher.api.deps import get_players
 from usher.composition import house_players, nothing
 from usher.config import Settings
 from usher.ports.errors import PortUnavailable
+
+# The adapter's WARNING when a connection attempt fails; what follows it is the OS's.
+_ENDED: Final = "players: the Home Assistant connection ended: "
 
 
 def _settings(**fields: Any) -> Settings:
@@ -58,6 +64,25 @@ async def test_on_builds_starts_and_closes_one_adapter() -> None:
     assert connector.latest.closed
 
 
+async def test_each_bound_reaches_the_adapter_in_its_own_place() -> None:
+    settings = _settings(
+        players_enabled=True,
+        ha_url="http://192.0.2.1:8123",
+        ha_token=TOKEN.get_secret_value(),
+        players_command_timeout_seconds=3.5,
+        players_backoff_seconds=7.0,
+        players_max_backoff_seconds=70.0,
+    )
+    connector = FakeHomeAssistantConnector(FakeHomeAssistant())
+    players, close = await house_players(settings, connect=connector)
+    try:
+        assert isinstance(players, HomeAssistantPlayers)
+        built = (players._command_timeout, players._backoff, players._max_backoff)
+        assert built == (3.5, 7.0, 70.0)
+    finally:
+        await close()
+
+
 async def test_the_app_parks_players_as_none_while_off() -> None:
     app = create_app(_settings())
     async with LifespanManager(app):
@@ -72,12 +97,21 @@ async def test_an_unreachable_home_assistant_never_stops_the_app_serving() -> No
         ha_token=TOKEN.get_secret_value(),
     )
     app = create_app(settings)
-    async with LifespanManager(app) as manager:
-        transport = ASGITransport(app=manager.app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            assert (await client.get("/health")).status_code == 200
-        with pytest.raises(PortUnavailable):
-            app.state.players.snapshot()
+    # After `create_app`, whose telemetry setup removes every loguru handler.
+    lines: list[str] = []
+    handler = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        async with LifespanManager(app) as manager:
+            async with asyncio.timeout(5.0):
+                while not any(line.startswith(_ENDED) for line in lines):
+                    await asyncio.sleep(0.01)
+            transport = ASGITransport(app=manager.app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                assert (await client.get("/health")).status_code == 200
+            with pytest.raises(PortUnavailable):
+                app.state.players.snapshot()
+    finally:
+        logger.remove(handler)
 
 
 def test_the_dependency_refuses_an_app_whose_lifespan_never_ran() -> None:

@@ -148,8 +148,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         players, close_players = await house_players(settings)
         app.state.players = players
         # The `try:` opens here and not at the engine, so a raise from
-        # `metadata_provider`, `embedder`, `llm_client` or `lanes.start()` leaks
-        # whatever was already built.
+        # `metadata_provider`, `embedder`, `llm_client`, `lanes.start()` or
+        # `house_players` leaks whatever was already built.
         try:
             yield
         finally:
