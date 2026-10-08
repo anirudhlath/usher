@@ -70,16 +70,14 @@ COMPOSE_ONLY_PREFIX = "USHER_COMPOSE_"
 def _is_browser_host(host: str) -> bool:
     """Whether a browser keeps `host` exactly as written, so its `Origin` can match.
 
-    One trailing dot is kept, and makes a distinct origin. An empty label, or
-    one that starts or ends with `-`, names no host a page is served from. A
-    host whose last label is all digits or starts with `0x` is IPv4 to a
-    browser, which rewrites shorthand (`127.1`), hex and leading zeros, so it
-    must already be a dotted quad of decimal octets.
+    One trailing dot is kept, and makes a distinct origin; any other empty
+    label names no host a page is served from. A host whose last label is all
+    digits or starts with `0x` is IPv4 to a browser, which rewrites shorthand
+    (`127.1`), hex and leading zeros, so it must already be a dotted quad of
+    decimal octets.
     """
     labels = host.removesuffix(".").split(".")
     if "" in labels:
-        return False
-    if any(label.startswith("-") or label.endswith("-") for label in labels):
         return False
     if labels[-1].isdigit() or labels[-1].startswith("0x"):
         return _DOTTED_QUAD.fullmatch(host) is not None

@@ -101,6 +101,7 @@ def test_origins_are_normalised() -> None:
         pytest.param("http://192.0.2.10:8123", "http://192.0.2.10:8123", id="ipv4"),
         pytest.param("http://h.example.:8123", "http://h.example.:8123", id="trailing-dot"),
         pytest.param("http://home-assistant.example", "http://home-assistant.example", id="hyphen"),
+        pytest.param("http://-h.example", "http://-h.example", id="hyphen-at-an-edge"),
     ],
 )
 def test_an_origin_is_written_as_a_browser_sends_it(value: str, written: str) -> None:
@@ -128,10 +129,9 @@ def test_an_origin_is_written_as_a_browser_sends_it(value: str, written: str) ->
         pytest.param("http://...", id="dots-only"),
         pytest.param("http://.", id="one-dot"),
         pytest.param("http://a..b", id="empty-label"),
-        pytest.param("http://-h.example", id="label-starts-with-hyphen"),
-        pytest.param("http://h-.example", id="label-ends-with-hyphen"),
         pytest.param("http://127.1", id="ipv4-shorthand"),
         pytest.param("http://0x7f.1", id="ipv4-hex"),
+        pytest.param("http://1.2.3.0x10", id="ipv4-hex-last-label"),
         pytest.param("http://010.0.0.1", id="ipv4-leading-zero"),
         pytest.param("http://192.0.2.256", id="ipv4-octet-over-255"),
         pytest.param("http://192.0.2.10.1", id="ipv4-five-labels"),
