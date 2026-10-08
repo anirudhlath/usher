@@ -8759,7 +8759,7 @@ The HTTP surface: `GET /screens`, `POST /screens/devices/{entity_id}/confirm`, `
 - Modify:
   - `src/usher/api/dto/problem.py` (the member), `src/usher/api/deps.py` (two services), `src/usher/api/app.py` (two routers)
   - `src/usher/config.py`, `.env.example`, `web/src/features/operator/Config.settings.ts` (the confirm timeout)
-  - `web/src/api/paths.ts` (the `screens` root)
+  - `web/src/api/paths.ts` (the `screens` root), `web/CONVENTIONS.md` (the eight-code count), `web/README.md` (the router and root counts)
   - `docs/prd/07-client-api.md` (the `### Player routes` table, the vocabulary, `## Players`), `docs/prd/08-operations.md` (a failure row), `README.md` (Security)
   - `tests/unit/test_api_problem.py` (the literal pin), `tests/unit/test_api_openapi.py` (`_NON_PROBLEM_BODIES`)
 - Test: `tests/unit/test_api_screens.py`, `tests/unit/test_api_ways.py`
@@ -8786,10 +8786,11 @@ The HTTP surface: `GET /screens`, `POST /screens/devices/{entity_id}/confirm`, `
 `tests/unit/test_api_screens.py`:
 
 ```python
-"""`GET /screens` and confirm, over the port fake, through the shipped dependencies."""
+"""`GET /screens` and confirm over the port fake and the shipped dependencies, and their DTOs."""
 
 import asyncio
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from typing import Any
 
 import httpx
@@ -8810,7 +8811,10 @@ from tests.fakes.players import FakePlayers
 from usher.api.app import create_app
 from usher.api.deps import get_players
 from usher.api.dto.problem import PROBLEM_MEDIA_TYPE
+from usher.api.dto.screens import DeviceResponse, RecipeResponse
 from usher.config import Settings
+from usher.domain.recipes import RECIPES
+from usher.domain.screens import project
 from usher.services.screens import PLAYERS_OFF
 
 _CONFIRM_TIMEOUT = 0.05
@@ -8878,8 +8882,42 @@ async def test_screens_answer_the_projection_with_home_assistant_s_reading(
     assert {recipe["proven"] for recipe in device["recipes"]} == {False}
     assert device["state"]["app_name"] == "Example Player"
     assert device["state"]["media_position_seconds"] == 489.0
-    assert [player["entity_id"] for player in body["unconfirmed"]] == [SHIELD]
+    assert device["state"]["media_position_updated_at"] == "2026-10-06T19:00:00Z"
+    [shield] = body["unconfirmed"]
+    assert shield == {
+        "entity_id": SHIELD,
+        "name": "SHIELD",
+        "model": "SHIELD Android TV",
+        "area_id": None,
+        "role": None,
+        "recipes": [{"key": "cast.shield", "name": "Cast", "hands_free": True, "proven": False}],
+        "state": {
+            "state": "off",
+            "app_id": None,
+            "app_name": None,
+            "media_title": None,
+            "media_duration_seconds": None,
+            "media_position_seconds": None,
+            "media_position_updated_at": None,
+        },
+    }
     assert [area["area_id"] for area in body["areas"]] == [BEDROOM, KITCHEN, LIVING_ROOM]
+
+
+def test_a_player_home_assistant_reports_no_state_for_answers_a_null_state() -> None:
+    shield = project(this_house()).candidate(SHIELD)
+    assert shield is not None and shield.state is not None  # premise: a state to drop
+    assert DeviceResponse.of(replace(shield, state=None)).model_dump()["state"] is None
+
+
+def test_a_proven_recipe_answers_proven() -> None:
+    proven = replace(RECIPES[0], proven=True)
+    assert RecipeResponse.of(proven).model_dump() == {
+        "key": proven.key,
+        "name": proven.name,
+        "hands_free": proven.hands_free,
+        "proven": True,
+    }
 
 
 async def test_players_off_answer_503_on_both_routes() -> None:
@@ -8914,6 +8952,7 @@ async def test_confirm_places_a_player_and_answers_the_house_after(
     }
     assert screens == {BEDROOM: [SHIELD], LIVING_ROOM: [APPLE_TV]}
     assert players.writes == [("role", SHIELD, "use"), ("area", SHIELD_DEVICE, BEDROOM)]
+    assert response.json() == (await client.get("/screens")).json()  # its nulls kept too
 
 
 async def test_a_confirm_never_reported_answers_503_within_the_setting(
@@ -8969,8 +9008,8 @@ async def test_a_refused_confirm_writes_nothing_and_echoes_nothing(
 
 @pytest.mark.parametrize(
     "payload",
-    [{}, {"use": True, "area": BEDROOM}, {"use": "sometimes"}],
-    ids=["no-use", "unknown-field", "not-a-bool"],
+    [{}, {"use": True, "area": BEDROOM}, {"use": "sometimes"}, {"use": "no"}, {"use": 1}],
+    ids=["no-use", "unknown-field", "not-a-bool", "a-word-for-false", "a-number-for-true"],
 )
 async def test_a_malformed_confirm_is_422_and_writes_nothing(
     players: FakePlayers, client: httpx.AsyncClient, payload: dict[str, Any]
@@ -8982,10 +9021,11 @@ async def test_a_malformed_confirm_is_422_and_writes_nothing(
 `tests/unit/test_api_ways.py`:
 
 ```python
-"""Both `/ways` routes, over the port fakes, through the shipped dependencies."""
+"""Both `/ways` routes over the port fakes and the shipped dependencies, and their DTO."""
 
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -8995,7 +9035,7 @@ from asgi_lifespan import LifespanManager
 from fastapi import FastAPI
 
 from tests.fakes.episode_repository import FakeEpisodeRepository
-from tests.fakes.house import KITCHEN, LIVING_ROOM, this_house
+from tests.fakes.house import BEDROOM, KITCHEN, LIVING_ROOM, SHIELD_DEVICE, this_house
 from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.players import FakePlayers
 from tests.fakes.title_repository import FakeTitleRepository
@@ -9007,13 +9047,17 @@ from usher.api.deps import (
     get_title_repository,
 )
 from usher.api.dto.problem import PROBLEM_MEDIA_TYPE
+from usher.api.dto.ways import WaysResponse
 from usher.config import Settings
 from usher.domain.enums import HdrFormat, TitleKind
 from usher.domain.episode import Episode, Season
+from usher.domain.house import DeviceRole
 from usher.domain.screens import project
+from usher.domain.source import MediaItem
 from usher.domain.title import Title
 from usher.domain.ways import rank
 from usher.ports.ingest import MediaItemUpsert
+from usher.services.ways import WaysAnswer
 
 SOURCE = uuid.UUID("00000000-0000-4000-8000-0000000000aa")
 _SEEN = datetime(2026, 10, 6, 12, 0, tzinfo=UTC)
@@ -9053,6 +9097,7 @@ class _Library:
             "height": None,
             "hdr_format": None,
             "audio_channels": None,
+            "runtime_seconds": None,
         }
         await self.media_items.upsert_many(
             [
@@ -9062,7 +9107,6 @@ class _Library:
                     title_id=title_id,
                     episode_id=episode_id,
                     file_size_bytes=None,
-                    runtime_seconds=None,
                     added_at=None,
                     last_seen_at=_SEEN,
                     **(row | facts),
@@ -9122,11 +9166,20 @@ async def test_a_title_s_ways_are_the_ranking_grouped_by_screen(
         hdr_format=HdrFormat.DOLBY_VISION,
         audio_codec="truehd",
         audio_channels=8,
-        width=3840,
-        height=2160,
+        width=1920,
+        height=1080,
     )
     await library.add_copy(
-        "film-h264", title_id=title, container="mp4", video_codec="h264", width=1920, height=1080
+        "film-hdr10",
+        title_id=title,
+        container="mp4",
+        video_codec="hevc",
+        hdr_format=HdrFormat.HDR10,
+        audio_codec="eac3",
+        audio_channels=6,
+        width=3840,
+        height=2160,
+        runtime_seconds=7260,
     )
     response = await client.get(f"/titles/{title}/ways")
     assert response.status_code == 200, response.text
@@ -9140,7 +9193,44 @@ async def test_a_title_s_ways_are_the_ranking_grouped_by_screen(
     assert [way["best"] for way in screen["ways"]] == [way.best for way in expected]
     assert [way["gives_up"] for way in screen["ways"]] == [list(way.gives_up) for way in expected]
     assert [way["refusal"] for way in screen["ways"]] == [way.refusal for way in expected]
+    assert [way["playable"] for way in screen["ways"]] == [way.playable for way in expected]
     assert {way["recipe"]["proven"] for way in screen["ways"]} == {False}
+    best, item = expected[0], expected[0].file
+    facts = (item.container, item.video_codec, item.hdr_format, item.audio_codec)
+    numbers = (item.audio_channels, item.runtime_seconds)
+    assert best.best and None not in (*facts, *numbers)  # premise: no field can pass as another
+    assert len(set(facts)) == len(facts) and len(set(numbers)) == len(numbers)
+    labels: dict[int | None, str] = {2160: "4K", 1080: "1080P"}  # read off each copy's height
+    assert {way.file.height for way in expected} == set(labels)  # premise: two labels in play
+    assert [way["file"]["resolution"] for way in screen["ways"]] == [
+        labels[way.file.height] for way in expected
+    ]
+    assert screen["ways"][0] == {
+        "id": str(best.id),
+        "entity_id": best.device.entity_id,
+        "device": best.device.name,
+        "recipe": {
+            "key": best.recipe.key,
+            "name": best.recipe.name,
+            "hands_free": best.recipe.hands_free,
+            "proven": best.recipe.proven,
+        },
+        "file": {
+            "source_id": str(item.source_id),
+            "resolution": labels[item.height],
+            "container": item.container,
+            "video_codec": item.video_codec,
+            "hdr_format": item.hdr_format,
+            "audio_codec": item.audio_codec,
+            "audio_channels": item.audio_channels,
+            "runtime_seconds": item.runtime_seconds,
+        },
+        "playable": best.playable,
+        "refusal": best.refusal,
+        "best": best.best,
+        "gives_up": list(best.gives_up),
+        "facts_known": best.facts_known,
+    }
     assert "/stream/" not in response.text  # a list mints no ticket
 
 
@@ -9156,6 +9246,11 @@ async def test_an_episode_s_ways_are_its_own_copies(
     [screen] = response.json()["screens"]
     assert {way["file"]["container"] for way in screen["ways"]} == {"mkv"}
     assert len(screen["ways"]) == 2  # the Apple TV's two recipes, one copy
+    # The copy carries no video codec and no height, so neither way knows its facts.
+    assert {(way["playable"], way["facts_known"]) for way in screen["ways"]} == {
+        (True, False),
+        (False, False),
+    }
 
 
 @pytest.mark.parametrize(
@@ -9166,8 +9261,9 @@ async def test_an_episode_s_ways_are_its_own_copies(
 async def test_an_unknown_title_or_episode_is_404(
     client: httpx.AsyncClient, kind: str, detail: str
 ) -> None:
-    body = _problem(await client.get(f"/{kind}/{uuid.uuid4()}/ways"), 404, "not_found")
-    assert body["detail"] == detail
+    """Judged before the screen, which here names no screen either."""
+    response = await client.get(f"/{kind}/{uuid.uuid4()}/ways", params={"screen": KITCHEN})
+    assert _problem(response, 404, "not_found")["detail"] == detail
 
 
 async def test_a_named_screen_answers_alone_and_an_unknown_one_is_422(
@@ -9191,6 +9287,24 @@ async def test_players_off_answer_200_with_no_screens(
     response = await client.get(f"/titles/{title}/ways", params={"screen": LIVING_ROOM})
     assert response.status_code == 200, response.text
     assert response.json() == {"screens_available": False, "screens": []}
+
+
+def test_ways_on_two_screens_are_grouped_by_screen_in_the_ranking_s_order() -> None:
+    house = this_house(shield=DeviceRole.USE)
+    placed = tuple(
+        replace(one, area_id=BEDROOM) if one.device_id == SHIELD_DEVICE else one
+        for one in house.devices
+    )
+    screens = project(house.with_registries(devices=placed)).screens
+    copy = MediaItem(source_id=SOURCE, external_id="film", title_id=uuid.uuid4(), container="mp4")
+    ways = rank(screens, [copy])
+    order = [BEDROOM, LIVING_ROOM]
+    assert list(dict.fromkeys(way.screen.area_id for way in ways)) == order  # premise
+    assert len(ways) > len(order)  # premise: a screen holds more than one way
+    answered = WaysResponse.of(WaysAnswer(screens_available=True, ways=ways))
+    assert [(screen.area_id, [way.id for way in screen.ways]) for screen in answered.screens] == [
+        (area_id, [way.id for way in ways if way.screen.area_id == area_id]) for area_id in order
+    ]
 ```
 
 In `tests/unit/test_api_problem.py`, add `"players_unavailable",` as the last member of the literal set in `test_the_vocabulary_is_the_members_the_shipped_routes_emit`. In its docstring, change "A literal pin on the seven members" to "the eight members" and "not an eighth one" to "not a ninth one".
@@ -9270,10 +9384,9 @@ Task 11 put `PlayersDep` after `PlaybackServiceDep`, below `SettingsDep` and `Me
 ```python
 """Response shapes for `GET /screens` and confirm, and the body confirm takes."""
 
-from datetime import datetime
 from typing import Self
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import AwareDatetime, BaseModel, ConfigDict, StrictBool
 
 from usher.domain.house import DeviceRole, HouseArea, HouseState
 from usher.domain.recipes import Recipe
@@ -9314,7 +9427,7 @@ class PlayerStateResponse(BaseModel):
     media_title: str | None
     media_duration_seconds: float | None
     media_position_seconds: float | None
-    media_position_updated_at: datetime | None
+    media_position_updated_at: AwareDatetime | None
 
     @classmethod
     def of(cls, state: HouseState) -> Self:
@@ -9401,7 +9514,7 @@ class ConfirmRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    use: bool
+    use: StrictBool
     area_id: str | None = None
 ```
 
@@ -9496,11 +9609,12 @@ class WaysResponse(BaseModel):
     def of(cls, answer: WaysAnswer) -> Self:
         grouped: dict[str, ScreenWaysResponse] = {}
         for way in answer.ways:
-            screen = grouped.setdefault(
-                way.screen.area_id,
-                ScreenWaysResponse(area_id=way.screen.area_id, name=way.screen.name, ways=[]),
-            )
-            screen.ways.append(WayResponse.of(way))
+            area_id = way.screen.area_id
+            if area_id not in grouped:
+                grouped[area_id] = ScreenWaysResponse(
+                    area_id=area_id, name=way.screen.name, ways=[]
+                )
+            grouped[area_id].ways.append(WayResponse.of(way))
         return cls(screens_available=answer.screens_available, screens=list(grouped.values()))
 ```
 
@@ -9537,7 +9651,8 @@ _UNAVAILABLE: Final[dict[int | str, dict[str, Any]]] = {
     503: {
         "model": ProblemResponse,
         "description": (
-            "Players are off, or Home Assistant cannot be read or written now. Retryable."
+            "Players are off, or Home Assistant cannot be read or written now. Retryable, "
+            "except while players are off or the token is refused."
         ),
     },
 }
@@ -9734,7 +9849,7 @@ In `docs/prd/07-client-api.md`, make three edits:
 2. Replace `**Seven members, closed.**` with `**Eight members, closed.**`, and add this row to the vocabulary table, after `ticket_invalid`:
 
 ```markdown
-| `players_unavailable` | 503 | players are off, or Home Assistant cannot be read, refused a write, or did not report it in time — retryable |
+| `players_unavailable` | 503 | players are off, or Home Assistant cannot be read, refused a write, or did not report it in time — retryable, except while players are off or the token is refused |
 ```
 
 3. Between `## Playback` and `## Authentication seam`, add:
@@ -9828,7 +9943,7 @@ The control, which must **survive**: in `confirm_device`, swap the `except Unkno
 git add src/usher/api/dto/screens.py src/usher/api/dto/ways.py src/usher/api/routers/screens.py \
   src/usher/api/routers/ways.py src/usher/api/dto/problem.py src/usher/api/deps.py \
   src/usher/api/app.py src/usher/config.py .env.example \
-  web/src/features/operator/Config.settings.ts web/src/api/paths.ts \
+  web/src/features/operator/Config.settings.ts web/src/api/paths.ts web/CONVENTIONS.md web/README.md \
   docs/prd/07-client-api.md docs/prd/08-operations.md README.md \
   tests/unit/test_api_screens.py tests/unit/test_api_ways.py tests/unit/test_api_problem.py \
   tests/unit/test_api_openapi.py
@@ -9931,7 +10046,7 @@ In `web/src/design-system/components/feedback/Problem.tsx`:
 - add a line after `· ticket_invalid (404)     → one tap re-requests and plays.` in the top docblock:
 
 ```ts
- * · players_unavailable (503) → retryable. Players are off, or Home Assistant is not answering.
+ * · players_unavailable (503) → retryable, except while players are off or the token is refused.
 ```
 
 In `web/src/test/fixtures/problems.ts`, add after `ticketInvalid`:
