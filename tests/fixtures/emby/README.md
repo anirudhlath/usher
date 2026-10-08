@@ -143,7 +143,7 @@ both ids replaced by invented ones.
 | Concurrent pages at the deployment gate | 1 walker 0.31/s, 2 walkers 0.34/s, 4 walkers 0.37/s | the `USHER_SYNC_WALKERS` default |
 | `/Shows/NextUp` | nothing on the recorded account (`TotalRecordCount` 0), so its paging and its entries' shape are unmeasured | the seed's third source |
 | `Ids=a,b,c` | without `Recursive`, 3 of 3 series asked came back, all of type `Series`; with it, 3 of 3 | the seed's series request |
-| `Ids` naming two versions of one item | **one** of them, the same one whichever order they are named in; asked alone, each is listed | `EmbyAdapter.confirm_gone` asks again, in rounds, for every id a round did not list; `FakeEmbyServer.group_versions`; `ids_version_group.json` |
+| `Ids` naming two versions of one item | **one** of them, the same one whichever order they are named in, for 4 of 4 pairs; asked alone, each is listed. A fifth pair was skipped, because one of its versions was no longer listed alone | `EmbyAdapter.confirm_gone` asks again, in rounds, for every id a round did not list; `FakeEmbyServer.group_versions`; `ids_version_group.json` |
 
 No source has been seen to cap `Limit`. `FakeEmbyServer.max_limit` exists for
 one that does, and so do two of the conditions on a short page that ends a
