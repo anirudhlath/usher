@@ -47,7 +47,8 @@ export class UsherProblem extends Error {
    * `Retry-After` in seconds, or `null` when the header was absent or
    * unparseable. Parsed here because it lives on the *response* and is gone by
    * the time the error reaches a component — and patterns.md §3 requires the
-   * retry affordance for `source_unavailable` to honour it.
+   * retry affordance for `source_unavailable` and `players_unavailable` to
+   * honour it.
    */
   readonly retryAfter: number | null
   /**

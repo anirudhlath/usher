@@ -7,13 +7,13 @@ import { Button } from '../actions'
  * `page` (a failed route), `toast` (a background failure).
  *
  * The API's error set is closed — eight codes — and each has exactly one correct recovery:
- * · not_found (404)          → back / search. No retry.
- * · validation_failed (422)  → field errors from errors[].loc/.msg.
- * · method_not_allowed (405) → generic. Developer error.
- * · invalid_cursor (400)     → NEVER shown. The list silently restarts from the top.
- * · source_unavailable (503) → retryable, honour Retry-After.
- * · not_playable (409)       → no retry button. There is no playable file.
- * · ticket_invalid (404)     → one tap re-requests and plays.
+ * · not_found (404)           → back / search. No retry.
+ * · validation_failed (422)   → field errors from errors[].loc/.msg.
+ * · method_not_allowed (405)  → generic. Developer error.
+ * · invalid_cursor (400)      → NEVER shown. The list silently restarts from the top.
+ * · source_unavailable (503)  → retryable, honour Retry-After.
+ * · not_playable (409)        → no retry button. There is no playable file.
+ * · ticket_invalid (404)      → one tap re-requests and plays.
  * · players_unavailable (503) → retryable, except while players are off or the token is refused.
  *
  * `detail` is prose that may be reworded at any release: never parse it, always show it — it is
