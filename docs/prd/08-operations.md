@@ -41,10 +41,11 @@ browser would write differently, and so could never match, is refused at
 startup: a path, a wildcard, userinfo, a query, a port outside 1–65535 or with a
 leading zero, and an IPv4 address that is not four decimal octets (`127.1`,
 `0x7f.0.0.1`). A host with an empty label (`a..b`) is refused too: a browser
-keeps it as written, but no page is served from it. There is no
-authentication, so every listed origin can reach the admin routes too. A page
-served over `https` cannot call Usher over `http`; a panel in an `https` Home
-Assistant needs Usher behind `https` as well.
+keeps it as written, but no page is served from it. An IPv6 literal
+(`http://[::1]:8123`) is refused as well; list a hostname for that address
+instead. There is no authentication, so every listed origin can reach the admin
+routes too. A page served over `https` cannot call Usher over `http`; a panel
+in an `https` Home Assistant needs Usher behind `https` as well.
 
 🔶 **`USHER_LLM_MAX_OUTPUT_TOKENS` shares that context window, and nothing
 couples the two.** The endpoint requires `prompt_tokens + llm_max_output_tokens

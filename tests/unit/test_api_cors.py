@@ -103,6 +103,7 @@ def test_origins_are_normalised() -> None:
         pytest.param("http://home-assistant.example", "http://home-assistant.example", id="hyphen"),
         pytest.param("http://-h.example", "http://-h.example", id="hyphen-at-an-edge"),
         pytest.param("http://h.0xzz", "http://h.0xzz", id="ends-in-no-number"),
+        pytest.param("http://my_host.example:8123", "http://my_host.example:8123", id="underscore"),
     ],
 )
 def test_an_origin_is_written_as_a_browser_sends_it(value: str, written: str) -> None:
@@ -133,6 +134,9 @@ def test_an_origin_is_written_as_a_browser_sends_it(value: str, written: str) ->
         pytest.param("http://127.1", id="ipv4-shorthand"),
         pytest.param("http://0x7f.1", id="ipv4-hex"),
         pytest.param("http://1.2.3.0x10", id="ipv4-hex-last-label"),
+        pytest.param("http://1.2.3.0x", id="ipv4-bare-0x-last-label"),
+        pytest.param("http://1.2.3.0x1f", id="ipv4-hex-letters-last-label"),
+        pytest.param("http://[::1]:8123", id="ipv6-literal"),
         pytest.param("http://010.0.0.1", id="ipv4-leading-zero"),
         pytest.param("http://192.0.2.256", id="ipv4-octet-over-255"),
         pytest.param("http://192.0.2.10.1", id="ipv4-five-labels"),

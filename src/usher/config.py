@@ -47,9 +47,10 @@ DEFAULT_LLM_BASE_URL = "http://localhost:8000/v1"
 _PLACEHOLDER_SECRET_KEY = "change-me-to-a-long-random-string"  # noqa: S105
 _ASYNCPG_DRIVER_PREFIX = "postgresql+asyncpg://"
 # An origin's shape once lowercased; `_is_browser_host` and `_is_browser_port`
-# refuse what no `Origin` can match. `[0-9]`, never `\d`, which admits any
-# Unicode digit and lets `int()` read a port no browser writes.
-_BARE_ORIGIN = re.compile(r"(https?)://([a-z0-9.-]+)(?::([0-9]{1,5}))?")
+# refuse what no `Origin` can match. The host keeps `_`, as browsers do; an
+# IPv6 literal is refused. `[0-9]`, never `\d`, which admits any Unicode digit
+# and lets `int()` read a port no browser writes.
+_BARE_ORIGIN = re.compile(r"(https?)://([a-z0-9_.-]+)(?::([0-9]{1,5}))?")
 _DEFAULT_PORT = {"http": "80", "https": "443"}
 _HIGHEST_PORT = 65535
 _OCTET = r"(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])"
