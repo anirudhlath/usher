@@ -74,7 +74,8 @@ class FakeHomeAssistantConnection(WebSocketConnection):
         self.subscriptions: dict[str, int] = {}
         self.sent: list[dict[str, Any]] = []
         self.delivered: list[dict[str, Any]] = []
-        #: How many delivered frames `recv` had not yet returned, at each `send` that failed.
+        #: How many frames `recv` could still return, at each `send` that failed. A frame
+        #: queued behind the drop or close marker is never returned, so it is not counted.
         self.unread_at_failed_sends: list[int] = []
         self.closed = False
 
@@ -83,7 +84,8 @@ class FakeHomeAssistantConnection(WebSocketConnection):
         self.deliver_text(json.dumps(frame))
 
     def deliver_text(self, text: str) -> None:
-        self._unread += 1
+        if self._reason is None:
+            self._unread += 1
         self._frames.put_nowait(text)
 
     def drop(self, reason: str = "connection closed by peer") -> None:
