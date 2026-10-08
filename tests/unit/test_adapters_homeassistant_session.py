@@ -1,6 +1,7 @@
 """The session: auth, numbered commands, one reader, and refusals that never echo HA's text."""
 
 import asyncio
+import gc
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager, suppress
 from typing import Any
@@ -364,6 +365,8 @@ async def test_a_command_after_aclose_is_refused_naming_the_close_once_the_reade
     server = FakeHomeAssistant()
     pumps: list[asyncio.Task[None]] = []
     async with _session(server, pumps=pumps) as session:
+        await session.command("config/area_registry/list")
+        assert not pumps[0].done(), "the premise: the reader is reading when the close comes"
         await session.aclose()
         async with asyncio.timeout(1.0):
             with pytest.raises(PortUnavailable, match="the fake connection is closed"):
@@ -371,6 +374,104 @@ async def test_a_command_after_aclose_is_refused_naming_the_close_once_the_reade
         with pytest.raises(PortUnavailable) as refused:
             await session.command("get_states")
     assert str(refused.value) == "the session was closed before get_states was sent"
+
+
+async def test_a_handler_that_raised_is_still_the_reason_after_aclose() -> None:
+    server = FakeHomeAssistant()
+    session = await HomeAssistantSession.open(
+        FakeHomeAssistantConnector(server), URL, TOKEN, command_timeout=1.0
+    )
+
+    def explode(_event: Event) -> None:
+        raise ValueError("the handler's own failure")
+
+    pump = asyncio.create_task(session.pump(explode))
+    await session.command("subscribe_events", event_type="state_changed")
+    server.change_state(HouseState(entity_id=APPLE_TV, state="paused"))
+    async with asyncio.timeout(1.0):
+        with pytest.raises(ValueError, match="the handler's own failure"):
+            await pump
+    await session.aclose()
+    with pytest.raises(PortUnavailable) as refused:
+        await session.command("get_states")
+    assert str(refused.value) == "the event handler raised before get_states was sent"
+
+
+async def test_a_dropped_socket_is_still_the_reason_after_aclose() -> None:
+    server = FakeHomeAssistant()
+    pumps: list[asyncio.Task[None]] = []
+    async with _session(server, pumps=pumps) as session:
+        server.connections[0].drop()
+        async with asyncio.timeout(1.0):
+            with pytest.raises(PortUnavailable, match="connection closed by peer"):
+                await pumps[0]
+        await session.aclose()
+        with pytest.raises(PortUnavailable) as refused:
+            await session.command("get_states")
+    assert str(refused.value) == "the Home Assistant websocket closed before get_states"
+
+
+async def test_a_stopped_session_refuses_a_new_reader_before_reading() -> None:
+    """Driven by hand: a reader that ran would park on `recv` instead of raising at once."""
+    server = FakeHomeAssistant()
+    pumps: list[asyncio.Task[None]] = []
+    async with _session(server, pumps=pumps) as session:
+        server.connections[0].drop()
+        async with asyncio.timeout(1.0):
+            with pytest.raises(PortUnavailable):
+                await pumps[0]
+        reading = session.pump(lambda _event: None)
+        try:
+            with pytest.raises(PortUnavailable) as refused:
+                reading.send(None)
+        finally:
+            reading.close()
+    assert str(refused.value) == (
+        "the Home Assistant websocket closed; this session cannot be read again"
+    )
+
+
+async def test_a_command_failed_in_send_leaves_no_exception_for_asyncio_to_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reader fails the command's future while the command still waits in `send`."""
+    loop = asyncio.get_running_loop()
+    reported: list[str] = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: reported.append(str(context["message"])))
+    server = FakeHomeAssistant()
+    pumps: list[asyncio.Task[None]] = []
+    try:
+        async with _session(server, pumps=pumps) as session:
+            connection = server.connections[0]
+            sending, release = asyncio.Event(), asyncio.Event()
+            send = connection.send
+
+            async def held(message: str) -> None:
+                sending.set()
+                await release.wait()
+                await send(message)
+
+            monkeypatch.setattr(connection, "send", held)
+            waiting = asyncio.create_task(session.command("get_states"))
+            await asyncio.wait_for(sending.wait(), 1.0)
+            connection.drop()
+            async with asyncio.timeout(1.0):
+                with pytest.raises(PortUnavailable):
+                    await pumps[0]
+            failed = [future.done() for _, future in session._pending.values()]
+            assert failed == [True], "the premise: the reader failed it while it was in send"
+            release.set()
+            await asyncio.wait([waiting], timeout=1.0)
+            failure = waiting.exception()
+            message = str(failure)
+            del failure, waiting
+        gc.collect()
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(previous)
+    assert message == "connection closed by peer", "the premise: the send itself failed"
+    assert reported == []
 
 
 async def test_fields_cannot_replace_a_commands_id_or_type() -> None:

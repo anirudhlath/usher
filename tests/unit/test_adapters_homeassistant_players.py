@@ -553,6 +553,50 @@ async def test_a_failed_re_read_drops_the_connection_and_the_next_sync_brings_th
         await adapter.aclose()
 
 
+async def _warnings_until_the_backoff(
+    server: FakeHomeAssistant, end: Callable[[FakeHomeAssistantConnector], None]
+) -> list[str]:
+    """Every WARNING from a synced adapter whose re-read is in flight when `end` runs."""
+    connector = FakeHomeAssistantConnector(server)
+    resume = asyncio.Event()
+    delays: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        delays.append(seconds)
+        await resume.wait()
+
+    adapter = _adapter(connector, sleep=sleep, timeout=0.05)
+    lines: list[str] = []
+    handler = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        await adapter.start()
+        await _until(lambda: adapter.syncs == 1)
+        server.unanswered.add("config/area_registry/list")
+        server.rename_area(LIVING_ROOM, "Lounge")
+        await _until(lambda: len(_commands(server, "config/area_registry/list")) == 2)
+        end(connector)
+        await _until(lambda: len(delays) == 1)
+    finally:
+        await adapter.aclose()
+        logger.remove(handler)
+    return [line.rstrip("\n") for line in lines]
+
+
+async def test_a_failed_re_read_says_usher_closed_the_connection_and_nothing_else() -> None:
+    lines = await _warnings_until_the_backoff(FakeHomeAssistant(), lambda _connector: None)
+    assert lines == [
+        "players: re-reading Home Assistant's registries failed; closing the connection to "
+        "sync again: Home Assistant did not answer config/area_registry/list within 0.05s"
+    ]
+
+
+async def test_a_drop_during_a_re_read_is_reported_once_as_the_drop() -> None:
+    lines = await _warnings_until_the_backoff(
+        FakeHomeAssistant(), lambda connector: connector.latest.drop()
+    )
+    assert lines == ["players: the Home Assistant connection ended: connection closed by peer"]
+
+
 async def test_aclose_closes_the_socket() -> None:
     server = FakeHomeAssistant()
     adapter, connector = await _started(server)

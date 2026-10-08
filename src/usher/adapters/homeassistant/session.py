@@ -23,26 +23,31 @@ _CODE: Final = re.compile(r"[a-z0-9_]{1,64}")
 
 @dataclass(frozen=True, slots=True)
 class _Stop:
-    """Why the session stopped, as told to a waiting command and to one sent after."""
+    """Why the session stopped, as told to a waiting command, one sent after, and a reader."""
 
+    cause: str
     waiting: str
     refused: str
 
 
 #: Only a failed socket is blamed on Home Assistant.
 _HA_CLOSED: Final = _Stop(
+    "the Home Assistant websocket closed",
     "Home Assistant closed before answering {kind}",
     "the Home Assistant websocket closed before {kind}",
 )
 _HANDLER_RAISED: Final = _Stop(
+    "the event handler raised",
     "the event handler raised before {kind} was answered",
     "the event handler raised before {kind} was sent",
 )
 _STOPPED_READING: Final = _Stop(
+    "the session stopped reading",
     "the session stopped reading before {kind} was answered",
     "the session stopped reading before {kind} was sent",
 )
 _CLOSED_HERE: Final = _Stop(
+    "the session was closed",
     "the session was closed before {kind} was answered",
     "the session was closed before {kind} was sent",
 )
@@ -94,6 +99,11 @@ class HomeAssistantSession:
         self._pumping = False
         self.skipped = 0
 
+    @property
+    def stopped(self) -> bool:
+        """Whether the reader ended or the session was closed; nothing is sent after."""
+        return self._stop is not None
+
     @classmethod
     async def open(
         cls, connect: WebSocketConnector, url: str, token: SecretStr, *, command_timeout: float
@@ -139,6 +149,10 @@ class HomeAssistantSession:
             ) from None
         finally:
             self._pending.pop(ident, None)
+            # A command that failed in `send` never awaited `answered`, which the reader
+            # may already have failed; retrieved here, or asyncio reports it when collected.
+            if answered.done() and not answered.cancelled():
+                answered.exception()
 
     async def pump(self, on_event: Callable[[Event], None]) -> None:
         """Read every frame until the socket fails, numbering each in arrival order.
@@ -149,9 +163,13 @@ class HomeAssistantSession:
         On exit every command still waiting fails at once with `PortUnavailable`,
         rather than at its timeout, and the message blames Home Assistant only
         when the socket failed: not for a raising `on_event` or a cancelled reader.
+        A session that has stopped refuses a new reader with `PortUnavailable`
+        naming why, before reading anything.
         """
         if self._pumping:
             raise RuntimeError("this Home Assistant session already has a reader")
+        if self._stop is not None:
+            raise PortUnavailable(f"{self._stop.cause}; this session cannot be read again")
         self._pumping = True
         why = _STOPPED_READING
         try:

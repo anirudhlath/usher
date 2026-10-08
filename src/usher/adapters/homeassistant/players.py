@@ -95,6 +95,7 @@ class HomeAssistantPlayers(Players):
         self._held: list[Event] | None = None
         self._resync: asyncio.Task[None] | None = None
         self._resync_again = False
+        self._closed_here = False
         self._labels_lock = asyncio.Lock()
         self._task: asyncio.Task[None] | None = None
         self.syncs = 0
@@ -176,13 +177,18 @@ class HomeAssistantPlayers(Players):
         session = await HomeAssistantSession.open(
             self._connect, self._url, self._token, command_timeout=self._command_timeout
         )
-        self._session, self._held = session, []
+        self._session, self._held, self._closed_here = session, [], False
         pump = asyncio.create_task(session.pump(self._on_event))
         try:
             await self._sync(session)
             # Shielded so a cancelled loop leaves the reader to the `finally`, which
-            # cancels a re-read before the reader can fail it with a stop it would log.
+            # stops a re-read before the reader: the re-read ends cancelled, not failed.
             await asyncio.shield(pump)
+        except UsherPortError:
+            # A failed re-read closed the socket itself and said why; the reader's
+            # failure that follows is that close, so it is not reported as HA's.
+            if not self._closed_here:
+                raise
         finally:
             self._session, self._held = None, None
             self._publish(None)
@@ -249,6 +255,8 @@ class HomeAssistantPlayers(Players):
 
         A failed read closes the session: the reader then fails, the loop syncs
         from scratch, and until it does there is no house rather than a stale one.
+        A read that failed because the session had already stopped is left to
+        whatever stopped it to report.
         """
         try:
             while True:
@@ -268,7 +276,14 @@ class HomeAssistantPlayers(Players):
                 if not self._resync_again:
                     return
         except UsherPortError as exc:
-            logger.warning("players: re-reading Home Assistant's registries failed: {}", exc)
+            if session.stopped:
+                return
+            logger.warning(
+                "players: re-reading Home Assistant's registries failed; "
+                "closing the connection to sync again: {}",
+                exc,
+            )
+            self._closed_here = True
             await session.aclose()
 
     def _publish(self, house: HouseSnapshot | None) -> None:
