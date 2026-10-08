@@ -476,7 +476,9 @@ def _key_arguments(node: ast.AST, params: Mapping[str, list[str]]) -> list[ast.e
     return found
 
 
-# A new read must also be reached from `_target`'s row; listing its key alone fails the recording.
+# A new read must also be reached from `_target`'s row, or, for a reader beside the lists, from
+# the row `test_each_reader_beside_the_lists_reads_only_its_own_paths` hands it: the Apple TV's
+# entry, the first label, or the Apple TV's state event. Listing its key alone fails the recording.
 def _keys_named(source: str) -> list[tuple[str, int]]:
     """Each key `source` names, with its line: a string constant, or a module constant's name.
 
