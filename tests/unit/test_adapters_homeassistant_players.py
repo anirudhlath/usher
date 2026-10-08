@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import os
+import urllib.request
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -42,14 +44,6 @@ from usher.domain.house import DeviceRole, HouseSnapshot, HouseState
 from usher.ports.errors import PortAuthFailed, PortDataMalformed, PortUnavailable
 
 URL = "ws://192.0.2.1:8123/api/websocket"
-_PROXY_VARIABLES = (
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "ALL_PROXY",
-    "http_proxy",
-    "https_proxy",
-    "all_proxy",
-)
 
 
 def _adapter(
@@ -181,8 +175,11 @@ def test_the_websocket_url_follows_the_scheme(base: str, expected: str) -> None:
 async def test_the_default_connector_admits_a_frame_over_a_mebibyte(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    for name in _PROXY_VARIABLES:
+    # websockets takes its proxy from `urllib.request.getproxies()`, which reads every
+    # variable named `<scheme>_proxy` in any case: `ws_proxy` and `socks_proxy` too.
+    for name in [name for name in os.environ if name.lower().endswith("_proxy")]:
         monkeypatch.delenv(name, raising=False)
+    assert urllib.request.getproxies() == {}, "the premise: no proxy answers the dial"
     frame = "x" * (DEFAULT_MAX_FRAME_BYTES + 1)
     assert len(frame) < MAX_FRAME_BYTES, "the premise: the bound admits it"
 

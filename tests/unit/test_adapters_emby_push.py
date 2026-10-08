@@ -1161,6 +1161,8 @@ async def test_connect_websocket_hands_the_library_the_silenced_logger(
     monkeypatch.setattr("websockets.asyncio.client.connect", _fake_connect)
     connection = await connect_websocket(f"ws://emby.invalid{LEAKY_PATH}")
     assert isinstance(connection, PushConnection)
+    pinned = {"logger", "ping_interval", "ping_timeout", "max_queue", "max_size"}
+    assert pinned - captured.keys() == set(), "the shared connector stopped forwarding these"
     assert captured["logger"] is socket_logger()
     # PRD 03's heartbeat, and the library's own default -- passed explicitly
     # so a future default change is a diff rather than a silent regression.
@@ -1169,7 +1171,8 @@ async def test_connect_websocket_hands_the_library_the_silenced_logger(
     # with the socket already live, and at 16 buffered frames the client
     # stops reading and backpressures the server for the length of the walk.
     assert captured["max_queue"] == 256
-    # The bound this channel had before the transport was shared: the library's own.
+    # Emby names no bound, so this is the shared connector's default, `DEFAULT_MAX_FRAME_BYTES`:
+    # the bound this channel had before the transport was shared.
     assert captured["max_size"] == DEFAULT_MAX_FRAME_BYTES, f"Emby's bound: {captured['max_size']}"
 
 
