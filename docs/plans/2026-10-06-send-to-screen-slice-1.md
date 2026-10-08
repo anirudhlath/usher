@@ -10182,7 +10182,7 @@ The spec's first open question: the panel runs in HA's origin and Usher answers 
 - Test: `tests/unit/test_api_cors.py`
 
 **Interfaces:**
-- Produces: `Settings.cors_origins: str = ""`, normalised to comma-separated origins with no spaces. It is read by `create_app` alone.
+- Produces: `Settings.cors_origins: str = ""`, normalised to comma-separated origins with no spaces, each lowercased and without its scheme's default port. It is read by `create_app` alone.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -10201,6 +10201,7 @@ from asgi_lifespan import LifespanManager
 from pydantic import ValidationError
 
 from usher.api.app import create_app
+from usher.api.dto.problem import PROBLEM_MEDIA_TYPE
 from usher.config import Settings
 
 PANEL = "http://homeassistant.example:8123"
@@ -10230,6 +10231,10 @@ async def _client(settings: Settings) -> AsyncIterator[httpx.AsyncClient]:
             yield client
 
 
+def _exposed(response: httpx.Response) -> set[str]:
+    return {name.strip() for name in response.headers["access-control-expose-headers"].split(",")}
+
+
 async def test_no_origin_is_allowed_by_default() -> None:
     async with _client(_settings()) as client:
         simple = await client.get("/health", headers={"origin": PANEL})
@@ -10246,8 +10251,7 @@ async def test_a_listed_origin_may_call_and_read_the_trace_header() -> None:
             "/screens/devices/media_player.example/confirm", headers={"origin": PANEL, **_PREFLIGHT}
         )
     assert simple.headers["access-control-allow-origin"] == PANEL
-    exposed = {name.strip() for name in simple.headers["access-control-expose-headers"].split(",")}
-    assert {"traceresponse", "retry-after"} <= exposed
+    assert {"traceresponse", "retry-after"} <= _exposed(simple)
     assert preflight.status_code == 200
     assert preflight.headers["access-control-allow-origin"] == PANEL
     assert "POST" in preflight.headers["access-control-allow-methods"]
@@ -10262,15 +10266,73 @@ async def test_an_unlisted_origin_is_not_allowed() -> None:
     assert preflight.status_code == 400
 
 
+async def test_a_problem_document_carries_the_cors_headers() -> None:
+    async with _client(_settings(cors_origins=PANEL)) as client:
+        response = await client.get("/screens", headers={"origin": PANEL})
+    assert response.status_code == 503  # players are off
+    assert response.headers["content-type"] == PROBLEM_MEDIA_TYPE
+    assert response.headers["access-control-allow-origin"] == PANEL
+    assert {"traceresponse", "retry-after"} <= _exposed(response)
+
+
 def test_origins_are_normalised() -> None:
     settings = _settings(cors_origins=f" {PANEL} , https://other.example ,")
     assert settings.cors_origins == f"{PANEL},https://other.example"
 
 
 @pytest.mark.parametrize(
+    ("value", "written"),
+    [
+        pytest.param("http://H.Example:8123", "http://h.example:8123", id="host-case"),
+        pytest.param("HTTPS://h.example:8443", "https://h.example:8443", id="scheme-case"),
+        pytest.param("http://h.example:80", "http://h.example", id="http-default-port"),
+        pytest.param("https://h.example:443", "https://h.example", id="https-default-port"),
+        pytest.param("https://h.example:80", "https://h.example:80", id="other-default"),
+        pytest.param("http://h.example:65535", "http://h.example:65535", id="highest-port"),
+        pytest.param("http://192.0.2.10:8123", "http://192.0.2.10:8123", id="ipv4"),
+        pytest.param("http://h.example.:8123", "http://h.example.:8123", id="trailing-dot"),
+        pytest.param("http://home-assistant.example", "http://home-assistant.example", id="hyphen"),
+        pytest.param("http://-h.example", "http://-h.example", id="hyphen-at-an-edge"),
+        pytest.param("http://h.0xzz", "http://h.0xzz", id="ends-in-no-number"),
+        pytest.param("http://my_host.example:8123", "http://my_host.example:8123", id="underscore"),
+    ],
+)
+def test_an_origin_is_written_as_a_browser_sends_it(value: str, written: str) -> None:
+    assert _settings(cors_origins=value).cors_origins == written
+
+
+@pytest.mark.parametrize(
     "value",
-    ["*", f"{PANEL}/panel", "homeassistant.example:8123", "ftp://homeassistant.example", "http://"],
-    ids=["wildcard", "path", "no-scheme", "not-http", "no-host"],
+    [
+        pytest.param("*", id="wildcard"),
+        pytest.param(f"{PANEL}/panel", id="path"),
+        pytest.param("homeassistant.example:8123", id="no-scheme"),
+        pytest.param("ftp://homeassistant.example", id="not-http"),
+        pytest.param("http://", id="no-host"),
+        pytest.param("http://owner@homeassistant.example", id="userinfo"),
+        pytest.param("http://homeassistant.example?panel=1", id="query"),
+        pytest.param("http://home assistant.example", id="space"),
+        pytest.param("http://h.example:\u0668\u0660", id="arabic-indic-digits"),
+        pytest.param("http://h.example:\uff18\uff10\uff18\uff10", id="fullwidth-digits"),
+        pytest.param("http://h.example:0", id="port-zero"),
+        pytest.param("http://h.example:08123", id="port-leading-zero"),
+        pytest.param("http://h.example:080", id="http-default-leading-zero"),
+        pytest.param("https://h.example:0443", id="https-default-leading-zero"),
+        pytest.param("http://h.example:65536", id="port-over-65535"),
+        pytest.param("http://...", id="dots-only"),
+        pytest.param("http://.", id="one-dot"),
+        pytest.param("http://a..b", id="empty-label"),
+        pytest.param("http://127.1", id="ipv4-shorthand"),
+        pytest.param("http://0x7f.1", id="ipv4-hex"),
+        pytest.param("http://1.2.3.0x10", id="ipv4-hex-last-label"),
+        pytest.param("http://1.2.3.0x", id="ipv4-bare-0x-last-label"),
+        pytest.param("http://1.2.3.0x1f", id="ipv4-hex-letters-last-label"),
+        pytest.param("http://[::1]:8123", id="ipv6-literal"),
+        pytest.param("http://010.0.0.1", id="ipv4-leading-zero"),
+        pytest.param("http://192.0.2.256", id="ipv4-octet-over-255"),
+        pytest.param("http://192.0.2.10.1", id="ipv4-five-labels"),
+        pytest.param("http://192.0.2.10.", id="ipv4-trailing-dot"),
+    ],
 )
 def test_anything_but_a_bare_origin_is_refused(value: str) -> None:
     with pytest.raises(ValidationError, match="USHER_CORS_ORIGINS takes comma-separated origins"):
@@ -10284,11 +10346,62 @@ Expected: `test_no_origin_is_allowed_by_default` passes, as nothing adds CORS ye
 
 - [ ] **Step 3: The setting**
 
-In `src/usher/config.py`, directly after `port`, add:
+`CORSMiddleware` compares the `Origin` header as a string, so an entry a browser would write differently could never match. The validator lowercases each entry and drops a scheme's default port, as a browser does, and refuses anything else a browser would rewrite.
+
+At the top of `src/usher/config.py`, add `import re`. After `_ASYNCPG_DRIVER_PREFIX`, add:
+
+```python
+# An origin's shape once lowercased; `_is_browser_host` and `_is_browser_port`
+# refuse what no `Origin` can match. The host keeps `_`, as browsers do; an
+# IPv6 literal is refused. `[0-9]`, never `\d`, which admits any Unicode digit
+# and lets `int()` read a port no browser writes.
+_BARE_ORIGIN = re.compile(r"(https?)://([a-z0-9_.-]+)(?::([0-9]{1,5}))?")
+_DEFAULT_PORT = {"http": "80", "https": "443"}
+_HIGHEST_PORT = 65535
+_OCTET = r"(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])"
+_DOTTED_QUAD = re.compile(rf"{_OCTET}(?:\.{_OCTET}){{3}}")
+# WHATWG's "ends in a number": a last label of ASCII digits, or `0x` and hex digits.
+_NUMERIC_LABEL = re.compile(r"[0-9]+|0x[0-9a-f]*")
+_CORS_ORIGINS_REFUSED = (
+    "USHER_CORS_ORIGINS takes comma-separated origins such as "
+    "http://homeassistant.local:8123: a scheme, a host and an optional port from "
+    "1 to 65535, with no path, no wildcard and nothing else"
+)
+```
+
+Directly before `def _is_compose_only`, add:
+
+```python
+def _is_browser_host(host: str) -> bool:
+    """Whether a page can be served from `host` and a browser keeps it as written.
+
+    One trailing dot is kept, and makes a distinct origin; any other empty
+    label names no host a page is served from. A host whose last label is a
+    number, all digits or `0x` and hex digits, is IPv4 to a browser, which
+    rewrites shorthand (`127.1`), hex and leading zeros, so it must already be
+    a dotted quad of decimal octets. `h.0xzz` ends in no number and is kept.
+    """
+    labels = host.removesuffix(".").split(".")
+    if "" in labels:
+        return False
+    if _NUMERIC_LABEL.fullmatch(labels[-1]):
+        return _DOTTED_QUAD.fullmatch(host) is not None
+    return True
+
+
+def _is_browser_port(port: str | None) -> bool:
+    """No port, or 1 to 65535 with no leading zero, as a browser writes one."""
+    return port is None or (not port.startswith("0") and int(port) <= _HIGHEST_PORT)
+
+
+```
+
+Directly after `port`, add:
 
 ```python
     # Browser origins allowed to call the API, comma-separated: `http://host:port`,
-    # no path and no wildcard. Empty adds no CORS at all.
+    # no path and no wildcard. Each is lowercased and loses a default port, as a
+    # browser's `Origin` does. Empty adds no CORS at all.
     cors_origins: str = ""
 ```
 
@@ -10298,19 +10411,32 @@ After `_blank_to_none`, add:
     @field_validator("cors_origins")
     @classmethod
     def _origins_are_bare_origins(cls, value: str) -> str:
-        """Each entry a bare `http(s)://host[:port]`, returned joined with no spaces."""
-        origins = [part.strip() for part in value.split(",") if part.strip()]
-        for origin in origins:
-            scheme, _, rest = origin.partition("://")
-            if scheme not in ("http", "https") or not rest or "/" in rest or "*" in rest:
-                raise ValueError(
-                    "USHER_CORS_ORIGINS takes comma-separated origins such as "
-                    "http://homeassistant.local:8123, with no path and no wildcard"
-                )
+        """Each entry a bare `http(s)://host[:port]`, written as a browser sends it.
+
+        `CORSMiddleware` compares the `Origin` header as a string, and a browser
+        lowercases the scheme and host and omits a scheme's default port. An
+        entry written any other way could never match, so each is lowercased
+        and loses `:80` on http or `:443` on https. Anything else a browser would
+        rewrite is refused, by `_is_browser_host` and `_is_browser_port`, so no
+        entry is accepted that could never match. Returned joined with no spaces.
+        """
+        origins = []
+        for part in value.split(","):
+            entry = part.strip().lower()
+            if not entry:
+                continue
+            match = _BARE_ORIGIN.fullmatch(entry)
+            if match is None:
+                raise ValueError(_CORS_ORIGINS_REFUSED)
+            scheme, host, port = match.groups()
+            if not _is_browser_host(host) or not _is_browser_port(port):
+                raise ValueError(_CORS_ORIGINS_REFUSED)
+            kept = "" if port in (None, _DEFAULT_PORT[scheme]) else f":{port}"
+            origins.append(f"{scheme}://{host}{kept}")
         return ",".join(origins)
 ```
 
-`field_validator` is already imported for `_blank_to_none`. A bare `*` fails the scheme check, so the wildcard needs no arm of its own. The `"*" in rest` arm refuses `http://*.example`.
+`field_validator` is already imported for `_blank_to_none`. A bare `*`, a path, userinfo, a query, a non-ASCII digit and an IPv6 literal all fail `_BARE_ORIGIN`, so none needs an arm of its own. Labels edged with `-` and hosts with `_` are accepted: WHATWG's host parser checks neither, so browsers send both.
 
 - [ ] **Step 4: The middleware**
 
@@ -10339,7 +10465,8 @@ Add to `.env.example`, after `USHER_PORT`:
 
 ```bash
 # Browser origins allowed to call the API, comma-separated, such as the home
-# panel's Home Assistant: http://homeassistant.local:8123. Empty allows none.
+# panel's Home Assistant: http://homeassistant.local:8123. Each is lowercased
+# and loses a default port (:80 on http, :443 on https). Empty allows none.
 USHER_CORS_ORIGINS=
 ```
 
@@ -10351,7 +10478,7 @@ In `web/src/features/operator/Config.settings.ts`, add a row after `USHER_PORT`'
     group: 'server',
     def: 'empty',
     about:
-      'Browser origins allowed to call the API, comma-separated, each a bare http(s)://host:port. Empty adds no CORS, so only same-origin pages such as this console can call it. A page served over https cannot call Usher over http whatever this says.',
+      'Browser origins allowed to call the API, comma-separated, each a bare http(s)://host:port, lowercased and without a default port (:80 on http, :443 on https). Empty adds no CORS, so only same-origin pages such as this console can call it. A page served over https cannot call Usher over http whatever this says.',
     secret: false,
     measured: false,
   },
@@ -10362,11 +10489,19 @@ In `docs/prd/08-operations.md`, under `## Configuration`, after Task 11's `USHER
 ```markdown
 **`USHER_CORS_ORIGINS` is empty by default**, and no browser page outside
 Usher's own origin may call it. A comma-separated list of bare origins
-(`http://homeassistant.local:8123`) lets pages there call every route, read
-`traceresponse` and `Retry-After`, and send JSON bodies; a path or a wildcard is
-refused at startup. There is no authentication, so every listed origin can
-reach the admin routes too. A page served over `https` cannot call Usher over
-`http`; a panel in an `https` Home Assistant needs Usher behind `https` as well.
+(`http://homeassistant.local:8123`) lets pages there call every route with no
+request header beyond `Content-Type`, and read `traceresponse` and
+`Retry-After`. Each origin is lowercased and loses a default port (`:80` on
+`http`, `:443` on `https`), as a browser's `Origin` header writes it. Anything a
+browser would write differently, and so could never match, is refused at
+startup: a path, a wildcard, userinfo, a query, a port outside 1–65535 or with a
+leading zero, and an IPv4 address that is not four decimal octets (`127.1`,
+`0x7f.0.0.1`). A host with an empty label (`a..b`) is refused too: a browser
+keeps it as written, but no page is served from it. An IPv6 literal
+(`http://[::1]:8123`) is refused as well; list a hostname for that address
+instead. There is no authentication, so every listed origin can reach the admin
+routes too. A page served over `https` cannot call Usher over `http`; a panel
+in an `https` Home Assistant needs Usher behind `https` as well.
 ```
 
 - [ ] **Step 6: Run the tests to verify they pass**
@@ -10380,11 +10515,18 @@ uv run mypy src/usher/config.py src/usher/api/app.py tests/unit/test_api_cors.py
 ```
 Expected: every case passes; mypy is clean; `npm run verify` is green.
 
-- [ ] **Step 7: Plant two guards**
+- [ ] **Step 7: Plant the guards**
 
-Each plant follows the cycle in "How to work this plan":
+Each plant follows the cycle in "How to work this plan", and each fails only the cases named:
 1. In `create_app`, delete the `expose_headers=` line. Expect `test_a_listed_origin_may_call_and_read_the_trace_header` to fail on `access-control-expose-headers`.
-2. In `_origins_are_bare_origins`, delete `or "/" in rest`. Expect `test_anything_but_a_bare_origin_is_refused[path]` to fail, and only that case.
+2. In `_BARE_ORIGIN`, change `[0-9]{1,5}` to `\d{1,5}`. Expect `[arabic-indic-digits]` and `[fullwidth-digits]` to fail on `DID NOT RAISE`.
+3. In `_is_browser_port`, delete `not port.startswith("0") and`. Expect `[port-zero]`, `[port-leading-zero]`, `[http-default-leading-zero]` and `[https-default-leading-zero]` to fail.
+4. In `_is_browser_port`, delete `and int(port) <= _HIGHEST_PORT`. Expect `[port-over-65535]` to fail.
+5. In `_is_browser_host`, delete `if "" in labels: return False`. Expect `[dots-only]`, `[one-dot]` and `[empty-label]` to fail.
+6. Change `_NUMERIC_LABEL` to `re.compile(r"[0-9]+")`. Expect `[ipv4-hex-last-label]` to fail.
+   Then, separately, change its `0x[0-9a-f]*` to `0x[0-9a-f]+`; expect `[ipv4-bare-0x-last-label]` to fail. Change it to `0x[0-9]*`; expect `[ipv4-hex-letters-last-label]` to fail.
+7. In `_is_browser_host`, change the `_NUMERIC_LABEL` test to `labels[-1].isdigit() or labels[-1].startswith("0x")`. Expect `[ends-in-no-number]` to fail, on `http://h.0xzz` being refused.
+8. In `_BARE_ORIGIN`, change `[a-z0-9_.-]` to `[a-z0-9.-]`. Expect `[underscore]` to fail.
 
 - [ ] **Step 8: Commit**
 
@@ -10459,7 +10601,10 @@ uv run python scripts/capture_ha_shape.py --listen 30 \
 - **A write is done when HA's registry event reports it**, not when the command
   is answered. Confirm waits with `USHER_PLAYERS_CONFIRM_TIMEOUT_SECONDS`.
 - **An entity's own `area_id` overrides its device's**, so confirm places only a
-  player whose entity has none.
+  player whose entity has none, and only one in use: an ignored player is never
+  placed.
+- **The label is written before the area.** An area write HA refuses leaves the
+  label, which is the `no_area` state; confirming again is safe.
 
 ## Reading from HA
 
@@ -10474,6 +10619,10 @@ uv run python scripts/capture_ha_shape.py --listen 30 \
   16 MiB.
 - **No connection, no house.** `snapshot()` raises `PortUnavailable` rather
   than serve a reading that has stopped updating.
+- **A failed re-read closes the connection**, and the next one syncs from
+  scratch. The one warning says Usher closed it, not HA.
+- **A session stops for one reason, the first.** A command still in `send`
+  when the reader ends is failed at once, not at its timeout.
 - **An error names HA's code, never HA's message**, and the token travels only
   in the `auth` frame.
 
@@ -10485,7 +10634,10 @@ uv run python scripts/capture_ha_shape.py --listen 30 \
 - Synthetic values only: MACs in `02:00:00:…`, IPv4 in `192.0.2.0/24`, and
   entity ids already printed by the spec, or invented and absent from the house.
 - **`FakePlayers.reports_writes = False` is how a test holds a write unreported**;
-  publish the next house by hand to release it.
+  publish the next house by hand to release it. `refuse` refuses every write,
+  `refuse_area` only the area: that is how a half-write is held.
+- **A test that dials loopback for real clears every `*_proxy` variable first**,
+  or a proxy in the environment answers the dial instead.
 
 ## Naming
 
@@ -10510,7 +10662,7 @@ Under `CHANGELOG.md`'s `## [Unreleased]` → `### Added`, add:
   `USHER_PLAYERS_ENABLED`, with `USHER_HA_URL` and an administrator's
   `USHER_HA_TOKEN`. `GET /screens` lists every screen and player with HA's
   live reading. `POST /screens/devices/{entity_id}/confirm` labels a player
-  `usher` or `usher_ignore` in HA, and places one that is in no area.
+  `usher` or `usher_ignore` in HA, and places one in use that is in no area.
   `GET /titles/{id}/ways` and `GET /episodes/{id}/ways` rank every way the
   copies could play on each screen. Nothing is sent to a screen yet.
 - A problem code, `players_unavailable` (503): players are off, or Home
@@ -10519,7 +10671,7 @@ Under `CHANGELOG.md`'s `## [Unreleased]` → `### Added`, add:
   Empty by default.
 ```
 
-In `docs/plans/progress.md`, set the status of the `1–10` and `11–16` rows of the `## Send to a screen` table to `✅ landed (PR #N)`, using the number of this branch's PR. In `docs/prd/README.md`'s implementation-plan table, set this plan's status cell to `🔨 Tasks 1–16 landed (PR #N); Task 17, the live acceptance, is owner-gated`. Both cells change together; `.claude/rules/prd-maintenance.md` says why.
+In `docs/plans/progress.md`, set the status of the `1–10` and `11–16` rows of the `## Send to a screen` table to `🔨 built on feat/send-to-screen-slice-1, awaiting merge`. No PR exists yet, and "landed" would be false until one merges; the owner sets the PR number and ✅ when it does. In `docs/prd/README.md`'s implementation-plan table, set this plan's status cell to `🔨 Tasks 1–16 built on feat/send-to-screen-slice-1, awaiting merge; Task 17, the live acceptance, is owner-gated`. Both cells change together; `.claude/rules/prd-maintenance.md` says why.
 
 - [ ] **Step 3: The whole gate, once**
 
