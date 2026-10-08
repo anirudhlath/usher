@@ -26,6 +26,11 @@ is **refused at startup**.
 **`USHER_CURATION_POOL_SIZE` is a setting**; size it to the context window of
 the model `USHER_LLM_BASE_URL` names.
 
+**`USHER_PLAYERS_ENABLED` defaults to `false`.** On, it needs `USHER_HA_URL` and
+`USHER_HA_TOKEN`, and is **refused at startup** without them. The token must
+belong to a Home Assistant administrator: Usher writes two labels and a device's
+area, which HA allows to admins only, and a non-admin token is refused per write.
+
 🔶 **`USHER_LLM_MAX_OUTPUT_TOKENS` shares that context window, and nothing
 couples the two.** The endpoint requires `prompt_tokens + llm_max_output_tokens
 ≤ max_model_len`, so raising the output ceiling lowers the workable pool, and
@@ -120,6 +125,8 @@ the plaintext exists only in memory in the adapter that needs it.
   span attribute, and never written to a table, a cache or a file.
 - **`llm_api_key` travels in an `Authorization: Bearer` header, never in a
   URL**, and no LLM error message carries a URL or a request body.
+- **`USHER_HA_TOKEN` travels only in the Home Assistant websocket's `auth`
+  frame**, never in a URL, and is never logged or put in an error message.
 - **At `USHER_LOG_LEVEL=DEBUG` the push socket library's own handshake and
   frame logging stays off**, so the source token in its request line is never
   logged.

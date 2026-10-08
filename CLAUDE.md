@@ -67,7 +67,7 @@ when working in `docs/`.
   and the restore is verified by reading the file back, not by the suite going
   green. `git reset --soft` is fine.
 - **Secrets in `Settings` are `SecretStr`** — `database_url`, `secret_key`,
-  `tmdb_api_key`, `llm_api_key`, `embedding_api_key`. Unwrap with
+  `tmdb_api_key`, `llm_api_key`, `embedding_api_key`, `ha_token`. Unwrap with
   `.get_secret_value()` at the point of use only; never store the unwrapped
   value, never let it reach a log line or an exception message.
 

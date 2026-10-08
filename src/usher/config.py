@@ -340,6 +340,20 @@ class Settings(BaseSettings):
     # The provider's image host, `{base}` in the ladder's `{base}{rung}{path}`.
     image_cdn_base_url: str = Field(default="https://image.tmdb.org/t/p/", min_length=1)
 
+    # Home Assistant, the registry of the house's screens and players. Off by
+    # default: nothing connects, and `/screens` answers 503 `players_unavailable`.
+    players_enabled: bool = False
+    # HA's base URL, `http(s)://host:port`; the websocket path is the adapter's.
+    ha_url: str | None = None
+    # A long-lived access token. Label and area writes are admin-only in HA.
+    ha_token: SecretStr | None = None
+    # How long one websocket command may wait for its answer.
+    players_command_timeout_seconds: float = Field(default=10.0, gt=0)
+    # The reconnect backoff's first ceiling, doubled per connection that never synced,
+    players_backoff_seconds: float = Field(default=5.0, gt=0)
+    # and where the doubling stops.
+    players_max_backoff_seconds: float = Field(default=300.0, gt=0)
+
     # Whether this process also serves Usher Console at `/console` (see
     # `usher.api.console`).
     console_enabled: bool = True
@@ -443,8 +457,34 @@ class Settings(BaseSettings):
             )
         return self
 
+    @model_validator(mode="after")
+    def _players_need_somewhere_to_connect(self) -> "Settings":
+        """Players on with no Home Assistant, or a ceiling under its start, is refused.
+
+        No message carries a value: a URL can hold a credential.
+        """
+        if self.players_max_backoff_seconds < self.players_backoff_seconds:
+            raise ValueError(
+                "USHER_PLAYERS_MAX_BACKOFF_SECONDS must be at least USHER_PLAYERS_BACKOFF_SECONDS"
+            )
+        if not self.players_enabled:
+            return self
+        if self.ha_url is None or self.ha_token is None:
+            raise ValueError("USHER_PLAYERS_ENABLED=true needs USHER_HA_URL and USHER_HA_TOKEN")
+        scheme, _, rest = self.ha_url.partition("://")
+        if scheme not in ("http", "https") or not rest.strip("/"):
+            raise ValueError("USHER_HA_URL must be an http:// or https:// URL")
+        return self
+
     @field_validator(
-        "tmdb_api_key", "otlp_endpoint", "llm_api_key", "grafana_url", "tempo_url", mode="before"
+        "tmdb_api_key",
+        "otlp_endpoint",
+        "llm_api_key",
+        "grafana_url",
+        "tempo_url",
+        "ha_url",
+        "ha_token",
+        mode="before",
     )
     @classmethod
     def _blank_to_none(cls, value: object) -> object:

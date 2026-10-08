@@ -42,6 +42,7 @@ from usher.api.trace_response import TraceResponseMiddleware
 from usher.composition import (
     DefaultUserId,
     embedder,
+    house_players,
     image_proxy,
     llm_client,
     metadata_provider,
@@ -142,6 +143,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Opens no connection -- that is what keeps `/health` answering 200
         # with Postgres down.
         await lanes.start()
+        # The house's players, `None` while USHER_PLAYERS_ENABLED is off. Their
+        # connection is a task of its own, so Home Assistant never gates startup.
+        players, close_players = await house_players(settings)
+        app.state.players = players
         # The `try:` opens here and not at the engine, so a raise from
         # `metadata_provider`, `embedder`, `llm_client` or `lanes.start()` leaks
         # whatever was already built.
@@ -158,6 +163,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await search_queries.aclose()
             with suppress(asyncio.CancelledError):
                 await draining
+            await close_players()
             await close_provider()
             await close_model()
             await close_client()

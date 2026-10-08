@@ -25,12 +25,18 @@ from usher.adapters.bulk.wikidata import WikidataCrosswalkDataset
 from usher.adapters.embedding.fastembed import RUNTIME as FASTEMBED_RUNTIME
 from usher.adapters.embedding.openai_compat import RUNTIME as OPENAI_RUNTIME
 from usher.adapters.factory import ConfiguredSourceAdapterFactory
+from usher.adapters.homeassistant.players import (
+    HomeAssistantPlayers,
+    connect_home_assistant,
+    websocket_url,
+)
 from usher.adapters.http import SourceGateRegistry
 from usher.adapters.images import DiskImageBlobStore, ProviderCdnImageFetcher
 from usher.adapters.llm import OpenAICompatibleClient
 from usher.adapters.search.postgres import PostgresSearchIndex, PostgresSuggestIndex
 from usher.adapters.search.prefix import PostgresPrefixSuggestIndex
 from usher.adapters.tmdb import TmdbClient, TmdbMetadataProvider
+from usher.adapters.websocket import WebSocketConnector
 from usher.config import Settings
 from usher.db.models.search import EMBEDDING_DIMENSIONS
 from usher.db.repositories.bulk import PostgresBulkCatalogRepository
@@ -70,6 +76,7 @@ from usher.ports.images import ImageBlobStore, ImageFetcher
 from usher.ports.jobs import JobQueue
 from usher.ports.llm import LLMClient
 from usher.ports.metadata import MetadataProvider
+from usher.ports.players import Players
 from usher.ports.repository import (
     BulkCatalogRepository,
     CollectionRepository,
@@ -1062,6 +1069,30 @@ async def llm_client(
     return built, built.aclose
 
 
+async def house_players(
+    settings: Settings, *, connect: WebSocketConnector | None = None
+) -> tuple[Players | None, Callable[[], Awaitable[None]]]:
+    """The house's players and the callable that releases them; `(None, no-op)` while off.
+
+    Started here, which dials nothing: the connection loop is a task of its
+    own, so an unreachable Home Assistant never delays or fails startup.
+    """
+    if not settings.players_enabled:
+        return None, nothing
+    if settings.ha_url is None or settings.ha_token is None:
+        raise RuntimeError("Settings let players on with no Home Assistant to reach")
+    players = HomeAssistantPlayers(
+        url=websocket_url(settings.ha_url),
+        token=settings.ha_token,
+        connect=connect or connect_home_assistant,
+        command_timeout=settings.players_command_timeout_seconds,
+        backoff_seconds=settings.players_backoff_seconds,
+        max_backoff_seconds=settings.players_max_backoff_seconds,
+    )
+    await players.start()
+    return players, players.aclose
+
+
 def image_proxy(
     settings: Settings,
 ) -> tuple[ImageFetcher, ImageBlobStore, Callable[[], Awaitable[None]]]:
@@ -2011,6 +2042,7 @@ __all__ = [
     "build_worker",
     "bulk_client",
     "embedder",
+    "house_players",
     "llm_client",
     "metadata_provider",
     "nothing",

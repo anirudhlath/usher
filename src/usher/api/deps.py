@@ -3,7 +3,7 @@
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from datetime import UTC, datetime
-from typing import Annotated, cast
+from typing import Annotated, Final, cast
 from urllib.parse import quote
 
 from cryptography.fernet import Fernet
@@ -50,6 +50,7 @@ from usher.ports.embedding import Embedder
 from usher.ports.events import EventPublisher
 from usher.ports.images import ImageBlobStore, ImageFetcher
 from usher.ports.jobs import JobQueue
+from usher.ports.players import Players
 from usher.ports.repository import (
     CollectionRepository,
     CreditRepository,
@@ -833,6 +834,28 @@ def get_playback_service(
 
 
 PlaybackServiceDep = Annotated[PlaybackService, Depends(get_playback_service)]
+
+
+# ---------------------------------------------------------------------------
+# Players: the house's screens, read from the registry that owns them.
+# ---------------------------------------------------------------------------
+
+_UNSET: Final = object()
+
+
+def get_players(request: Request) -> Players | None:
+    """The process's `Players`, or `None` while `USHER_PLAYERS_ENABLED` is off."""
+    players = getattr(request.app.state, "players", _UNSET)
+    if players is _UNSET:
+        raise RuntimeError(
+            "app.state.players is not set -- create_app's lifespan has not run. "
+            "If this is a test using a bare ASGI transport, wrap the app in "
+            "asgi_lifespan.LifespanManager first."
+        )
+    return cast(Players | None, players)
+
+
+PlayersDep = Annotated[Players | None, Depends(get_players)]
 
 
 # ---------------------------------------------------------------------------
