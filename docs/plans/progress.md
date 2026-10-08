@@ -134,6 +134,20 @@ row under any heading above would make that heading false.
 and is not a milestone, so a row under any heading above would make that
 heading false. Slices 2–4 get plans of their own and rows here.
 
+## Confirmed retraction (from docs/specs/2026-10-07-confirmed-retraction-design.md)
+| Task | What it delivers | Plan file | Status |
+|---|---|---|---|
+| 1–2 | How an `Ids` listing answers two versions of one item, recorded, and the fake Emby server taught it | docs/plans/2026-10-07-confirmed-retraction.md | 📋 planned |
+| 3–4 | `confirm_gone` on the port and both adapters, and the repository's four new methods | docs/plans/2026-10-07-confirmed-retraction.md | 📋 planned |
+| 5–6 | A full walk's sweep retracts only what the source confirms gone, and `mark_unseen_unavailable` is retired | docs/plans/2026-10-07-confirmed-retraction.md | 📋 planned |
+| 7–8 | A push removal retracts what the source confirms gone, and dashboard 3 draws the checks | docs/plans/2026-10-07-confirmed-retraction.md | 📋 planned |
+| 9 | Status rows: this plan in review | docs/plans/2026-10-07-confirmed-retraction.md | 📋 planned |
+| 10 | Live acceptance: every retraction from a full walk and a day of push removals is absent on Emby — owner-gated | docs/plans/2026-10-07-confirmed-retraction.md | 📋 planned |
+
+**An eighth table, for the seventh's reason.** Confirmed retraction has its own
+spec and is not a milestone, so a row under any heading above would make that
+heading false. `tests/unit/test_docs_currency.py` reads it into the same union.
+
 ## M1 task groups → plan line ranges
 Plan file: `docs/plans/2026-07-28-m1-foundation.md` (2470 lines)
 
