@@ -8,6 +8,7 @@ from typing import Any
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -184,6 +185,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     FastAPIInstrumentor.instrument_app(app)
     # …and this is what lets that span leave the process.
     app.add_middleware(TraceResponseMiddleware)
+    # Browser pages from these origins may call the API, the home panel's among
+    # them. Added last, so it is outermost and answers a preflight before routing.
+    # `traceresponse` and `Retry-After` are exposed because the clients read both.
+    origins = [origin for origin in settings.cors_origins.split(",") if origin]
+    if origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=origins,
+            allow_methods=["GET", "POST", "PUT", "DELETE"],
+            allow_headers=["content-type"],
+            expose_headers=["traceresponse", "retry-after"],
+        )
     # Set here and not in the lifespan: settings are not a resource with a
     # lifetime, and `create_app(settings)`'s whole point is that the app runs on
     # what it was handed, not on the environment at the moment a request arrives.

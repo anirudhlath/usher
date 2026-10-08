@@ -99,6 +99,15 @@ export const CONFIG: readonly SettingRow[] = [
     secret: false,
     measured: false,
   },
+  {
+    key: 'USHER_CORS_ORIGINS',
+    group: 'server',
+    def: 'empty',
+    about:
+      'Browser origins allowed to call the API, comma-separated, each a bare http(s)://host:port. Empty adds no CORS, so only same-origin pages such as this console can call it. A page served over https cannot call Usher over http whatever this says.',
+    secret: false,
+    measured: false,
+  },
 
   /* -------------------------------------------------------------- logging */
   {

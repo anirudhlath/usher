@@ -103,6 +103,9 @@ class Settings(BaseSettings):
 
     host: str = "0.0.0.0"  # noqa: S104  intentional: default bind-all for a containerized service
     port: int = Field(default=8000, ge=1, le=65535)
+    # Browser origins allowed to call the API, comma-separated: `http://host:port`,
+    # no path and no wildcard. Empty adds no CORS at all.
+    cors_origins: str = ""
 
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     log_json: bool = True
@@ -502,6 +505,20 @@ class Settings(BaseSettings):
         if isinstance(value, str) and value == "":
             return None
         return value
+
+    @field_validator("cors_origins")
+    @classmethod
+    def _origins_are_bare_origins(cls, value: str) -> str:
+        """Each entry a bare `http(s)://host[:port]`, returned joined with no spaces."""
+        origins = [part.strip() for part in value.split(",") if part.strip()]
+        for origin in origins:
+            scheme, _, rest = origin.partition("://")
+            if scheme not in ("http", "https") or not rest or "/" in rest or "*" in rest:
+                raise ValueError(
+                    "USHER_CORS_ORIGINS takes comma-separated origins such as "
+                    "http://homeassistant.local:8123, with no path and no wildcard"
+                )
+        return ",".join(origins)
 
     @field_validator("secret_key")
     @classmethod

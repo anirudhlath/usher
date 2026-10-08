@@ -31,6 +31,14 @@ the model `USHER_LLM_BASE_URL` names.
 belong to a Home Assistant administrator: Usher writes two labels and a device's
 area, which HA allows to admins only, and a non-admin token is refused per write.
 
+**`USHER_CORS_ORIGINS` is empty by default**, and no browser page outside
+Usher's own origin may call it. A comma-separated list of bare origins
+(`http://homeassistant.local:8123`) lets pages there call every route, read
+`traceresponse` and `Retry-After`, and send JSON bodies; a path or a wildcard is
+refused at startup. There is no authentication, so every listed origin can
+reach the admin routes too. A page served over `https` cannot call Usher over
+`http`; a panel in an `https` Home Assistant needs Usher behind `https` as well.
+
 🔶 **`USHER_LLM_MAX_OUTPUT_TOKENS` shares that context window, and nothing
 couples the two.** The endpoint requires `prompt_tokens + llm_max_output_tokens
 ≤ max_model_len`, so raising the output ceiling lowers the workable pool, and
