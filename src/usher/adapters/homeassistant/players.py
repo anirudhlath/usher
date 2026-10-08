@@ -129,7 +129,8 @@ class HomeAssistantPlayers(Players):
         """Read the entry, then write its label list back with only Usher's label changed.
 
         HA's `labels` replaces the whole list, so an entry that comes back with
-        no list is refused before anything is written.
+        no list is refused before the entry is written. A missing Usher label is
+        created first, so one may already be in HA's label registry by then.
         """
         session = self._live()
         await self._ensure_labels(session)

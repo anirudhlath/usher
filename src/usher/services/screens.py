@@ -52,7 +52,7 @@ class ScreensService:
         refuses, or never reports within the timeout, is `PlayersUnavailable`
         in the port's words, which never carry the registry's own message.
         A write refused after the first leaves the first in place, and
-        confirming again is safe, since every check still passes.
+        confirming again is safe.
         """
         players, house = self._reading()
         player = project(house).candidate(entity_id)
