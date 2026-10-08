@@ -9347,7 +9347,7 @@ class ScreensResponse(BaseModel):
 
 
 class ConfirmRequest(BaseModel):
-    """Use or ignore the player; `area_id` places one that is in no area."""
+    """Use or ignore the player; `area_id` places one in use that is in no area."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -9534,7 +9534,8 @@ async def confirm_device(
     """Write the player's label, and its device's area, to Home Assistant.
 
     The answer is the house once Home Assistant reports every write. Nothing
-    is written when the request is refused.
+    is written when the request is refused; an area write Home Assistant refuses
+    leaves the label in place, and confirming again is safe.
     """
     try:
         view = await screens.confirm(entity_id, use=body.use, area_id=body.area_id)
@@ -9705,8 +9706,8 @@ by default ([08](08-operations.md)).
   what is playing and where.
 - **Confirm writes to HA, never to Usher**: the `usher` or `usher_ignore`
   label on the entity, with every other label kept, and the device's area when
-  `area_id` is given. **Only a player in no area is placed**, and only when
-  its entity has no area of its own; anything else is `422
+  `area_id` is given. **Only a player in use and in no area is placed**, and
+  only when its entity has no area of its own; anything else is `422
   validation_failed`. The answer is the house once HA reports every write. A
   write HA refuses, or does not report within
   `USHER_PLAYERS_CONFIRM_TIMEOUT_SECONDS` (default 10), is `503
