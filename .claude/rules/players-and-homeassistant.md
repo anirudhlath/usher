@@ -14,6 +14,7 @@ paths:
   - "tests/fakes/home_assistant.py"
   - "tests/fakes/home_assistant_rows.py"
   - "tests/fakes/players.py"
+  - "tests/contract/players_contract.py"
   - "tests/fixtures/homeassistant/**"
 ---
 
@@ -27,11 +28,11 @@ behaviour is PRD 07's `## Players`; the design is
 ## Commands
 
 ```bash
-# Every players test, named by file: a `-k` word selects rows and search tests too.
+# Every test file touching these paths, by name: a `-k` word selects rows and search too.
 uv run pytest tests/unit/test_{domain_{house,recipes,screens,ways},services_{screens,ways}}.py \
-  tests/unit/test_adapters_{homeassistant_{mapping,session,players},websocket}.py \
+  tests/unit/test_adapters_{homeassistant_{mapping,session,players},websocket,emby_push}.py \
   tests/unit/test_{players_contract,fixtures_homeassistant,{config,composition}_players}.py \
-  tests/unit/test_api_{screens,ways}.py
+  tests/unit/test_{api_{screens,ways,problem},ports,outbound_call_sites}.py
 # Read-only: key paths and type names, never a value. Capture while a player plays.
 set -a; . ./.env; set +a
 uv run python scripts/capture_ha_shape.py --listen 30 \
@@ -40,8 +41,9 @@ uv run python scripts/capture_ha_shape.py --listen 30 \
 
 ## Writing to HA
 
-- **Usher writes two things: the `usher` and `usher_ignore` labels on an
-  entity, and `area_id` on a device.** No service call until slice 2.
+- **Usher writes three things: its two labels into HA's label registry when
+  missing (`Usher` and `Usher ignore`, ids `usher` and `usher_ignore`), one of
+  them on an entity, and `area_id` on a device.** No service call until slice 2.
 - **`config/entity_registry/update`'s `labels` replaces the whole list.** Read
   the entry, change only Usher's two, write the rest back. An entry that comes
   back with no label list is refused before the entry is written; creating a

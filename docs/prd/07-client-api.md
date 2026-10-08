@@ -568,12 +568,13 @@ by default ([08](08-operations.md)).
 - **`GET /screens`** is recomputed from HA's registries and states on every
   request. A device's `state` is HA's reading, passed through: power, the app,
   what is playing and where.
-- **Confirm writes to HA, never to Usher**: the `usher` or `usher_ignore`
-  label on the entity, with every other label kept, and the device's area when
-  `area_id` is given. **Only a player in use and in no area is placed**, and
-  only when its entity has no area of its own; anything else is `422
-  validation_failed`. The answer is the house once HA reports every write. A
-  write HA refuses, or does not report within
+- **Confirm writes to HA, never to Usher**: the `usher` and `usher_ignore`
+  labels in HA's label registry, created as `Usher` and `Usher ignore` when
+  missing; the `usher` or `usher_ignore` label on the entity, with every other
+  label kept; and the device's area when `area_id` is given. **Only a player in
+  use and in no area is placed**, and only when its entity has no area of its
+  own; anything else is `422 validation_failed`. The answer is the house once
+  HA reports every write. A write HA refuses, or does not report within
   `USHER_PLAYERS_CONFIRM_TIMEOUT_SECONDS` (default 10), is `503
   players_unavailable`, and the write may still land.
 - **`/ways` ranks every available copy on every device through every matching
