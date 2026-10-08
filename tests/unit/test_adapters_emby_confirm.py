@@ -48,7 +48,9 @@ def _adapter(
     """An adapter over `server`, every request it sends, and an optional canned `Ids` answer."""
     seen: list[httpx.Request] = []
 
-    def handle(request: httpx.Request) -> httpx.Response:
+    async def handle(request: httpx.Request) -> httpx.Response:
+        # A turn of the loop per request, as a real one gives, so a deadline can fire.
+        await asyncio.sleep(0)
         seen.append(request)
         if answer is not None and "Ids" in request.url.params:
             return httpx.Response(200, json=answer)
@@ -104,7 +106,7 @@ async def test_a_hundred_and_one_ids_go_as_two_requests_each_limited_to_its_chun
     finally:
         await adapter.aclose()
     assert gone == frozenset(asked)
-    limits = [request.url.params["Limit"] for request in seen if "Ids" in request.url.params]
+    limits = [request.url.params.get("Limit") for request in seen if "Ids" in request.url.params]
     assert limits == [str(IDS_PER_REQUEST), "1"]
 
 
