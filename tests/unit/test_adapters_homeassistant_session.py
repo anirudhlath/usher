@@ -473,6 +473,58 @@ async def test_a_command_failed_in_send_leaves_no_exception_for_asyncio_to_repor
     assert reported == []
 
 
+async def test_a_command_still_in_send_when_the_handler_raises_fails_at_once_once_sent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The socket stays open, so the send succeeds and only the ended reader can fail it."""
+    timeout = 10.0
+    server = FakeHomeAssistant()
+    server.unanswered.add("get_states")
+    session = await HomeAssistantSession.open(
+        FakeHomeAssistantConnector(server), URL, TOKEN, command_timeout=timeout
+    )
+
+    def explode(_event: Event) -> None:
+        raise ValueError("the handler's own failure")
+
+    tasks: list[asyncio.Task[Any]] = [asyncio.create_task(session.pump(explode))]
+    try:
+        await session.command("subscribe_events", event_type="state_changed")
+        connection = server.connections[0]
+        sending, release = asyncio.Event(), asyncio.Event()
+        send = connection.send
+
+        async def held(message: str) -> None:
+            sending.set()
+            await release.wait()
+            await send(message)
+
+        monkeypatch.setattr(connection, "send", held)
+        waiting = asyncio.create_task(session.command("get_states"))
+        tasks.append(waiting)
+        await asyncio.wait_for(sending.wait(), 1.0)
+        server.change_state(HouseState(entity_id=APPLE_TV, state="paused"))
+        async with asyncio.timeout(1.0):
+            with pytest.raises(ValueError, match="the handler's own failure"):
+                await tasks[0]
+        assert not waiting.done(), "the premise: the reader ended while it was in send"
+        release.set()
+        await asyncio.wait([waiting], timeout=timeout / 10)
+        assert [command["type"] for command in server.commands] == [
+            "subscribe_events",
+            "get_states",
+        ], "the premise: the send itself succeeded"
+        assert waiting.done(), "the command waited on for its timeout after the reader ended"
+        failure = waiting.exception()
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await session.aclose()
+    assert isinstance(failure, PortUnavailable)
+    assert str(failure) == "the event handler raised before get_states was answered"
+
+
 async def test_fields_cannot_replace_a_commands_id_or_type() -> None:
     server = FakeHomeAssistant()
     async with _session(server) as session:

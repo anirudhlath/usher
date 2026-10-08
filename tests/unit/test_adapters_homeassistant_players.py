@@ -640,6 +640,10 @@ async def test_a_re_read_whose_send_finds_the_socket_gone_reports_the_drop_once(
     assert len(_commands(server, "config/device_registry/list")) == 1, (
         "the premise: the re-read's next send never reached Home Assistant"
     )
+    unread = server.connections[0].unread_at_failed_sends
+    assert len(unread) == 1 and unread[0] > 0, (
+        "the premise: the reader was still draining frames when the send failed"
+    )
     assert watched.warnings() == [_DROPPED]
 
 

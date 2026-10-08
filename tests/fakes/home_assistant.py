@@ -69,17 +69,21 @@ class FakeHomeAssistantConnection(WebSocketConnection):
         self._frames: asyncio.Queue[str | None] = asyncio.Queue()
         self._reason: str | None = None
         self._gone = False
+        self._unread = 0
         self.authenticated = False
         self.subscriptions: dict[str, int] = {}
         self.sent: list[dict[str, Any]] = []
         self.delivered: list[dict[str, Any]] = []
+        #: How many delivered frames `recv` had not yet returned, at each `send` that failed.
+        self.unread_at_failed_sends: list[int] = []
         self.closed = False
 
     def deliver(self, frame: dict[str, Any]) -> None:
         self.delivered.append(frame)
-        self._frames.put_nowait(json.dumps(frame))
+        self.deliver_text(json.dumps(frame))
 
     def deliver_text(self, text: str) -> None:
+        self._unread += 1
         self._frames.put_nowait(text)
 
     def drop(self, reason: str = "connection closed by peer") -> None:
@@ -90,6 +94,7 @@ class FakeHomeAssistantConnection(WebSocketConnection):
     async def send(self, message: str) -> None:
         await asyncio.sleep(0)
         if self._reason is not None or self.closed:
+            self.unread_at_failed_sends.append(self._unread)
             raise PortUnavailable(self._reason or "the fake connection is closed")
         frame = json.loads(message)
         self.sent.append(frame)
@@ -103,6 +108,7 @@ class FakeHomeAssistantConnection(WebSocketConnection):
         if text is None:
             self._gone = True
             raise PortUnavailable(self._reason or "the fake connection is closed")
+        self._unread -= 1
         return text
 
     async def aclose(self) -> None:
