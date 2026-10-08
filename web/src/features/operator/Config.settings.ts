@@ -844,7 +844,7 @@ export const CONFIG: readonly SettingRow[] = [
     group: 'players',
     def: 'unset',
     about:
-      'A long-lived access token of a Home Assistant administrator. Usher writes two labels and a device’s area, which HA allows to admins only. Sent in the websocket’s auth frame and nowhere else.',
+      'A long-lived access token of a Home Assistant administrator. Usher creates its two labels when Home Assistant lacks them, sets one on an entity, and sets a device’s area, which HA allows to admins only. Sent in the websocket’s auth frame and nowhere else.',
     secret: true,
     measured: false,
   },

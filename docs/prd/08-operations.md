@@ -28,8 +28,9 @@ the model `USHER_LLM_BASE_URL` names.
 
 **`USHER_PLAYERS_ENABLED` defaults to `false`.** On, it needs `USHER_HA_URL` and
 `USHER_HA_TOKEN`, and is **refused at startup** without them. The token must
-belong to a Home Assistant administrator: Usher writes two labels and a device's
-area, which HA allows to admins only, and a non-admin token is refused per write.
+belong to a Home Assistant administrator: Usher creates its two labels when HA
+lacks them, sets one of them on an entity, and sets a device's area, which HA
+allows to admins only, and a non-admin token is refused per write.
 
 **`USHER_CORS_ORIGINS` is empty by default**, and no browser page outside
 Usher's own origin may call it. A comma-separated list of bare origins
