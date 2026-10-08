@@ -286,10 +286,12 @@ rather than that the handshake succeeded.
 | **Unit** | Services against port fakes. No network, ever |
 | **Integration** | Real Postgres (testcontainers). Provider payloads committed as fixtures — *shape*-recorded and value-synthetic, never a capture; never live API calls in CI |
 | **Adapter contract suite** | One parametrised test class every `SourceAdapter` must pass |
+| **Players contract suite** | `tests/contract/players_contract.py`, one test class every `Players` must pass, run on two arms: the fake, and the Home Assistant adapter over a scripted HA whose frames are held to the recorded shapes |
 | **Bootstrap** | Small committed slices in each dataset's real *format*, with every value invented. Never a real dataset file, never a full download in tests |
 | **API** | Schema-validated request/response round-trips against the OpenAPI contract |
 
-A new source adapter must pass the same contract suite the Emby adapter passes.
+A new source adapter must pass the same contract suite the Emby adapter passes,
+and a new `Players` implementation must pass the `Players` contract suite.
 
 Development follows TDD — failing test first, then implementation.
 
