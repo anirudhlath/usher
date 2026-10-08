@@ -6353,6 +6353,7 @@ class FakePlayers(Players):
         self.writes: list[tuple[str, str, str]] = []
         self.reports_writes = True
         self.refuse: UsherPortError | None = None
+        self.refuse_area: UsherPortError | None = None
 
     def publish(self, house: HouseSnapshot) -> None:
         """Replace the reading and wake every waiter."""
@@ -6384,6 +6385,8 @@ class FakePlayers(Players):
         await asyncio.sleep(0)
         if self.refuse is not None:
             raise self.refuse
+        if self.refuse_area is not None:
+            raise self.refuse_area
         house = self.snapshot()
         if all(one.device_id != device_id for one in house.devices):
             raise PortDataMalformed("the fake house has no such device")
@@ -8182,7 +8185,7 @@ from tests.fakes.house import (
 from tests.fakes.players import FakePlayers
 from usher.domain.house import DeviceRole, HouseSnapshot
 from usher.domain.screens import project
-from usher.ports.errors import PortAuthFailed
+from usher.ports.errors import PortAuthFailed, PortDataMalformed
 from usher.services.screens import (
     PLAYERS_OFF,
     CannotPlace,
@@ -8327,6 +8330,14 @@ async def test_only_a_player_with_no_area_of_any_kind_is_placed(
     assert players.writes == []
 
 
+async def test_an_ignored_player_is_never_placed() -> None:
+    service, players = _service(this_house())
+    with pytest.raises(CannotPlace) as failure:
+        await service.confirm(SHIELD, use=False, area_id=BEDROOM)
+    assert str(failure.value) == "an ignored player is not placed"
+    assert players.writes == []
+
+
 async def test_confirm_is_unavailable_when_home_assistant_never_reports_the_change() -> None:
     players = FakePlayers(this_house(apple_tv=None))
     players.reports_writes = False
@@ -8346,6 +8357,38 @@ async def test_a_refused_write_is_unavailable_in_the_port_s_words() -> None:
         await service.confirm(APPLE_TV, use=True)
     assert failure.value.detail == "Home Assistant refused label update: unauthorized"
     assert players.writes == []
+
+
+async def test_a_refused_area_write_leaves_the_role_in_place_and_a_retry_completes() -> None:
+    refused = "Home Assistant refused config/device_registry/update: not_found"
+    service, players = _service(this_house())
+    assert entity_of(players.snapshot(), SHIELD).role is None  # premise: unconfirmed
+    players.refuse_area = PortDataMalformed(refused)
+    with pytest.raises(PlayersUnavailable) as failure:
+        await service.confirm(SHIELD, use=True, area_id=BEDROOM)
+    assert failure.value.detail == refused
+    assert players.writes == [("role", SHIELD, "use")]
+    assert entity_of(players.snapshot(), SHIELD).role is DeviceRole.USE
+    players.refuse_area = None
+    view = await service.confirm(SHIELD, use=True, area_id=BEDROOM)
+    assert players.writes[1:] == [("role", SHIELD, "use"), ("area", SHIELD_DEVICE, BEDROOM)]
+    screen = view.screen(BEDROOM)
+    assert screen is not None
+    assert [player.entity_id for player in screen.devices] == [SHIELD]
+
+
+@pytest.mark.parametrize(
+    ("players", "detail"),
+    [(None, PLAYERS_OFF), (FakePlayers(), "the fake house has not been published")],
+    ids=["off", "unread"],
+)
+async def test_confirm_with_no_house_is_unavailable_and_says_why(
+    players: FakePlayers | None, detail: str
+) -> None:
+    service = ScreensService(players, confirm_timeout=_TIMEOUT)
+    with pytest.raises(PlayersUnavailable) as failure:
+        await service.confirm(APPLE_TV, use=True)
+    assert failure.value.detail == detail
 ```
 
 The `own-area` arm is the one the projection hides: an entity area naming no area projects as no area, so the player sits in `NO AREA` and looks placeable. Its entity's own area would still override its device's, so it is refused.
@@ -8525,7 +8568,7 @@ class UnknownArea(LookupError):
 
 
 class CannotPlace(ValueError):
-    """Only a player with no area, on a device, with no area of its own, is placed.
+    """Only a player to use, with no area, on a device, with no area of its own, is placed.
 
     Its message names no submitted value, so a route may show it as it is.
     """
@@ -8541,18 +8584,23 @@ class ScreensService:
         return project(self._reading()[1])
 
     async def confirm(self, entity_id: str, *, use: bool, area_id: str | None = None) -> HouseView:
-        """Mark a candidate to use or to ignore, placing it when asked.
+        """Mark a candidate to use or to ignore, placing one to use when asked.
 
-        Every check runs before the first write, so a refused confirm writes
-        nothing. The answer is the house once the registry reports every
-        write; a write it refuses, or never reports within the timeout, is
-        `PlayersUnavailable` in the port's words, which never carry the
-        registry's own message.
+        Every check runs before the first write, so a confirm a check refuses
+        writes nothing. An ignored player is never placed, since Usher writes
+        nothing more to a player the owner told it to leave alone. The answer
+        is the house once the registry reports every write; a write it
+        refuses, or never reports within the timeout, is `PlayersUnavailable`
+        in the port's words, which never carry the registry's own message.
+        A write refused after the first leaves the first in place, and
+        confirming again is safe, since every check still passes.
         """
         players, house = self._reading()
         player = project(house).candidate(entity_id)
         if player is None:
             raise UnknownCandidate(entity_id)
+        if area_id is not None and not use:
+            raise CannotPlace("an ignored player is not placed")
         placement = None if area_id is None else (_device_to_place(house, player, area_id), area_id)
         role = DeviceRole.USE if use else DeviceRole.IGNORE
         try:
@@ -8642,14 +8690,16 @@ class WaysService:
         screens = self._screens(screen)
         if screens is None:
             return _NO_SCREENS
-        return WaysAnswer(True, rank(screens, await self._media_items.list_for_title(title_id)))
+        copies = await self._media_items.list_for_title(title_id)
+        return WaysAnswer(screens_available=True, ways=rank(screens, copies))
 
     async def for_episode(self, episode_id: uuid.UUID, *, screen: str | None = None) -> WaysAnswer:
         """The same for one episode, whose copies `list_for_title` never answers."""
         screens = self._screens(screen)
         if screens is None:
             return _NO_SCREENS
-        return WaysAnswer(True, rank(screens, await self._media_items.list_for_episode(episode_id)))
+        copies = await self._media_items.list_for_episode(episode_id)
+        return WaysAnswer(screens_available=True, ways=rank(screens, copies))
 
     def _screens(self, screen: str | None) -> tuple[Screen, ...] | None:
         """The screens to rank on; `None` with no house to read.
