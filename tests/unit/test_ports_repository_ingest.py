@@ -20,6 +20,10 @@ def test_media_item_repository_surface() -> None:
         {
             "upsert_many",
             "mark_unseen_unavailable",
+            "list_unseen",
+            "available_among",
+            "retract",
+            "mark_seen",
             "get_by_external_id",
             "resolve_series_titles",
             "resolve_targets",

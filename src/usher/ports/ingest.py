@@ -178,6 +178,22 @@ class SweepResult:
     total: int
 
 
+@dataclass(frozen=True, slots=True)
+class UnseenRows:
+    """A source's rows a walk did not list, and how many rows the source has."""
+
+    external_ids: frozenset[str]
+    total: int
+
+
+@dataclass(frozen=True, slots=True)
+class Retraction:
+    """How many rows a retraction changed, and the distinct titles and episodes they hold."""
+
+    retracted: int
+    targets: frozenset[MediaItemTarget]
+
+
 class AvailabilitySweepRefused(UsherPortError):
     """The sweep would retract more of a source than the ceiling permits, so it retracted nothing.
 
