@@ -190,6 +190,8 @@ class FakeEmbyServer:
         self._items: dict[str, tuple[SourceItem, AwareDatetime]] = {}
         self._alternates: dict[str, list[dict[str, Any]]] = {}
         self._states: dict[str, SourceWatchState] = {}
+        # External id -> its version group, in the group's own order.
+        self._groups: dict[str, tuple[str, ...]] = {}
         # View id -> (name, `CollectionType` or `None`), and view id -> the external
         # ids placed in it, in placement order.
         self._views: dict[str, tuple[str, str | None]] = {}
@@ -238,6 +240,19 @@ class FakeEmbyServer:
                 stream["Width"] = width
                 stream["Height"] = height
         self._alternates.setdefault(external_id, []).append(media)
+
+    def group_versions(self, *external_ids: str) -> None:
+        """Hold `external_ids` as versions of one item, in this order.
+
+        An `Ids` listing then names one member of the group per request: the first, in
+        this order, of those the request names and the server holds. That is what
+        `ids_version_group.json` records Emby doing. Emby's full listing shows one
+        version per group too; this fake does not model that, and no walk test groups
+        versions.
+        """
+        group = tuple(external_ids)
+        for external_id in group:
+            self._groups[external_id] = group
 
     def remove_item(self, external_id: str) -> None:
         self._items.pop(external_id, None)
@@ -467,7 +482,16 @@ class FakeEmbyServer:
             group = tied[key]
             offset = self.listings % len(group)
             ordered.extend(group[offset:] + group[:offset])
+        if ids:
+            # One member of each version group per `Ids` request: see `group_versions`.
+            present = set(ordered)
+            ordered = [one for one in ordered if self._listed_for(one, present)]
         return ordered
+
+    def _listed_for(self, external_id: str, present: set[str]) -> bool:
+        """Whether `external_id` is its group's first member among `present`."""
+        group = self._groups.get(external_id, (external_id,))
+        return next(member for member in group if member in present) == external_id
 
     def _list(self, request: httpx.Request) -> httpx.Response:
         params = request.url.params

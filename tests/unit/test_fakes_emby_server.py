@@ -985,6 +985,39 @@ async def test_ids_lists_only_the_named_items(driver: _Driver) -> None:
     assert await _listed(driver, Ids="m0,m2") == ["m0", "m2"]
 
 
+async def test_an_ids_listing_replays_the_recorded_version_group(driver: _Driver) -> None:
+    """Both versions share a name, so only the group decides which one is listed."""
+    recorded = load_emby_fixture("ids_version_group")
+    versions = [entry["Id"] for entry in recorded["versions"]]
+    for version in versions:
+        driver.server.add_item(replace(MOVIE, external_id=version), ADDED_AT)
+    driver.server.group_versions(*versions)
+    listings = recorded["listings"]
+    assert len(listings) == 4, "the premise: both orders, then each version alone"
+    for listing in listings:
+        asked = listing["asked"]
+        assert await _listed(driver, Ids=",".join(asked), Limit=str(len(asked))) == [
+            entry["Id"] for entry in listing["Items"]
+        ]
+
+
+async def test_a_version_group_lists_its_next_member_once_the_first_is_gone(
+    driver: _Driver,
+) -> None:
+    for version in ("v0", "v1"):
+        driver.server.add_item(replace(MOVIE, external_id=version), ADDED_AT)
+    driver.server.group_versions("v0", "v1")
+    driver.server.remove_item("v0")
+    assert await _listed(driver, Ids="v0,v1", Limit="2") == ["v1"]
+
+
+async def test_a_version_group_changes_no_listing_but_one_by_ids(driver: _Driver) -> None:
+    for version in ("v0", "v1"):
+        driver.server.add_item(replace(MOVIE, external_id=version), ADDED_AT)
+    driver.server.group_versions("v0", "v1")
+    assert sorted(await _listed(driver)) == ["v0", "v1"]
+
+
 def _given_next_up(driver: _Driver) -> None:
     driver.server.add_item(
         SourceItem(external_id="s0", name="S 0", kind=SourceItemKind.SERIES), ADDED_AT
