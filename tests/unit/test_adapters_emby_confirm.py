@@ -117,6 +117,23 @@ async def test_a_body_without_items_raises_rather_than_reading_as_gone() -> None
         await adapter.aclose()
 
 
+@pytest.mark.parametrize(
+    "entry",
+    [{"Name": "Movie kept-1"}, {"id": "kept-1"}, {"Id": 1}, "kept-1"],
+    ids=["no-id", "lowercase-id", "integer-id", "bare-string"],
+)
+async def test_an_entry_without_a_string_id_raises_rather_than_reading_as_gone(
+    entry: object,
+) -> None:
+    """An entry with no readable `Id` may be the asked one, so the round cannot decide."""
+    adapter, _ = _adapter(FakeEmbyServer(), answer={"Items": [entry], "TotalRecordCount": 1})
+    try:
+        with pytest.raises(PortDataMalformed, match="no string Id"):
+            await adapter.confirm_gone(["kept-1"])
+    finally:
+        await adapter.aclose()
+
+
 async def test_a_confirmation_is_timed_as_confirm_and_spanned_with_its_counts() -> None:
     """Timed as `list`, a hundred-id read would share a bucket with pages of a thousand."""
     exporter = InMemorySpanExporter()

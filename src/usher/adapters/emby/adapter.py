@@ -904,7 +904,11 @@ class EmbyAdapter(SourceAdapter):
             return frozenset(remaining)
 
     async def _listed_of(self, chunk: Sequence[str]) -> set[str]:
-        """Which of `chunk` one `Ids` listing names; `Limit` is the chunk's length."""
+        """Which of `chunk` one `Ids` listing names; `Limit` is the chunk's length.
+
+        An entry with no string `Id` raises, because it may be one of `chunk`. A string
+        `Id` nobody asked for is skipped.
+        """
         params = {"Ids": ",".join(chunk), "Limit": str(len(chunk))}
         body = await self._page(await self._items_path(), params, 0, op="confirm")
         entries = body.get("Items")
@@ -914,7 +918,9 @@ class EmbyAdapter(SourceAdapter):
         listed: set[str] = set()
         for entry in entries:
             listed_id = entry.get("Id") if isinstance(entry, dict) else None
-            if isinstance(listed_id, str) and listed_id in asked:
+            if not isinstance(listed_id, str):
+                raise PortDataMalformed("Emby's Ids listing carried an entry with no string Id")
+            if listed_id in asked:
                 listed.add(listed_id)
         return listed
 
