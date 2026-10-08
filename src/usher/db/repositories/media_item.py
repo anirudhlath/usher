@@ -118,7 +118,8 @@ UPDATE media_items SET available = false
 WHERE source_id = :source_id AND available AND last_seen_at < :seen_since
 """
 
-# Counted in the same transaction as the id read it guards, so both see the same rows.
+# Two statements under READ COMMITTED: a row committed between them can reach the id read uncounted;
+# the source's confirmation is what makes that safe.
 _UNSEEN_COUNTS = """
 SELECT count(*) AS total,
        count(*) FILTER (WHERE available AND last_seen_at < :seen_since) AS unseen

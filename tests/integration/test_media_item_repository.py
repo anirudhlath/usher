@@ -24,7 +24,7 @@ from usher.domain.ids import new_id
 from usher.domain.source import Source
 from usher.domain.title import Title
 from usher.ports.errors import RepositoryConflict
-from usher.ports.ingest import AvailabilitySweepRefused
+from usher.ports.ingest import AvailabilitySweepRefused, UnseenRows
 
 
 async def _make_source(session: AsyncSession, name: str) -> uuid.UUID:
@@ -364,6 +364,24 @@ async def test_a_refused_list_unseen_reads_no_id(
         await repository.list_unseen(source_id, seen_since=RUN_AT, max_retract_fraction=0.25)
     [statement] = statement_counter
     assert "count(*)" in statement
+
+
+async def test_list_unseen_with_nothing_unseen_reads_no_id(
+    repository: PostgresMediaItemRepository,
+    source_id: uuid.UUID,
+    statement_counter: list[str],
+) -> None:
+    """With every row seen, the count is the whole cost: there is no id to read."""
+    await repository.upsert_many(
+        [item(source_id, f"m-{index}", last_seen_at=RUN_AT) for index in range(4)]
+    )
+    statement_counter.clear()
+    unseen = await repository.list_unseen(source_id, seen_since=RUN_AT, max_retract_fraction=1.0)
+    statements = len(statement_counter)
+    assert unseen == UnseenRows(external_ids=frozenset(), total=4), (
+        "the premise: every row of the source was stamped at the instant"
+    )
+    assert statements == 1
 
 
 async def test_the_three_keyed_methods_cost_one_statement_each_and_none_for_nothing(

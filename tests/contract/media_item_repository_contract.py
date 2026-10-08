@@ -273,6 +273,7 @@ class MediaItemRepositoryContract:
         await repository.upsert_many(
             [
                 item(source_id, "held"),
+                item(source_id, "unasked"),
                 item(source_id, "retracted", last_seen_at=EARLIER),
                 item(other_source_id, "theirs"),
             ]
@@ -378,6 +379,7 @@ class MediaItemRepositoryContract:
             [
                 item(source_id, "older", last_seen_at=EARLIER),
                 item(source_id, "newer", last_seen_at=later),
+                item(source_id, "unasked", last_seen_at=EARLIER),
                 item(source_id, "retracted", last_seen_at=EARLIER),
                 item(other_source_id, "theirs", last_seen_at=EARLIER),
             ]
@@ -392,6 +394,7 @@ class MediaItemRepositoryContract:
             "older": (True, RUN_AT),
             "newer": (True, later),
             "retracted": (False, EARLIER),
+            "unasked": (True, EARLIER),
         }
         for external_id, (available, seen) in expected.items():
             stored = await repository.get_by_external_id(source_id, external_id)
