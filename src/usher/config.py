@@ -46,13 +46,18 @@ DEFAULT_LLM_BASE_URL = "http://localhost:8000/v1"
 # Not a credential -- a placeholder value kept only to detect and reject it.
 _PLACEHOLDER_SECRET_KEY = "change-me-to-a-long-random-string"  # noqa: S105
 _ASYNCPG_DRIVER_PREFIX = "postgresql+asyncpg://"
-# An origin as a browser's `Origin` header writes it, once lowercased.
-_BARE_ORIGIN = re.compile(r"^(https?)://([a-z0-9.-]+)(:\d{1,5})?$")
-_DEFAULT_PORT = {"http": ":80", "https": ":443"}
+# An origin's shape once lowercased; `_is_browser_host` and `_is_browser_port`
+# refuse what a browser would rewrite. `[0-9]`, never `\d`, which admits any
+# Unicode digit and lets `int()` read a port no browser writes.
+_BARE_ORIGIN = re.compile(r"(https?)://([a-z0-9.-]+)(?::([0-9]{1,5}))?")
+_DEFAULT_PORT = {"http": "80", "https": "443"}
+_HIGHEST_PORT = 65535
+_OCTET = r"(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])"
+_DOTTED_QUAD = re.compile(rf"{_OCTET}(?:\.{_OCTET}){{3}}")
 _CORS_ORIGINS_REFUSED = (
     "USHER_CORS_ORIGINS takes comma-separated origins such as "
-    "http://homeassistant.local:8123: a scheme, a host and an optional port, "
-    "with no path, no wildcard and nothing else"
+    "http://homeassistant.local:8123: a scheme, a host and an optional port from "
+    "1 to 65535, with no path, no wildcard and nothing else"
 )
 
 _ENV_PREFIX = "USHER_"
@@ -60,6 +65,30 @@ _ENV_PREFIX = "USHER_"
 # The one sub-namespace inside `USHER_` that `Settings` deliberately does not claim, and
 # the reason it has to exist.
 COMPOSE_ONLY_PREFIX = "USHER_COMPOSE_"
+
+
+def _is_browser_host(host: str) -> bool:
+    """Whether a browser keeps `host` exactly as written, so its `Origin` can match.
+
+    One trailing dot is kept, and makes a distinct origin. An empty label, or
+    one that starts or ends with `-`, names no host a page is served from. A
+    host whose last label is all digits or starts with `0x` is IPv4 to a
+    browser, which rewrites shorthand (`127.1`), hex and leading zeros, so it
+    must already be a dotted quad of decimal octets.
+    """
+    labels = host.removesuffix(".").split(".")
+    if "" in labels:
+        return False
+    if any(label.startswith("-") or label.endswith("-") for label in labels):
+        return False
+    if labels[-1].isdigit() or labels[-1].startswith("0x"):
+        return _DOTTED_QUAD.fullmatch(host) is not None
+    return True
+
+
+def _is_browser_port(port: str | None) -> bool:
+    """No port, or 1 to 65535 with no leading zero, as a browser writes one."""
+    return port is None or (not port.startswith("0") and int(port) <= _HIGHEST_PORT)
 
 
 def _is_compose_only(key: object) -> bool:
@@ -524,8 +553,9 @@ class Settings(BaseSettings):
         `CORSMiddleware` compares the `Origin` header as a string, and a browser
         lowercases the scheme and host and omits a scheme's default port. An
         entry written any other way could never match, so each is lowercased
-        and loses `:80` on http or `:443` on https. Anything left that is not a
-        bare origin is refused. Returned joined with no spaces.
+        and loses `:80` on http or `:443` on https. Anything else a browser would
+        rewrite is refused, by `_is_browser_host` and `_is_browser_port`, so no
+        entry is accepted that could never match. Returned joined with no spaces.
         """
         origins = []
         for part in value.split(","):
@@ -536,7 +566,9 @@ class Settings(BaseSettings):
             if match is None:
                 raise ValueError(_CORS_ORIGINS_REFUSED)
             scheme, host, port = match.groups()
-            kept = "" if port in (None, _DEFAULT_PORT[scheme]) else port
+            if not _is_browser_host(host) or not _is_browser_port(port):
+                raise ValueError(_CORS_ORIGINS_REFUSED)
+            kept = "" if port in (None, _DEFAULT_PORT[scheme]) else f":{port}"
             origins.append(f"{scheme}://{host}{kept}")
         return ",".join(origins)
 

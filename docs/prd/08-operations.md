@@ -36,9 +36,12 @@ Usher's own origin may call it. A comma-separated list of bare origins
 (`http://homeassistant.local:8123`) lets pages there call every route with no
 request header beyond `Content-Type`, and read `traceresponse` and
 `Retry-After`. Each origin is lowercased and loses a default port (`:80` on
-`http`, `:443` on `https`), as a browser's `Origin` header writes it; a path, a
-wildcard, userinfo or a query is refused at startup. There is no
-authentication, so every listed origin can reach the admin routes too. A page
+`http`, `:443` on `https`), as a browser's `Origin` header writes it. Anything a
+browser would write differently, and so could never match, is refused at
+startup: a path, a wildcard, userinfo, a query, a port outside 1–65535 or with a
+leading zero, an empty host label or one starting or ending with `-`, and an
+IPv4 address that is not four decimal octets (`127.1`, `0x7f.0.0.1`). There is
+no authentication, so every listed origin can reach the admin routes too. A page
 served over `https` cannot call Usher over `http`; a panel in an `https` Home
 Assistant needs Usher behind `https` as well.
 
