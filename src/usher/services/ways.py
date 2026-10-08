@@ -36,14 +36,16 @@ class WaysService:
         screens = self._screens(screen)
         if screens is None:
             return _NO_SCREENS
-        return WaysAnswer(True, rank(screens, await self._media_items.list_for_title(title_id)))
+        copies = await self._media_items.list_for_title(title_id)
+        return WaysAnswer(screens_available=True, ways=rank(screens, copies))
 
     async def for_episode(self, episode_id: uuid.UUID, *, screen: str | None = None) -> WaysAnswer:
         """The same for one episode, whose copies `list_for_title` never answers."""
         screens = self._screens(screen)
         if screens is None:
             return _NO_SCREENS
-        return WaysAnswer(True, rank(screens, await self._media_items.list_for_episode(episode_id)))
+        copies = await self._media_items.list_for_episode(episode_id)
+        return WaysAnswer(screens_available=True, ways=rank(screens, copies))
 
     def _screens(self, screen: str | None) -> tuple[Screen, ...] | None:
         """The screens to rank on; `None` with no house to read.

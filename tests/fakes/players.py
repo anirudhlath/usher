@@ -16,6 +16,7 @@ class FakePlayers(Players):
         self.writes: list[tuple[str, str, str]] = []
         self.reports_writes = True
         self.refuse: UsherPortError | None = None
+        self.refuse_area: UsherPortError | None = None
 
     def publish(self, house: HouseSnapshot) -> None:
         """Replace the reading and wake every waiter."""
@@ -47,6 +48,8 @@ class FakePlayers(Players):
         await asyncio.sleep(0)
         if self.refuse is not None:
             raise self.refuse
+        if self.refuse_area is not None:
+            raise self.refuse_area
         house = self.snapshot()
         if all(one.device_id != device_id for one in house.devices):
             raise PortDataMalformed("the fake house has no such device")

@@ -27,7 +27,7 @@ class UnknownArea(LookupError):
 
 
 class CannotPlace(ValueError):
-    """Only a player with no area, on a device, with no area of its own, is placed.
+    """Only a player to use, with no area, on a device, with no area of its own, is placed.
 
     Its message names no submitted value, so a route may show it as it is.
     """
@@ -43,18 +43,23 @@ class ScreensService:
         return project(self._reading()[1])
 
     async def confirm(self, entity_id: str, *, use: bool, area_id: str | None = None) -> HouseView:
-        """Mark a candidate to use or to ignore, placing it when asked.
+        """Mark a candidate to use or to ignore, placing one to use when asked.
 
-        Every check runs before the first write, so a refused confirm writes
-        nothing. The answer is the house once the registry reports every
-        write; a write it refuses, or never reports within the timeout, is
-        `PlayersUnavailable` in the port's words, which never carry the
-        registry's own message.
+        Every check runs before the first write, so a confirm a check refuses
+        writes nothing. An ignored player is never placed, since Usher writes
+        nothing more to a player the owner told it to leave alone. The answer
+        is the house once the registry reports every write; a write it
+        refuses, or never reports within the timeout, is `PlayersUnavailable`
+        in the port's words, which never carry the registry's own message.
+        A write refused after the first leaves the first in place, and
+        confirming again is safe, since every check still passes.
         """
         players, house = self._reading()
         player = project(house).candidate(entity_id)
         if player is None:
             raise UnknownCandidate(entity_id)
+        if area_id is not None and not use:
+            raise CannotPlace("an ignored player is not placed")
         placement = None if area_id is None else (_device_to_place(house, player, area_id), area_id)
         role = DeviceRole.USE if use else DeviceRole.IGNORE
         try:

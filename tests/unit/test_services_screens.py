@@ -19,7 +19,7 @@ from tests.fakes.house import (
 from tests.fakes.players import FakePlayers
 from usher.domain.house import DeviceRole, HouseSnapshot
 from usher.domain.screens import project
-from usher.ports.errors import PortAuthFailed
+from usher.ports.errors import PortAuthFailed, PortDataMalformed
 from usher.services.screens import (
     PLAYERS_OFF,
     CannotPlace,
@@ -164,6 +164,14 @@ async def test_only_a_player_with_no_area_of_any_kind_is_placed(
     assert players.writes == []
 
 
+async def test_an_ignored_player_is_never_placed() -> None:
+    service, players = _service(this_house())
+    with pytest.raises(CannotPlace) as failure:
+        await service.confirm(SHIELD, use=False, area_id=BEDROOM)
+    assert str(failure.value) == "an ignored player is not placed"
+    assert players.writes == []
+
+
 async def test_confirm_is_unavailable_when_home_assistant_never_reports_the_change() -> None:
     players = FakePlayers(this_house(apple_tv=None))
     players.reports_writes = False
@@ -183,3 +191,36 @@ async def test_a_refused_write_is_unavailable_in_the_port_s_words() -> None:
         await service.confirm(APPLE_TV, use=True)
     assert failure.value.detail == "Home Assistant refused label update: unauthorized"
     assert players.writes == []
+
+
+async def test_a_refused_area_write_leaves_the_role_in_place_and_a_retry_completes() -> None:
+    refused = "Home Assistant refused config/device_registry/update: not_found"
+    service, players = _service(this_house())
+    assert entity_of(players.snapshot(), SHIELD).role is None  # premise: unconfirmed
+    players.refuse_area = PortDataMalformed(refused)
+    with pytest.raises(PlayersUnavailable) as failure:
+        await service.confirm(SHIELD, use=True, area_id=BEDROOM)
+    assert failure.value.detail == refused
+    assert players.writes == [("role", SHIELD, "use")]
+    assert entity_of(players.snapshot(), SHIELD).role is DeviceRole.USE
+    players.refuse_area = None
+    view = await service.confirm(SHIELD, use=True, area_id=BEDROOM)
+    assert players.writes[1:] == [("role", SHIELD, "use"), ("area", SHIELD_DEVICE, BEDROOM)]
+    screen = view.screen(BEDROOM)
+    assert screen is not None
+    assert [player.entity_id for player in screen.devices] == [SHIELD]
+
+
+@pytest.mark.parametrize(
+    ("players", "detail"),
+    [(None, PLAYERS_OFF), (FakePlayers(), "the fake house has not been published")],
+    ids=["off", "unread"],
+)
+async def test_confirm_with_no_house_is_unavailable_and_writes_nothing(
+    players: FakePlayers | None, detail: str
+) -> None:
+    service = ScreensService(players, confirm_timeout=_TIMEOUT)
+    with pytest.raises(PlayersUnavailable) as failure:
+        await service.confirm(APPLE_TV, use=True)
+    assert failure.value.detail == detail
+    assert players is None or players.writes == []
