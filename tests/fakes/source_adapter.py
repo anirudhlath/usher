@@ -163,11 +163,12 @@ class FakeSourceAdapter(SourceAdapter):
                 placed.remove(external_id)
 
     def unlist(self, external_id: str) -> None:
-        """Keep serving `external_id` by id, but leave it out of every listing.
+        """Keep serving `external_id` by id, but leave it out of every item listing.
 
         Emby's full listing shows one version of a film while a read by id serves each,
-        so a walk never lists an alternate it can still read. A later `place` does not
-        list it again.
+        so a full walk never lists an alternate it can still read. A later `place` does
+        not list it again. `watch_state` still lists it. A delta does not, though Emby's
+        delta listing returns alternates too.
         """
         self._unlisted.add(external_id)
 
