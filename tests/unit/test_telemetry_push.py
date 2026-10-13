@@ -3,6 +3,7 @@
 import sys
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime
 
 import pytest
 from opentelemetry import metrics
@@ -22,7 +23,8 @@ from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from usher.domain.enums import SourceKind
 from usher.domain.source import Source
-from usher.ports.source import SourceEvent, SourceEventKind
+from usher.ports.ingest import MediaItemUpsert
+from usher.ports.source import SourceEvent, SourceEventKind, SourceItem, SourceItemKind
 from usher.services.ingest import IngestService
 from usher.services.matching import MatchService
 from usher.services.push import PushApplyService
@@ -49,6 +51,7 @@ PRD_10_M5_PUSH_METRICS = frozenset(
 # walk below reads as a walk rather than as a `None` check.
 _NO_DATA = type("_NoData", (), {"resource_metrics": ()})()
 
+T0 = datetime(2026, 7, 1, tzinfo=UTC)
 SOURCE = Source(
     kind=SourceKind.EMBY,
     name="Living Room Emby",
@@ -88,11 +91,14 @@ def _recorded(reader: InMemoryMetricReader) -> dict[str, list[tuple[dict[str, ob
     return found
 
 
-def _applier(events: FakeEventPublisher) -> PushApplyService:
+def _applier(
+    events: FakeEventPublisher, media_items: FakeMediaItemRepository | None = None
+) -> PushApplyService:
     titles = FakeTitleRepository()
     matching = FakeTitleMatchRepository(titles)
     queue = FakeJobQueue()
-    media_items = FakeMediaItemRepository()
+    if media_items is None:
+        media_items = FakeMediaItemRepository()
 
     async def _commit() -> None:
         return None
@@ -118,6 +124,7 @@ def _applier(events: FakeEventPublisher) -> PushApplyService:
         ),
         events,
         _commit,
+        media_items=media_items,
     )
 
 
@@ -126,10 +133,10 @@ async def test_every_applied_event_is_counted_by_source_and_kind(
 ) -> None:
     """PRD 10's `usher.source.push.events`.
 
-    Labelled by kind because the two that cost nothing (`item_removed`, which the
-    lane never acts on) and the one that costs a merge look identical on an unlabelled
-    series -- and "is this lane doing anything" is the question dashboard 3's push panel
-    exists to answer alongside uptime.
+    Labelled by kind because an event that costs a confirmation (`item_removed`, which
+    asks the source before retracting) and one that costs a merge look identical on an
+    unlabelled series -- and "is this lane doing anything" is the question dashboard 3's
+    push panel exists to answer alongside uptime.
 
     Counted on the way *out* of `apply`, so a deferred event is counted too:
     an event the lane answered with a delta walk is still an event the
@@ -158,6 +165,53 @@ async def test_every_applied_event_is_counted_by_source_and_kind(
     assert {
         str(attributes["source"]) for attributes, _ in recorded["usher.source.push.events"]
     } == {"Living Room Emby"}
+
+
+def _row(external_id: str) -> MediaItemUpsert:
+    return MediaItemUpsert(
+        source_id=SOURCE.id,
+        external_id=external_id,
+        title_id=None,
+        episode_id=None,
+        container="mkv",
+        video_codec=None,
+        audio_codec=None,
+        width=None,
+        height=None,
+        hdr_format=None,
+        audio_channels=None,
+        file_size_bytes=None,
+        runtime_seconds=None,
+        added_at=None,
+        last_seen_at=T0,
+    )
+
+
+async def test_a_removal_counts_each_held_id_it_asked_about_once(
+    meter_reader: InMemoryMetricReader,
+) -> None:
+    """Named twice, an id is asked about once; not held at all, it is never asked about."""
+    media_items = FakeMediaItemRepository()
+    await media_items.upsert_many([_row("gone-1"), _row("kept-1")])
+    adapter = FakeSourceAdapter(SOURCE)
+    adapter.seed(
+        SourceItem(external_id="kept-1", name="Movie kept-1", kind=SourceItemKind.MOVIE, year=2021),
+        T0,
+    )
+    applier = _applier(FakeEventPublisher(), media_items=media_items)
+    await applier.apply(
+        SOURCE,
+        adapter,
+        SourceEvent(
+            kind=SourceEventKind.ITEM_REMOVED,
+            external_ids=("gone-1", "gone-1", "kept-1", "never-1"),
+        ),
+        user_id=uuid.uuid4(),
+    )
+    checks = _recorded(meter_reader)["usher.sync.retraction.checks"]
+    assert sorted(
+        (str(labels["path"]), str(labels["outcome"]), value) for labels, value in checks
+    ) == [("push", "gone", 1.0), ("push", "served", 1.0)]
 
 
 def _instrument_names(reader: InMemoryMetricReader) -> set[str]:

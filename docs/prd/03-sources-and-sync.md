@@ -47,7 +47,7 @@ Emby exposes a WebSocket at `/embywebsocket?api_key=<token>&deviceId=<id>`.
 
 | Message | Scope | Use | Becomes |
 |---|---|---|---|
-| `LibraryChanged` | Per-user, payload-filtered | Items added / updated / removed | One `SourceEvent` per non-empty array: `ITEM_ADDED`, `ITEM_UPDATED`, `ITEM_REMOVED`. A removal **retracts nothing** |
+| `LibraryChanged` | Per-user, payload-filtered | Items added / updated / removed | One `SourceEvent` per non-empty array: `ITEM_ADDED`, `ITEM_UPDATED`, `ITEM_REMOVED`. A removal retracts only what the source confirms gone |
 | `UserDataChanged` | Own data only | Watch position, played flags | One `WATCH_STATE_CHANGED` carrying the ids *and* the states the message itself contained |
 | `Sessions` (subscribe) | Per-user row-filtered | Liveness only | Nothing. Counted before it is parsed |
 
@@ -190,7 +190,7 @@ Push is the fast path, never the only path.
 
 | Lane | Trigger | Work |
 |---|---|---|
-| **Push** | WebSocket event | Apply it inline when it is small; defer to a delta when it is large. A `WATCH_STATE_CHANGED` carrying its own payload merges with no request at all; one naming more than `push_max_items_per_event` items with no payload becomes a delta walk |
+| **Push** | WebSocket event | Apply it inline when it is small; defer to a delta when it is large. A removal is always applied inline, asking the source a hundred items a request. A `WATCH_STATE_CHANGED` carrying its own payload merges with no request at all; one naming more than `push_max_items_per_event` items with no payload becomes a delta walk |
 | **Reconnect delta** | Socket re-established, or a push event deferred to a delta | Items changed since the last cursor. Bounded by `USHER_PUSH_GAP_MAX_ITEMS`, and **refused outright when there is no cursor** under `USHER_PUSH_GAP_CLOSE`'s `cursored` default |
 | **Full reconcile** | An operator's `POST /admin/sources/{id}/sync` or `usher sync`. Nothing in Usher schedules it; run it nightly from cron | Walk the source; upsert everything; ask the source about the rows the walk did not list, and mark those it confirms gone `available = false` |
 
@@ -227,7 +227,8 @@ whole-library walk of the same kind continues the same `sync_runs` row, with
 the same `started_at`: completed units are skipped, and every other unit
 continues from the position it committed. Completed units are not read again
 however long ago they ran, so an item removed from one of their libraries since
-then stays available until the next full walk, which starts afresh. A run still
+then stays available until the next full walk, which starts afresh, unless a
+push removal confirms it gone first. A run still
 `running` whose heartbeat is under 10 minutes old is a live walk, and a second
 is refused, saying as durations how long ago that heartbeat moved and how long
 until a walk whose process stopped can be resumed. `usher sync` exits non-zero,
@@ -271,8 +272,16 @@ gap-closing delta that does have a cursor, with `error_code =
 names `usher sync --kind full`. **The ceiling bounds the item lane only**: the
 watch lane owns its own cursor and still walks whole.
 
-**A push `ITEM_REMOVED` retracts nothing.** The event is counted and logged;
-the row stays available until a walk sweeps it.
+**A push `ITEM_REMOVED` retracts only what the source confirms gone.** Emby
+sends `ItemsRemoved` during an ordinary library refresh for items that are
+still there. So the lane asks the source about each removed item it holds
+available, and retracts those the source no longer serves. It then publishes
+one `title.updated` for each title or episode it retracted. A confirmed
+removal is applied at once, whatever its size: there is no retraction
+ceiling and no `push_max_items_per_event` deferral. Items Usher does not
+hold are not asked about. If the source cannot answer, the event fails like
+any failed read in the lane. The gap-closing delta after the reconnect does
+not retract the items; the next full walk's sweep does.
 
 **Retraction is a separate step, and it can decline.** It runs only after a
 walk returns normally — after a whole-library walk, once every unit has

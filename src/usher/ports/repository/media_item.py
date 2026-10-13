@@ -51,7 +51,8 @@ class MediaItemRepository(ABC):
     full walk's sweep asks about the rows it did not list, after the walk has returned
     normally -- `SourceAdapter.list_items` guarantees a walk raises rather than
     truncating, and that guarantee is worth nothing if the sweep runs either way -- so
-    it is a separate call, never a side effect of `upsert_many`.
+    it is a separate call, never a side effect of `upsert_many`. A push removal asks
+    about the removed rows it holds available.
     """
 
     @abstractmethod

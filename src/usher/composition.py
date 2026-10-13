@@ -579,6 +579,7 @@ def build_push_applier(
         pipeline.watch,
         events,
         pipeline.commit,
+        media_items=pipeline.media_items,
         cache=cache,
         max_items_per_event=settings.push_max_items_per_event,
     )

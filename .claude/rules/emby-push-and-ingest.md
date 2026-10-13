@@ -102,8 +102,10 @@ says nothing about a source left out of step by a parked write-back.
   library, whose frames are `Sessions` mapping to none. `_streak` compares
   `push_messages_received` across a connection, so N empty stale-outs in a row
   still park it: N stale limits of unbroken silence is what reads as broken.
-- **`ItemsRemoved` fires on a library from which nothing was removed**, so count
-  it and retract nothing on it, or one refresh marks a present file unavailable.
+- **`ItemsRemoved` fires on a library from which nothing was removed**, so
+  retract only what `confirm_gone` returns, or one refresh marks a present file
+  unavailable. **One `Ids` listing names one version of a version group**
+  (`ids_version_group.json`), which is why `confirm_gone` asks in rounds.
 - **A dropped socket raises `PortUnavailable` rather than hanging, and Emby
   re-delivers nothing**, so **the gap-closing delta is the only cover there
   is**. Do not let the queue fill during that walk.

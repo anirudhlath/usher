@@ -107,6 +107,7 @@ def applier(
         ),
         bus,
         session.flush,
+        media_items=media_items,
     )
 
 

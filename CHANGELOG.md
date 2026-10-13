@@ -67,6 +67,12 @@ Versioning is `0.x` while the wire contract may still move —
 
 ### Changed
 
+- **A push removal now retracts what the server confirms gone.** When Emby
+  reports items removed, Usher asks it about each one it holds, and marks
+  unavailable those it no longer serves, publishing `title.updated` for each
+  title or episode. Before, a removal changed nothing until a full walk. Items
+  Emby still serves, which a library refresh also reports removed, are left
+  alone.
 - **`USHER_SOURCE_PAGE_SIZE` defaults to 1,000, up from 200.** A page of 1,000
   costs a source little more than a page of 200, so a walk makes a fifth of the
   requests. A `.env` copied from an earlier `.env.example` still sets
@@ -105,8 +111,8 @@ Versioning is `0.x` while the wire contract may still move —
 ### Fixed
 
 - **A full walk no longer marks items unavailable that the server still
-  serves.** Emby's listing shows one version of a film with several, so every
-  full walk retracted the alternate versions a delta or a push event had
+  serves.** Emby's full listing shows one version of a film with several, so
+  every full walk retracted the alternate versions a delta or a push event had
   stored. The sweep now asks the server about the items the walk did not list,
   retracts only those it confirms gone, and records the rest as seen. If the
   server cannot answer, nothing is retracted, and the next full walk resumes

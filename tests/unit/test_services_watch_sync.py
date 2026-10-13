@@ -1174,6 +1174,7 @@ async def test_the_walk_publishes_nothing_and_the_push_lane_through_the_same_cha
         watch=fixture.service,
         events=events,
         commit=fixture._commit,
+        media_items=fixture.media_items,
     )
 
     await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)

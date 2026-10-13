@@ -115,6 +115,7 @@ def applier(
         # one connection-bound transaction it rolls back, which is what makes
         # each test isolated. What is under test is the SQL, not durability.
         session.flush,
+        media_items=media_items,
     )
 
 
@@ -301,25 +302,56 @@ async def test_a_pushed_item_is_ingested_and_published(
     assert [event.kind for event in events.published] == [ClientEventKind.TITLE_UPDATED]
 
 
-async def test_a_removal_leaves_every_row_available(
+async def test_a_removal_the_source_confirms_retracts_the_row(
     session: AsyncSession,
     applier: PushApplyService,
+    events: FakeEventPublisher,
     source: Source,
     user_id: uuid.UUID,
 ) -> None:
-    """A removal leaves every row available, against the table that holds the flag.
-
-    An Emby library refresh emits `ItemsRemoved` for items that have not gone
-    anywhere, and the one thing that must not happen is a row flipping to
-    `available = false` on the strength of it.
-    """
-    await _given_matched_movie(session, source, "movie-1")
+    """Against the table that holds the flag: the source no longer serves movie-1."""
+    title_id = await _given_matched_movie(session, source, "movie-1")
     outcome = await applier.apply(
         source,
         FakeSourceAdapter(source),
         SourceEvent(kind=SourceEventKind.ITEM_REMOVED, external_ids=("movie-1",)),
         user_id=user_id,
     )
-    assert outcome.ignored == 1
+    assert outcome.items_retracted == 1
+    stored = await PostgresMediaItemRepository(session).get_by_external_id(source.id, "movie-1")
+    assert stored is not None and stored.available is False
+    assert [(event.kind, event.title_id) for event in events.published] == [
+        (ClientEventKind.TITLE_UPDATED, title_id)
+    ]
+
+
+async def test_a_removal_the_source_still_serves_leaves_the_row_available(
+    session: AsyncSession,
+    applier: PushApplyService,
+    events: FakeEventPublisher,
+    source: Source,
+    user_id: uuid.UUID,
+) -> None:
+    """What an Emby library refresh sends: `ItemsRemoved` for a file that is still there."""
+    await _given_matched_movie(session, source, "movie-1")
+    adapter = FakeSourceAdapter(source)
+    adapter.seed(
+        SourceItem(
+            external_id="movie-1",
+            name="Film movie-1",
+            kind=SourceItemKind.MOVIE,
+            year=2021,
+            container="mkv",
+        ),
+        SEEN_AT,
+    )
+    outcome = await applier.apply(
+        source,
+        adapter,
+        SourceEvent(kind=SourceEventKind.ITEM_REMOVED, external_ids=("movie-1",)),
+        user_id=user_id,
+    )
+    assert outcome.items_retracted == 0
     stored = await PostgresMediaItemRepository(session).get_by_external_id(source.id, "movie-1")
     assert stored is not None and stored.available is True
+    assert events.published == []

@@ -5,11 +5,12 @@ import inspect
 import itertools
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Collection, Iterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from loguru import logger
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
@@ -31,7 +32,7 @@ from usher.domain.jobs import JobKind
 from usher.domain.rows import BuiltRow, DisplayHint, RowFamily
 from usher.domain.source import Source
 from usher.ports.errors import PortUnavailable
-from usher.ports.events import ClientEventKind
+from usher.ports.events import ClientEvent, ClientEventKind
 from usher.ports.ingest import MediaItemUpsert
 from usher.ports.source import (
     SourceAdapter,
@@ -131,6 +132,7 @@ class _Fixture:
             self.watch,
             self.events,
             self._commit,
+            media_items=self.media_items,
             cache=self.rows,
             max_items_per_event=max_items_per_event,
         )
@@ -142,8 +144,10 @@ class _Fixture:
     async def _rollback(self) -> None:
         return None
 
-    async def given_matched(self, external_id: str, *, changed_at: AwareDatetime = T0) -> uuid.UUID:
-        title_id = new_id()
+    async def given_row(
+        self, external_id: str, *, title_id: uuid.UUID | None, changed_at: AwareDatetime = T0
+    ) -> None:
+        """A stored, available row for `external_id`, which the source also serves."""
         self.adapter.seed(_item(external_id), changed_at)
         await self.media_items.upsert_many(
             [
@@ -166,6 +170,10 @@ class _Fixture:
                 )
             ]
         )
+
+    async def given_matched(self, external_id: str, *, changed_at: AwareDatetime = T0) -> uuid.UUID:
+        title_id = new_id()
+        await self.given_row(external_id, title_id=title_id, changed_at=changed_at)
         self.title_ids[external_id] = title_id
         return title_id
 
@@ -433,25 +441,167 @@ async def test_an_item_the_source_forgot_is_skipped(fixture: _Fixture) -> None:
     assert fixture.commits == 0, "an event that stored nothing opened a transaction"
 
 
-async def test_a_removed_item_retracts_nothing(fixture: _Fixture) -> None:
-    """Availability is retracted only by a walk that provably finished.
+async def test_a_confirmed_removal_retracts_and_publishes_after_its_commit(
+    fixture: _Fixture,
+) -> None:
+    """Two copies of one film are one `title.updated`; an unmatched row is retracted silently."""
+    film = new_id()
+    await fixture.given_row("copy-a", title_id=film)
+    await fixture.given_row("copy-b", title_id=film)
+    other = await fixture.given_matched("other-1")
+    await fixture.given_row("unmatched-1", title_id=None)
+    removed = ("copy-a", "copy-b", "other-1", "unmatched-1")
+    for external_id in removed:
+        fixture.adapter.forget(external_id)
+    commits_at_publish: list[int] = []
+    publish = fixture.events.publish
 
-    An Emby library refresh emits `ItemsRemoved` for items that have not gone
-    anywhere, and Usher cannot tell that from a deletion -- one of which is
-    irreversible. PRD 03: *"the row stays available until a walk sweeps it."*
-    Counted and logged so it is visible.
-    """
-    await fixture.given_matched("gone-1")
-    await fixture.given_matched("gone-2")
+    async def _recording(event: ClientEvent) -> None:
+        commits_at_publish.append(fixture.commits)
+        await publish(event)
+
+    fixture.events.publish = _recording  # type: ignore[method-assign]
+    outcome = await fixture.apply(
+        SourceEvent(kind=SourceEventKind.ITEM_REMOVED, external_ids=removed)
+    )
+    assert outcome == PushOutcome(items_retracted=4)
+    assert fixture.commits == 1
+    assert commits_at_publish == [1, 1], "a client heard of a retraction before its commit"
+    published = fixture.events.published
+    assert len(published) == 2
+    assert {(event.kind, event.title_id, event.episode_id) for event in published} == {
+        (ClientEventKind.TITLE_UPDATED, film, None),
+        (ClientEventKind.TITLE_UPDATED, other, None),
+    }
+    assert all(event.data == {"fields": ["availability"]} for event in published)
+    for external_id in removed:
+        stored = await fixture.media_items.get_by_external_id(fixture.source.id, external_id)
+        assert stored is not None and stored.available is False, external_id
+
+
+async def test_a_removal_the_source_still_serves_changes_nothing(fixture: _Fixture) -> None:
+    """What an Emby library refresh sends: `ItemsRemoved` for a file that is still there."""
+    await fixture.given_matched("kept-1")
+    outcome = await fixture.apply(
+        SourceEvent(kind=SourceEventKind.ITEM_REMOVED, external_ids=("kept-1",))
+    )
+    assert fixture.adapter.confirm_calls == [frozenset({"kept-1"})]
+    assert outcome == PushOutcome()
+    assert fixture.commits == 0
+    assert fixture.events.published == []
+    stored = await fixture.media_items.get_by_external_id(fixture.source.id, "kept-1")
+    assert stored is not None and stored.available is True
+
+
+async def test_a_removal_of_ids_usher_does_not_hold_asks_nothing(fixture: _Fixture) -> None:
+    """Folders, seasons and extras are removed too, and Usher stores no row for them."""
+    outcome = await fixture.apply(
+        SourceEvent(kind=SourceEventKind.ITEM_REMOVED, external_ids=("folder-1", "season-1"))
+    )
+    assert fixture.adapter.confirm_calls == []
+    assert outcome == PushOutcome()
+    assert fixture.commits == 0
+
+
+async def test_a_removal_larger_than_the_item_limit_is_applied_not_deferred() -> None:
+    """The source is asked a hundred ids a request, so a removal never costs a delta walk."""
+    fixture = _Fixture(max_items_per_event=1)
+    for external_id in ("gone-1", "gone-2"):
+        await fixture.given_matched(external_id)
+        fixture.adapter.forget(external_id)
     outcome = await fixture.apply(
         SourceEvent(kind=SourceEventKind.ITEM_REMOVED, external_ids=("gone-1", "gone-2"))
     )
-    assert outcome.ignored == 2
-    assert outcome.items_ingested == 0
+    assert outcome == PushOutcome(items_retracted=2)
+
+
+async def test_a_removal_the_source_cannot_confirm_raises_and_changes_nothing(
+    fixture: _Fixture,
+) -> None:
+    """As any failed read in the lane does."""
+    await fixture.given_matched("gone-1")
+    fixture.adapter.forget("gone-1")
+    fixture.adapter.fail_confirm()
+    with pytest.raises(PortUnavailable):
+        await fixture.apply(
+            SourceEvent(kind=SourceEventKind.ITEM_REMOVED, external_ids=("gone-1",))
+        )
+    stored = await fixture.media_items.get_by_external_id(fixture.source.id, "gone-1")
+    assert stored is not None and stored.available is True
+    assert fixture.commits == 0
     assert fixture.events.published == []
-    for external_id in ("gone-1", "gone-2"):
-        stored = await fixture.media_items.get_by_external_id(fixture.source.id, external_id)
-        assert stored is not None and stored.available is True
+
+
+async def test_a_removal_naming_an_id_twice_asks_and_publishes_once(fixture: _Fixture) -> None:
+    title_id = await fixture.given_matched("gone-1")
+    fixture.adapter.forget("gone-1")
+    outcome = await fixture.apply(
+        SourceEvent(kind=SourceEventKind.ITEM_REMOVED, external_ids=("gone-1", "gone-1"))
+    )
+    assert fixture.adapter.confirm_calls == [frozenset({"gone-1"})]
+    assert outcome == PushOutcome(items_retracted=1)
+    assert [event.title_id for event in fixture.events.published] == [title_id]
+
+
+async def test_a_removal_of_an_already_retracted_row_asks_nothing(fixture: _Fixture) -> None:
+    await fixture.given_matched("gone-1")
+    fixture.adapter.forget("gone-1")
+    premise = await fixture.media_items.retract(
+        fixture.source.id, ["gone-1"], unseen_since=datetime.now(UTC)
+    )
+    assert premise.retracted == 1
+    outcome = await fixture.apply(
+        SourceEvent(kind=SourceEventKind.ITEM_REMOVED, external_ids=("gone-1",))
+    )
+    assert fixture.adapter.confirm_calls == []
+    assert outcome == PushOutcome()
+    assert fixture.events.published == []
+
+
+async def test_a_removal_says_what_it_asked_and_what_it_retracted(fixture: _Fixture) -> None:
+    await fixture.given_matched("gone-1")
+    await fixture.given_matched("kept-1")
+    fixture.adapter.forget("gone-1")
+    lines: list[str] = []
+    sink = logger.add(lines.append, level="INFO", format="{message}")
+    try:
+        await fixture.apply(
+            SourceEvent(
+                kind=SourceEventKind.ITEM_REMOVED, external_ids=("gone-1", "kept-1", "never-1")
+            )
+        )
+    finally:
+        logger.remove(sink)
+    assert [line.rstrip("\n") for line in lines if "items removed" in line] == [
+        "Living Room Emby reported 3 items removed: 2 held, 1 retracted, 1 still served"
+    ]
+
+
+async def test_a_row_read_since_the_removal_arrived_survives_a_gone_answer(
+    fixture: _Fixture,
+) -> None:
+    """The guard is the instant the removal began, so a read after it wins over the answer."""
+    await fixture.given_matched("back-1")
+    fixture.adapter.forget("back-1")
+    original = fixture.adapter.confirm_gone
+
+    async def _read_back_first(external_ids: Collection[str]) -> frozenset[str]:
+        await fixture.ingest.ingest_batch(
+            fixture.source.id, [_item("back-1")], observed_at=datetime.now(UTC)
+        )
+        return await original(external_ids)
+
+    fixture.adapter.confirm_gone = _read_back_first  # type: ignore[method-assign]
+    before = datetime.now(UTC)
+    outcome = await fixture.apply(
+        SourceEvent(kind=SourceEventKind.ITEM_REMOVED, external_ids=("back-1",))
+    )
+    stored = await fixture.media_items.get_by_external_id(fixture.source.id, "back-1")
+    assert stored is not None
+    assert stored.last_seen_at >= before, "the premise: read after the removal began"
+    assert stored.available is True
+    assert outcome == PushOutcome()
+    assert fixture.events.published == []
 
 
 # -- the unit of work -------------------------------------------------------
