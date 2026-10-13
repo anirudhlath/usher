@@ -126,6 +126,7 @@ describe('Config', () => {
       'USHER_TMDB_API_KEY',
       'USHER_EMBEDDING_API_KEY',
       'USHER_LLM_API_KEY',
+      'USHER_HA_TOKEN',
     ])
 
     for (const key of SECRET_KEYS) {

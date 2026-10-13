@@ -110,6 +110,19 @@ describe('Problem — the closed vocabulary drives recovery', () => {
     expect(screen.getByRole('button', { name: 'Play again' })).toBeInTheDocument()
   })
 
+  it('gives players_unavailable a panel, its own sentence, and a retry that waits out Retry-After', () => {
+    vi.useFakeTimers()
+    const { container } = renderComponent(
+      <Problem
+        problem={{ code: 'players_unavailable', status: 503, retry_after: 5 }}
+        onRetry={vi.fn<() => void>()}
+      />,
+    )
+    expect(container.querySelector('.u-problem--panel')).not.toBeNull()
+    expect(screen.getByText("Screens aren't available right now.")).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Try again in 5 s' })).toBeDisabled()
+  })
+
   it('renders nothing at all for invalid_cursor — the list restarts silently', () => {
     const { container } = renderComponent(
       <Problem problem={{ code: 'invalid_cursor', status: 400, detail: 'cursor is not decodable.' }} />,

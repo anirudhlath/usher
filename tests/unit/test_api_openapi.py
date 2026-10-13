@@ -68,7 +68,7 @@ _PROBLEM_RESPONSES: Final = 50
 #: the arm that fails when a rewrite of the document moves a **200** as well as
 #: a problem, and a floor cannot see a body that left the set. Update it when
 #: the surface grows.
-_NON_PROBLEM_BODIES: Final = 36
+_NON_PROBLEM_BODIES: Final = 40
 
 #: Non-2xx responses that are deliberately **not** problem documents, each with
 #: the shape it keeps instead and the reason it keeps it.

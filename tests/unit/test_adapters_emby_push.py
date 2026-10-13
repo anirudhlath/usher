@@ -5,7 +5,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
-from typing import Any, cast
+from typing import Any
 
 import pytest
 from loguru import logger as loguru_logger
@@ -23,6 +23,7 @@ from usher.adapters.emby.push import (
     socket_logger,
     to_source_events,
 )
+from usher.adapters.websocket import DEFAULT_MAX_FRAME_BYTES
 from usher.config import Settings
 from usher.ports.errors import PortUnavailable
 from usher.ports.source import SourceEvent, SourceEventKind
@@ -1160,6 +1161,8 @@ async def test_connect_websocket_hands_the_library_the_silenced_logger(
     monkeypatch.setattr("websockets.asyncio.client.connect", _fake_connect)
     connection = await connect_websocket(f"ws://emby.invalid{LEAKY_PATH}")
     assert isinstance(connection, PushConnection)
+    pinned = {"logger", "ping_interval", "ping_timeout", "max_queue", "max_size"}
+    assert pinned - captured.keys() == set(), "the shared connector stopped forwarding these"
     assert captured["logger"] is socket_logger()
     # PRD 03's heartbeat, and the library's own default -- passed explicitly
     # so a future default change is a diff rather than a silent regression.
@@ -1168,6 +1171,9 @@ async def test_connect_websocket_hands_the_library_the_silenced_logger(
     # with the socket already live, and at 16 buffered frames the client
     # stops reading and backpressures the server for the length of the walk.
     assert captured["max_queue"] == 256
+    # Emby names no bound, so this is the shared connector's default, `DEFAULT_MAX_FRAME_BYTES`:
+    # the bound this channel had before the transport was shared.
+    assert captured["max_size"] == DEFAULT_MAX_FRAME_BYTES, f"Emby's bound: {captured['max_size']}"
 
 
 async def test_a_real_websockets_handshake_prints_no_token(
@@ -1253,27 +1259,6 @@ async def test_the_real_connection_translates_a_closed_socket_by_type(
     assert "api_key" not in message
     assert WEBSOCKET_PATH in message
     assert "ConnectionClosed" in message
-
-
-async def test_the_real_connection_never_raises_out_of_aclose() -> None:
-    """`aclose` runs in a `finally` that is often unwinding a `PortUnavailable`.
-
-    That exception explains why the lane dropped, and a close failure replacing it is
-    worse than a log line -- so it is swallowed, and the port already documents
-    `aclose` as never raising.
-    """
-
-    class _Exploding:
-        async def close(self) -> None:
-            raise RuntimeError("the transport is already gone")
-
-    from usher.adapters.emby.push import _WebsocketsConnection
-
-    # `cast`, because handing it something that is not a
-    # `ClientConnection` is the whole point: the `except` arm exists for
-    # a transport that is already gone, and mypy is right that no real
-    # one has this shape.
-    await _WebsocketsConnection(cast(Any, _Exploding())).aclose()
 
 
 async def test_the_real_connection_times_out_on_a_silent_socket_rather_than_hanging(

@@ -4,19 +4,17 @@ import asyncio
 import json
 import logging
 import time
-from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import Any, Literal, Protocol
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from loguru import logger
 
-if TYPE_CHECKING:  # pragma: no cover -- typing only; see `connect_websocket`
-    from websockets.asyncio.client import ClientConnection
-
 from usher.adapters.emby.mapping import library_ids, user_data_states
+from usher.adapters.websocket import WebSocketConnection, silenced_logger
+from usher.adapters.websocket import connect_websocket as _connect_websocket
 from usher.ports.errors import PortUnavailable, UsherPortError
 from usher.ports.source import SourceEvent, SourceEventKind
 
@@ -44,13 +42,8 @@ _SOCKET_LOGGER_NAME = "usher.source.emby.socket"
 
 
 def socket_logger() -> logging.Logger:
-    """A logger `websockets` can write to and nothing can read from."""
-    silenced = logging.getLogger(_SOCKET_LOGGER_NAME)
-    silenced.setLevel(logging.CRITICAL + 1)
-    silenced.propagate = False
-    if not silenced.handlers:
-        silenced.addHandler(logging.NullHandler())
-    return silenced
+    """A logger `websockets` can write to and nothing can read from, for this channel."""
+    return silenced_logger(_SOCKET_LOGGER_NAME)
 
 
 @dataclass(slots=True)
@@ -129,47 +122,8 @@ class PushHealth:
         return 0.0 if since is None else now - since
 
 
-class PushConnection(ABC):
-    """One open push connection, as this adapter needs it.
-
-    Deliberately three methods and no state: everything about *what a
-    message means* belongs to `EmbyPushChannel`, and everything about *how
-    bytes move* belongs to the implementation. That split is what makes a
-    loopback test a test of the real transport and the unit tests a test of
-    the real logic.
-    """
-
-    @abstractmethod
-    async def send(self, message: str) -> None:
-        """Send one text frame.
-
-        Raises `PortUnavailable` on any failure.
-        """
-
-    @abstractmethod
-    async def recv(self, timeout: float) -> str:
-        """One text frame.
-
-        Raises **`TimeoutError`** when nothing arrived within `timeout` --
-        which the caller treats as a tick, not a failure, and uses to run
-        its staleness watchdog. Raises `PortUnavailable` when the connection
-        is gone, and **never returns to signal that**: a `recv` that ended
-        quietly would be indistinguishable from a source with nothing to
-        say, which is the same failure `SourceAdapter.list_items` forbids
-        one layer up.
-
-        Binary frames are decoded as UTF-8 with `errors="replace"` rather
-        than raising. Emby sends text; a frame that is neither is counted as
-        a received message (it is evidence the socket is alive) and then
-        fails to parse as JSON, which the caller already handles.
-        """
-
-    @abstractmethod
-    async def aclose(self) -> None:
-        """Release the connection.
-
-        Idempotent, and never raises.
-        """
+#: Emby's name for the shared transport, whose contract `usher.adapters.websocket` states.
+PushConnection = WebSocketConnection
 
 
 _clock = time.monotonic
@@ -389,61 +343,6 @@ class EmbyPushChannel:
         return to_source_events(message, source_user_id=source_user_id)
 
 
-class _WebsocketsConnection(PushConnection):
-    """`websockets`' `ClientConnection`, behind this adapter's three methods.
-
-    The wrapper exists so that **no `websockets` exception ever crosses into
-    `usher.ports.errors` carrying its own message.** `InvalidURI.__str__` is
-    `f"{self.uri} isn't a valid URI: {self.msg}"` and this channel's URI carries
-    the session token; `InvalidProxy` has the same shape for a proxy URL, and
-    `InvalidStatus` carries the response. Every translation below therefore
-    names the exception's *type* and nothing else.
-    """
-
-    def __init__(self, connection: "ClientConnection") -> None:
-        self._connection = connection
-
-    async def send(self, message: str) -> None:
-        try:
-            await self._connection.send(message)
-        except Exception as exc:
-            # A bare `except Exception` and no suppression directive, for the
-            # reason `EmbyPushChannel.open` records.
-            raise PortUnavailable(f"{WEBSOCKET_PATH} send failed: {type(exc).__name__}") from exc
-
-    async def recv(self, timeout: float) -> str:
-        """One text frame, or `TimeoutError` when nothing arrived in time.
-
-        `asyncio.wait_for` around the library's own `recv()` rather than a
-        library-level deadline, because there is no library-level deadline:
-        `websockets` documents cancelling `recv` as safe ("there's no risk
-        of losing data; the next invocation will return the next message")
-        and names `asyncio.wait_for` as the way to enforce a timeout.
-        """
-        try:
-            frame = await asyncio.wait_for(self._connection.recv(), timeout)
-        except TimeoutError:
-            # Re-raised as itself: the caller's watchdog owns this, and
-            # translating it to `PortUnavailable` here would make every idle
-            # poll a reconnect and a gap-closing delta walk.
-            raise
-        except Exception as exc:
-            raise PortUnavailable(f"{WEBSOCKET_PATH} closed: {type(exc).__name__}") from exc
-        # Emby sends text. A binary frame is decoded rather than raising: it
-        # is still evidence the socket is alive, and it then fails to parse
-        # as JSON, which the channel already drops-and-counts.
-        return frame if isinstance(frame, str) else bytes(frame).decode("utf-8", "replace")
-
-    async def aclose(self) -> None:
-        try:
-            await self._connection.close()
-        except Exception as exc:
-            # Never raises: this runs in a `finally` that is often unwinding
-            # the `PortUnavailable` explaining why the lane dropped, and a
-            # close failure replacing the real reason is worse than a log line.
-            logger.debug("push connection close failed: {kind}", kind=type(exc).__name__)
-
-
 async def connect_websocket(
     url: str,
     *,
@@ -453,16 +352,14 @@ async def connect_websocket(
     max_queue: int = 256,
     proxy: str | Literal[True] | None = True,
 ) -> PushConnection:
-    """The default `PushConnector`: a real `websockets` client, wrapped."""
-    from websockets.asyncio.client import connect
-
-    connection = await connect(
+    """The default `PushConnector`: the shared client, named by Emby's path."""
+    return await _connect_websocket(
         url,
+        label=WEBSOCKET_PATH,
+        logger_name=_SOCKET_LOGGER_NAME,
         open_timeout=open_timeout,
         ping_interval=ping_interval,
         ping_timeout=ping_timeout,
         max_queue=max_queue,
-        logger=socket_logger(),
         proxy=proxy,
     )
-    return _WebsocketsConnection(connection)

@@ -142,6 +142,14 @@ position, not the play count.
 
 **Episodes get `PUT` and no `/played` pair.**
 
+### Player routes
+
+| Endpoint | Returns |
+|---|---|
+| `GET /screens` | Every screen and its devices with Home Assistant's live reading, plus the players waiting to be confirmed, placed or ignored ([Players](#players)) |
+| `POST /screens/devices/{entity_id}/confirm` | Writes the player's label, and its device's area when given, to Home Assistant, and answers as `GET /screens` once HA reports it |
+| `GET /titles/{id}/ways?screen=` · `GET /episodes/{id}/ways?screen=` | Every way the copies could play, grouped by screen and ranked, each screen's best marked |
+
 ### Admin
 
 | Endpoint | Purpose |
@@ -300,7 +308,7 @@ answer.
 
 #### The vocabulary
 
-**Seven members, closed.**
+**Eight members, closed.**
 
 | code | status | when |
 |---|---|---|
@@ -311,6 +319,7 @@ answer.
 | `source_unavailable` | 503 | at least one source could not be reached and nothing playable was found on the ones that answered — retryable |
 | `not_playable` | 409 | every source holding a copy answered and none offers a way to play it |
 | `ticket_invalid` | 404 | a playback ticket that is expired or forged — one answer for both, deliberately |
+| `players_unavailable` | 503 | players are off, or Home Assistant cannot be read, refused a write, or did not report it in time — with `Retry-After` when asking again may succeed, and without it while players are off or the token is refused |
 
 **404 is generic and there is no per-resource variant** — `instance` already
 carries the path. A title the household owns with no playable copy is separated
@@ -544,6 +553,53 @@ that does not send `X-Forwarded-Proto`/`X-Forwarded-Host`, the ticket names the
 internal address and the client follows a URL it cannot reach. The fix is an
 operator setting (`uvicorn --proxy-headers`), not a code change
 ([08](08-operations.md)).
+
+## Players
+
+Usher reads the house's screens from Home Assistant, which owns them, and keeps
+no copy: there is no device table, and nothing about a device is persisted. Off
+by default ([08](08-operations.md)).
+
+- **A candidate** is a media player some recipe can play on, matched by its HA
+  integration and its device's model. **A device** is a candidate labelled
+  `usher` in HA. One labelled `usher_ignore` is **ignored**, and one with
+  neither is **unconfirmed**. **A screen** is an HA area holding at least one
+  device; a device in no area is listed under `no_area`.
+- **`GET /screens`** is recomputed from HA's registries and states on every
+  request. A device's `state` is HA's reading, passed through: power, the app,
+  what is playing and where.
+- **Confirm writes to HA, never to Usher**: the `usher` and `usher_ignore`
+  labels in HA's label registry, created as `Usher` and `Usher ignore` when
+  missing; the `usher` or `usher_ignore` label on the entity, with every other
+  label kept; and the device's area when `area_id` is given. **Only a player in
+  use and in no area is placed**, and only when its entity has no area of its
+  own; anything else is `422 validation_failed`. The answer is the house once
+  HA reports every write. A write HA refuses, or does not report within
+  `USHER_PLAYERS_CONFIRM_TIMEOUT_SECONDS` (default 10), is `503
+  players_unavailable`, and the write may still land.
+- **`/ways` ranks every available copy on every device through every matching
+  recipe**, grouped by screen. A copy with no container, such as a series' own
+  row, is no way at all, as `/play` finds no way to play it either. Hands-free
+  ways come first by quality
+  (resolution, then HDR, then audio — lossless object audio, lossless, lossy
+  multichannel, stereo, then the codec and its channels within a tier, unknown
+  channels counting as stereo — then container), then ways that need a press at the
+  TV, then ways that cannot play, each with its `refusal`. On an equal score a
+  `proven` recipe ranks first; every recipe is `proven: false` until a send
+  has shown it. The first playable way of each screen is `best`, and every
+  other playable way says what it `gives_up` against it, naming only the
+  shortfalls its copy's facts show; `facts_known: false` marks a way whose
+  copy lacks a fact its recipe checks. A way's
+  `id` is stable over screen, player, recipe and copy. Every screen is listed,
+  in reading order, its `ways` empty when no copy can be ranked, so "nothing
+  plays here" needs no second call. `?screen=` takes an area id and lists that
+  screen alone, ways or none; one that is not a screen is `422
+  validation_failed`.
+- **`/ways` mints no ticket and calls no source**, unlike `/play`.
+- **With players off or HA unreachable**, `/screens` and confirm answer `503
+  players_unavailable`, and `/ways` answers `200` with
+  `screens_available: false` and no screens. Nothing else changes, and
+  `/health/ready` never consults HA.
 
 ## Authentication seam
 

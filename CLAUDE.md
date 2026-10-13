@@ -67,7 +67,7 @@ when working in `docs/`.
   and the restore is verified by reading the file back, not by the suite going
   green. `git reset --soft` is fine.
 - **Secrets in `Settings` are `SecretStr`** — `database_url`, `secret_key`,
-  `tmdb_api_key`, `llm_api_key`, `embedding_api_key`. Unwrap with
+  `tmdb_api_key`, `llm_api_key`, `embedding_api_key`, `ha_token`. Unwrap with
   `.get_secret_value()` at the point of use only; never store the unwrapped
   value, never let it reach a log line or an exception message.
 
@@ -110,6 +110,7 @@ trigger, just open it.
 | `rows-and-genome.md` | `services/rows/**`, `home.py`, `taste.py`, `similar.py`, `scripts/measure_{rows,pair_rates}.py` |
 | `curation-and-llm.md` | `adapters/llm/**`, `services/curation{,_pool,_prompt,_validate}.py` (literals, not a glob), `query_expansion.py`, `llm_ledger.py` |
 | `bootstrap-and-datasets.md` | `adapters/bulk/**`, `services/bootstrap.py`, `db/repositories/bulk.py`, `domain/{people,bootstrap}.py`, `scripts/measure_{bulk_load,imdb_people,people_provenance}.py` |
+| `players-and-homeassistant.md` | `adapters/homeassistant/**`, `adapters/websocket.py`, `ports/players.py`, `domain/{house,recipes,screens,ways}.py`, `services/{screens,ways}.py`, `scripts/capture_ha_shape.py`, and their fakes, contract and fixture |
 | `ports-and-error-taxonomy.md` | `src/usher/ports/**`, `src/usher/adapters/**` |
 | `api-telemetry-and-lanes.md` | `api/**`, `telemetry.py`, `composition.py`, `services/{jobs,events,playback,playback_ticket,titles,visibility,sources}.py` |
 | `config-cli-and-deployment.md` | `config.py`, `cli.py`, `__main__.py`, `db/migrations/env.py`, `compose.yml`, `Dockerfile`, `.env.example`, `pyproject.toml`, `.github/workflows/**` |
@@ -156,7 +157,7 @@ uv sync --extra eval             # NOT optional — see below
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy src tests            # strict, including tests/
-uv run lint-imports              # architecture contracts — 13 kept, 0 broken
+uv run lint-imports              # architecture contracts — 15 kept, 0 broken
 uv run pytest                    # tests/integration/ needs Docker
 ```
 

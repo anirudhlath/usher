@@ -1,7 +1,7 @@
 /**
  * The root path segments Usher's HTTP API owns.
  *
- * Usher includes all seventeen of its routers with **no prefix** — there is no
+ * Usher includes all nineteen of its routers with **no prefix** — there is no
  * `/api` namespace and adding one would be a breaking change to a documented,
  * public contract. So the console cannot live at `/`: its own `/titles/:id`
  * route would be shadowed by the API's `GET /titles/{title_id}`, and
@@ -31,6 +31,7 @@ export const USHER_API_ROOTS = [
   'openapi.json',
   'people',
   'redoc',
+  'screens',
   'search',
   'seasons',
   'series',

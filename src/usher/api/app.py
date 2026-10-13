@@ -8,6 +8,7 @@ from typing import Any
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -31,17 +32,20 @@ from usher.api.routers import (
     people,
     playback,
     rows,
+    screens,
     search,
     series,
     sources,
     titles,
     unmatched,
     watch,
+    ways,
 )
 from usher.api.trace_response import TraceResponseMiddleware
 from usher.composition import (
     DefaultUserId,
     embedder,
+    house_players,
     image_proxy,
     llm_client,
     metadata_provider,
@@ -142,9 +146,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Opens no connection -- that is what keeps `/health` answering 200
         # with Postgres down.
         await lanes.start()
+        # The house's players, `None` while USHER_PLAYERS_ENABLED is off. Their
+        # connection is a task of its own, so Home Assistant never gates startup.
+        players, close_players = await house_players(settings)
+        app.state.players = players
         # The `try:` opens here and not at the engine, so a raise from
-        # `metadata_provider`, `embedder`, `llm_client` or `lanes.start()` leaks
-        # whatever was already built.
+        # `metadata_provider`, `embedder`, `llm_client`, `lanes.start()` or
+        # `house_players` leaks whatever was already built.
         try:
             yield
         finally:
@@ -158,6 +166,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await search_queries.aclose()
             with suppress(asyncio.CancelledError):
                 await draining
+            await close_players()
             await close_provider()
             await close_model()
             await close_client()
@@ -176,6 +185,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     FastAPIInstrumentor.instrument_app(app)
     # …and this is what lets that span leave the process.
     app.add_middleware(TraceResponseMiddleware)
+    # Browser pages from these origins may call the API, the home panel's among
+    # them. Added last, so it is outermost and answers a preflight before routing.
+    # `traceresponse` and `Retry-After` are exposed because the clients read both.
+    origins = [origin for origin in settings.cors_origins.split(",") if origin]
+    if origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=origins,
+            allow_methods=["GET", "POST", "PUT", "DELETE"],
+            allow_headers=["content-type"],
+            expose_headers=["traceresponse", "retry-after"],
+        )
     # Set here and not in the lifespan: settings are not a resource with a
     # lifetime, and `create_app(settings)`'s whole point is that the app runs on
     # what it was handed, not on the environment at the moment a request arrives.
@@ -217,12 +238,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(people.router)
     app.include_router(playback.router)
     app.include_router(rows.router)
+    app.include_router(screens.router)
     app.include_router(search.router)
     app.include_router(series.router)
     app.include_router(sources.router)
     app.include_router(titles.router)
     app.include_router(unmatched.router)
     app.include_router(watch.router)
+    app.include_router(ways.router)
     # **Last, and that ordering is the whole safety argument.** The console's history
     # fallback answers any navigation-shaped miss under `/console` -- Starlette matches
     # in registration order, so a miss outside it still falls through to the 404.

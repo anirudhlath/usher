@@ -157,6 +157,10 @@ can reach the port can register sources, start hours-long imports and spend
 money on LLM calls. Usher is built for a home network, and auth is tracked in
 [#18](https://github.com/anirudhlath/usher/issues/18).
 
+With `USHER_PLAYERS_ENABLED=true` there is one more: anyone who can reach the
+port can label Home Assistant's players and set a device's area, with the
+administrator token Usher holds.
+
 By default compose publishes Usher on every interface of the host, and ports
 Docker publishes bypass host firewalls such as ufw. To publish it on one
 address, set that address in `.env`: `USHER_COMPOSE_HOST_PORT=192.168.1.10:8100`

@@ -214,6 +214,21 @@ forbidden_modules = [
 ]
 allow_indirect_imports = true
 
+# The player adapter is reached through `usher.composition`, like the implementations
+# above; a service or a router naming it would bind the house to Home Assistant.
+[[tool.importlinter.contracts]]
+name = "no concrete player adapter escapes its package"
+type = "forbidden"
+source_modules = [
+    "usher.domain",
+    "usher.ports",
+    "usher.services",
+    "usher.api",
+    "usher.db",
+]
+forbidden_modules = ["usher.adapters.homeassistant"]
+allow_indirect_imports = true
+
 # Generation happens in a background job, never in the request path, as a graph
 # property: a name scan missed `composition.build_curation_service`, which returns
 # a `CurationService` under none of the scanned names. The flag because every router
@@ -244,6 +259,25 @@ forbidden_modules = [
     "usher.adapters.bulk",
     "usher.adapters.embedding",
     "usher.adapters.emby",
+    "usher.adapters.homeassistant",
+    "usher.adapters.images",
+    "usher.adapters.llm",
+    "usher.adapters.search",
+    "usher.adapters.tmdb",
+]
+
+# The websocket transport is shared the way `adapters/http.py` is, so an edge back into
+# an adapter is a cycle that resolves quietly. Every adapter package is listed;
+# `test_both_shared_helper_contracts_forbid_every_adapter_package` keeps it so.
+[[tool.importlinter.contracts]]
+name = "the shared websocket helper imports no concrete adapter"
+type = "forbidden"
+source_modules = ["usher.adapters.websocket"]
+forbidden_modules = [
+    "usher.adapters.bulk",
+    "usher.adapters.embedding",
+    "usher.adapters.emby",
+    "usher.adapters.homeassistant",
     "usher.adapters.images",
     "usher.adapters.llm",
     "usher.adapters.search",

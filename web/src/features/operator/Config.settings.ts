@@ -9,7 +9,7 @@
  * where a real read proves it, and the proof travels with the value.
  *
  * **No row carries a secret's value, and there is no field it could be put
- * in.** `secret: true` is the whole of what this file knows about the five
+ * in.** `secret: true` is the whole of what this file knows about the six
  * `SecretStr` settings, which is what makes "a secret is never rendered"
  * a property of the data rather than a rule the renderer has to remember.
  *
@@ -96,6 +96,15 @@ export const CONFIG: readonly SettingRow[] = [
     group: 'server',
     def: '8000',
     about: 'Listen port inside the container. The published host port is a compose variable.',
+    secret: false,
+    measured: false,
+  },
+  {
+    key: 'USHER_CORS_ORIGINS',
+    group: 'server',
+    def: 'empty',
+    about:
+      'Browser origins allowed to call the API, comma-separated, each a bare http(s)://host:port, lowercased and without a default port (:80 on http, :443 on https). Empty adds no CORS, so only same-origin pages such as this console can call it. A page served over https cannot call Usher over http whatever this says.',
     secret: false,
     measured: false,
   },
@@ -808,6 +817,68 @@ export const CONFIG: readonly SettingRow[] = [
     def: 'unset',
     about:
       'The deployment’s Tempo, for the “Open trace” link on a rendered problem document. Same rules as USHER_GRAFANA_URL. That one link is what PRD 10’s telemetry is for on a failure path: every response carries a trace id, and without somewhere to open it the id is a string an operator cannot act on.',
+    secret: false,
+    measured: false,
+  },
+  /* -------------------------------------------------------------- players */
+  {
+    key: 'USHER_PLAYERS_ENABLED',
+    group: 'players',
+    def: 'false',
+    about:
+      'Whether Usher reads the house’s screens and players from Home Assistant. Off, nothing connects and the screens routes answer 503 players_unavailable; the catalog, search and playback are unaffected either way.',
+    secret: false,
+    measured: false,
+  },
+  {
+    key: 'USHER_HA_URL',
+    group: 'players',
+    def: 'unset',
+    about:
+      'Home Assistant’s base URL, http:// or https://. Required when players are on; refused at startup otherwise.',
+    secret: false,
+    measured: false,
+  },
+  {
+    key: 'USHER_HA_TOKEN',
+    group: 'players',
+    def: 'unset',
+    about:
+      'A long-lived access token of a Home Assistant administrator. Usher creates its two labels when Home Assistant lacks them, sets one on an entity, and sets a device’s area, which HA allows to admins only. Sent in the websocket’s auth frame and nowhere else.',
+    secret: true,
+    measured: false,
+  },
+  {
+    key: 'USHER_PLAYERS_COMMAND_TIMEOUT_SECONDS',
+    group: 'players',
+    def: '10.0',
+    about: 'How long one websocket command may wait for Home Assistant’s answer.',
+    secret: false,
+    measured: false,
+  },
+  {
+    key: 'USHER_PLAYERS_CONFIRM_TIMEOUT_SECONDS',
+    group: 'players',
+    def: '10.0',
+    about:
+      'How long confirming a player waits for Home Assistant to report the change Usher wrote. Past it the route answers 503 players_unavailable; the write may still land.',
+    secret: false,
+    measured: false,
+  },
+  {
+    key: 'USHER_PLAYERS_BACKOFF_SECONDS',
+    group: 'players',
+    def: '5.0',
+    about:
+      'The reconnect backoff’s first ceiling, doubled for each connection that never synced and jittered.',
+    secret: false,
+    measured: false,
+  },
+  {
+    key: 'USHER_PLAYERS_MAX_BACKOFF_SECONDS',
+    group: 'players',
+    def: '300.0',
+    about: 'Where the reconnect backoff stops doubling.',
     secret: false,
     measured: false,
   },

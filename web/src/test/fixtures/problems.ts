@@ -1,5 +1,5 @@
 /**
- * RFC 9457 problem documents, one factory per member of the closed seven.
+ * RFC 9457 problem documents, one factory per member of the closed eight.
  *
  * Any test can make any route fail correctly:
  *
@@ -66,7 +66,7 @@ function build(
   return overrides.errors ? { ...doc, errors: overrides.errors } : doc
 }
 
-/* --------------------------------------------------- the seven, in §3 order */
+/* --------------------------------------------------- the eight, in §3 order */
 
 /** 404 · page scale · back + search, and **no retry**: the row does not exist. */
 export function notFound(
@@ -188,9 +188,21 @@ export function ticketInvalid(instance = '/stream/…', overrides: ProblemOverri
   )
 }
 
+/** 503 · panel scale · retry. Players are off, or Home Assistant did not answer. */
+export function playersUnavailable(instance = '/screens', overrides: ProblemOverrides = {}): ProblemDocument {
+  return build(
+    'players_unavailable',
+    503,
+    'Service Unavailable',
+    'Home Assistant is not answering',
+    instance,
+    overrides,
+  )
+}
+
 /**
- * All seven, keyed by code, for a test that wants to sweep the vocabulary
- * rather than name one member. Typed as a total map so an eighth code added to
+ * All eight, keyed by code, for a test that wants to sweep the vocabulary
+ * rather than name one member. Typed as a total map so a ninth code added to
  * the API breaks this file rather than being silently untested.
  */
 export const PROBLEMS: { readonly [C in ProblemCode]: () => ProblemDocument } = {
@@ -201,6 +213,7 @@ export const PROBLEMS: { readonly [C in ProblemCode]: () => ProblemDocument } = 
   source_unavailable: () => sourceUnavailable(),
   not_playable: () => notPlayable(),
   ticket_invalid: () => ticketInvalid(),
+  players_unavailable: () => playersUnavailable(),
 }
 
 /* --------------------------------------------------------------- handlers */
@@ -218,9 +231,9 @@ export function problemResponse(doc: ProblemDocument, headers: Record<string, st
 /**
  * Makes one route fail with one problem document.
  *
- * `retryAfter` is the seconds value for `source_unavailable`'s `Retry-After`
- * header — the one code whose recovery is a retry, and the one patterns.md §3
- * requires that retry to honour.
+ * `retryAfter` is the seconds value for the `Retry-After` header of
+ * `source_unavailable` and `players_unavailable` — the codes whose recovery is a
+ * retry, and the ones patterns.md §3 requires that retry to honour.
  *
  * `traceId` puts a `traceresponse` header on the response, which is where the
  * trace id lives — it is **not** a member of the problem document and there is

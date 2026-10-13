@@ -1,5 +1,6 @@
 """Application configuration, read from the environment."""
 
+import re
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
@@ -45,12 +46,50 @@ DEFAULT_LLM_BASE_URL = "http://localhost:8000/v1"
 # Not a credential -- a placeholder value kept only to detect and reject it.
 _PLACEHOLDER_SECRET_KEY = "change-me-to-a-long-random-string"  # noqa: S105
 _ASYNCPG_DRIVER_PREFIX = "postgresql+asyncpg://"
+# An origin's shape once lowercased; `_is_browser_host` and `_is_browser_port`
+# refuse what no `Origin` can match. The host keeps `_`, as browsers do; an
+# IPv6 literal is refused. `[0-9]`, never `\d`, which admits any Unicode digit
+# and lets `int()` read a port no browser writes.
+_BARE_ORIGIN = re.compile(r"(https?)://([a-z0-9_.-]+)(?::([0-9]{1,5}))?")
+_DEFAULT_PORT = {"http": "80", "https": "443"}
+_HIGHEST_PORT = 65535
+_OCTET = r"(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])"
+_DOTTED_QUAD = re.compile(rf"{_OCTET}(?:\.{_OCTET}){{3}}")
+# WHATWG's "ends in a number": a last label of ASCII digits, or `0x` and hex digits.
+_NUMERIC_LABEL = re.compile(r"[0-9]+|0x[0-9a-f]*")
+_CORS_ORIGINS_REFUSED = (
+    "USHER_CORS_ORIGINS takes comma-separated origins such as "
+    "http://homeassistant.local:8123: a scheme, a host and an optional port from "
+    "1 to 65535, with no path, no wildcard and nothing else"
+)
 
 _ENV_PREFIX = "USHER_"
 
 # The one sub-namespace inside `USHER_` that `Settings` deliberately does not claim, and
 # the reason it has to exist.
 COMPOSE_ONLY_PREFIX = "USHER_COMPOSE_"
+
+
+def _is_browser_host(host: str) -> bool:
+    """Whether a page can be served from `host` and a browser keeps it as written.
+
+    One trailing dot is kept, and makes a distinct origin; any other empty
+    label names no host a page is served from. A host whose last label is a
+    number, all digits or `0x` and hex digits, is IPv4 to a browser, which
+    rewrites shorthand (`127.1`), hex and leading zeros, so it must already be
+    a dotted quad of decimal octets. `h.0xzz` ends in no number and is kept.
+    """
+    labels = host.removesuffix(".").split(".")
+    if "" in labels:
+        return False
+    if _NUMERIC_LABEL.fullmatch(labels[-1]):
+        return _DOTTED_QUAD.fullmatch(host) is not None
+    return True
+
+
+def _is_browser_port(port: str | None) -> bool:
+    """No port, or 1 to 65535 with no leading zero, as a browser writes one."""
+    return port is None or (not port.startswith("0") and int(port) <= _HIGHEST_PORT)
 
 
 def _is_compose_only(key: object) -> bool:
@@ -103,6 +142,10 @@ class Settings(BaseSettings):
 
     host: str = "0.0.0.0"  # noqa: S104  intentional: default bind-all for a containerized service
     port: int = Field(default=8000, ge=1, le=65535)
+    # Browser origins allowed to call the API, comma-separated: `http://host:port`,
+    # no path and no wildcard. Each is lowercased and loses a default port, as a
+    # browser's `Origin` does. Empty adds no CORS at all.
+    cors_origins: str = ""
 
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     log_json: bool = True
@@ -340,6 +383,22 @@ class Settings(BaseSettings):
     # The provider's image host, `{base}` in the ladder's `{base}{rung}{path}`.
     image_cdn_base_url: str = Field(default="https://image.tmdb.org/t/p/", min_length=1)
 
+    # Home Assistant, the registry of the house's screens and players. Off by
+    # default: nothing connects, and `/screens` answers 503 `players_unavailable`.
+    players_enabled: bool = False
+    # HA's base URL, `http(s)://host:port`; the websocket path is the adapter's.
+    ha_url: str | None = None
+    # A long-lived access token. Label and area writes are admin-only in HA.
+    ha_token: SecretStr | None = None
+    # How long one websocket command may wait for its answer.
+    players_command_timeout_seconds: float = Field(default=10.0, gt=0)
+    # How long confirm waits for HA to report the change it wrote.
+    players_confirm_timeout_seconds: float = Field(default=10.0, gt=0)
+    # The reconnect backoff's first ceiling, doubled per connection that never synced,
+    players_backoff_seconds: float = Field(default=5.0, gt=0)
+    # and where the doubling stops.
+    players_max_backoff_seconds: float = Field(default=300.0, gt=0)
+
     # Whether this process also serves Usher Console at `/console` (see
     # `usher.api.console`).
     console_enabled: bool = True
@@ -443,8 +502,34 @@ class Settings(BaseSettings):
             )
         return self
 
+    @model_validator(mode="after")
+    def _players_need_somewhere_to_connect(self) -> "Settings":
+        """Players on with no Home Assistant, or a ceiling under its start, is refused.
+
+        No message carries a value: a URL can hold a credential.
+        """
+        if self.players_max_backoff_seconds < self.players_backoff_seconds:
+            raise ValueError(
+                "USHER_PLAYERS_MAX_BACKOFF_SECONDS must be at least USHER_PLAYERS_BACKOFF_SECONDS"
+            )
+        if not self.players_enabled:
+            return self
+        if self.ha_url is None or self.ha_token is None:
+            raise ValueError("USHER_PLAYERS_ENABLED=true needs USHER_HA_URL and USHER_HA_TOKEN")
+        scheme, _, rest = self.ha_url.partition("://")
+        if scheme not in ("http", "https") or not rest.strip("/"):
+            raise ValueError("USHER_HA_URL must be an http:// or https:// URL")
+        return self
+
     @field_validator(
-        "tmdb_api_key", "otlp_endpoint", "llm_api_key", "grafana_url", "tempo_url", mode="before"
+        "tmdb_api_key",
+        "otlp_endpoint",
+        "llm_api_key",
+        "grafana_url",
+        "tempo_url",
+        "ha_url",
+        "ha_token",
+        mode="before",
     )
     @classmethod
     def _blank_to_none(cls, value: object) -> object:
@@ -460,6 +545,33 @@ class Settings(BaseSettings):
         if isinstance(value, str) and value == "":
             return None
         return value
+
+    @field_validator("cors_origins")
+    @classmethod
+    def _origins_are_bare_origins(cls, value: str) -> str:
+        """Each entry a bare `http(s)://host[:port]`, written as a browser sends it.
+
+        `CORSMiddleware` compares the `Origin` header as a string, and a browser
+        lowercases the scheme and host and omits a scheme's default port. An
+        entry written any other way could never match, so each is lowercased
+        and loses `:80` on http or `:443` on https. Anything else a browser would
+        rewrite is refused, by `_is_browser_host` and `_is_browser_port`, so no
+        entry is accepted that could never match. Returned joined with no spaces.
+        """
+        origins = []
+        for part in value.split(","):
+            entry = part.strip().lower()
+            if not entry:
+                continue
+            match = _BARE_ORIGIN.fullmatch(entry)
+            if match is None:
+                raise ValueError(_CORS_ORIGINS_REFUSED)
+            scheme, host, port = match.groups()
+            if not _is_browser_host(host) or not _is_browser_port(port):
+                raise ValueError(_CORS_ORIGINS_REFUSED)
+            kept = "" if port in (None, _DEFAULT_PORT[scheme]) else f":{port}"
+            origins.append(f"{scheme}://{host}{kept}")
+        return ",".join(origins)
 
     @field_validator("secret_key")
     @classmethod

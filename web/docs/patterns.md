@@ -73,7 +73,7 @@ styling preference.
 
 ## 3. Errors
 
-One component, four scales (`Problem`). The API's error set is **closed at seven codes**, so recovery
+One component, four scales (`Problem`). The API's error set is **closed at eight codes**, so recovery
 is a lookup, not a judgement.
 
 | code | HTTP | Scale | Recovery |
@@ -85,6 +85,7 @@ is a lookup, not a judgement.
 | `source_unavailable` | 503 | panel | retry, honour `Retry-After` |
 | `not_playable` | 409 | panel | **no retry button.** Offer "See other copies" |
 | `ticket_invalid` | 404 | inline strip | one tap re-requests and plays |
+| `players_unavailable` | 503 | panel | retry, honour `Retry-After` — sent unless players are off or the token is refused |
 
 **Rules**
 

@@ -26,6 +26,28 @@ is **refused at startup**.
 **`USHER_CURATION_POOL_SIZE` is a setting**; size it to the context window of
 the model `USHER_LLM_BASE_URL` names.
 
+**`USHER_PLAYERS_ENABLED` defaults to `false`.** On, it needs `USHER_HA_URL` and
+`USHER_HA_TOKEN`, and is **refused at startup** without them. The token must
+belong to a Home Assistant administrator: Usher creates its two labels when HA
+lacks them, sets one of them on an entity, and sets a device's area, which HA
+allows to admins only, and a non-admin token is refused per write.
+
+**`USHER_CORS_ORIGINS` is empty by default**, and no browser page outside
+Usher's own origin may call it. A comma-separated list of bare origins
+(`http://homeassistant.local:8123`) lets pages there call every route with no
+request header beyond `Content-Type`, and read `traceresponse` and
+`Retry-After`. Each origin is lowercased and loses a default port (`:80` on
+`http`, `:443` on `https`), as a browser's `Origin` header writes it. Anything a
+browser would write differently, and so could never match, is refused at
+startup: a path, a wildcard, userinfo, a query, a port outside 1–65535 or with a
+leading zero, and an IPv4 address that is not four decimal octets (`127.1`,
+`0x7f.0.0.1`). A host with an empty label (`a..b`) is refused too: a browser
+keeps it as written, but no page is served from it. An IPv6 literal
+(`http://[::1]:8123`) is refused as well; list a hostname for that address
+instead. There is no authentication, so every listed origin can reach the admin
+routes too. A page served over `https` cannot call Usher over `http`; a panel
+in an `https` Home Assistant needs Usher behind `https` as well.
+
 🔶 **`USHER_LLM_MAX_OUTPUT_TOKENS` shares that context window, and nothing
 couples the two.** The endpoint requires `prompt_tokens + llm_max_output_tokens
 ≤ max_model_len`, so raising the output ceiling lowers the workable pool, and
@@ -120,6 +142,8 @@ the plaintext exists only in memory in the adapter that needs it.
   span attribute, and never written to a table, a cache or a file.
 - **`llm_api_key` travels in an `Authorization: Bearer` header, never in a
   URL**, and no LLM error message carries a URL or a request body.
+- **`USHER_HA_TOKEN` travels only in the Home Assistant websocket's `auth`
+  frame**, never in a URL, and is never logged or put in an error message.
 - **At `USHER_LOG_LEVEL=DEBUG` the push socket library's own handshake and
   frame logging stays off**, so the source token in its request line is never
   logged.
@@ -181,6 +205,8 @@ local state can answer.**
 | A refused availability sweep | The sweep retracts **nothing** and the run records `FAILED` with the two numbers and the ceiling; the catalog is unaffected. `usher sync` **exits non-zero** on it and names `usher sync --allow-full-retraction`, which is the operator's action *if the removal was intended*. `usher.sync.retraction.fraction{outcome="refused"}` is recorded on every finished full walk, so a flat zero means "nothing was shed". ⚠️ On a *view* of somebody else's library a refusal can be the steady state, tripped first by Usher's own partial coverage rather than the owner's deletions — check that the last full walk **completed** before reaching for the flag |
 | Source credentials rejected | `GET /admin/sources/{id}/status` reports `authenticated: false`; re-authentication is retried after a cooldown rather than on every call. Catalog unaffected |
 | Push socket drops | Backoff reconnect; delta reconcile on reconnect, **only when a completed walk gives that delta a cursor** (`USHER_PUSH_GAP_CLOSE`). The same refusal covers a push event deferred to a delta. After `USHER_PUSH_MAX_CONSECUTIVE_FAILURES` (default 5) mark `supports_push = false` and lean on the full walk. **The failure counter resets on delivery, not on connection**, and any message is delivery — a `Sessions` frame that maps to no event included — so the ceiling counts consecutive connections that delivered nothing. When the ceiling is reached the lane stops, the socket is closed, and the status route answers `push_available: null`. The lane is **not** restarted |
+| Home Assistant unreachable, or players off | `/screens` and confirm → 503 `players_unavailable`, its `detail` saying why the last connection ended, with `Retry-After` unless players are off; `/ways` answers with `screens_available: false`. Catalog, search and playback unaffected, and readiness never consults it. The connection retries with jittered backoff (`USHER_PLAYERS_BACKOFF_SECONDS` doubling to `USHER_PLAYERS_MAX_BACKOFF_SECONDS`) and re-reads every registry when it returns |
+| Home Assistant refuses `USHER_HA_TOKEN` | As unreachable, with no `Retry-After`, and `detail` says the token was refused. The connection is **not** retried: one ERROR line names `USHER_HA_TOKEN`, never its value, and Usher connects again only after a restart |
 | Gap-closing delta larger than `USHER_PUSH_GAP_MAX_ITEMS` | The item walk stops at the ceiling (default **20,000 items**; `0` is unlimited) and the run records **`FAILED`**, never `COMPLETED`. **Nothing the walk saw is lost**; the cursor does not advance. One WARNING names the source, how far it got, the setting and `usher sync --kind full`. `usher sync --kind delta` and `POST /admin/sources/{id}/sync` are unbounded. **The item lane only** |
 | TMDb 429 or down | Enrichment retries with jittered backoff. Stubs stay stubs; every other subsystem is unaffected |
 | TMDb key missing | Bootstrap Phase 3 skipped. Skeleton catalog and full-text search still work; semantic search degrades |
@@ -261,10 +287,12 @@ rather than that the handshake succeeded.
 | **Unit** | Services against port fakes. No network, ever |
 | **Integration** | Real Postgres (testcontainers). Provider payloads committed as fixtures — *shape*-recorded and value-synthetic, never a capture; never live API calls in CI |
 | **Adapter contract suite** | One parametrised test class every `SourceAdapter` must pass |
+| **Players contract suite** | `tests/contract/players_contract.py`, one test class every `Players` must pass, run on two arms: the fake, and the Home Assistant adapter over a scripted HA whose frames are held to the recorded shapes |
 | **Bootstrap** | Small committed slices in each dataset's real *format*, with every value invented. Never a real dataset file, never a full download in tests |
 | **API** | Schema-validated request/response round-trips against the OpenAPI contract |
 
-A new source adapter must pass the same contract suite the Emby adapter passes.
+A new source adapter must pass the same contract suite the Emby adapter passes,
+and a new `Players` implementation must pass the `Players` contract suite.
 
 Development follows TDD — failing test first, then implementation.
 

@@ -21,21 +21,23 @@ independently testable and swappable.
 │  ports/       SourceAdapter · MetadataProvider ·          │
 │               SearchIndex · SuggestIndex · Embedder ·     │
 │               LLMClient · TitleRepository · Row ·         │
-│               RowProvider (all ABCs)                      │
+│               RowProvider · Players (all ABCs)            │
 │  adapters/    emby/ · tmdb/ · bulk/ ·                     │
-│               search/ · embedding/ · llm/ · images/       │
+│               search/ · embedding/ · llm/ · images/ ·     │
+│               homeassistant/                              │
 │  db/          SQLAlchemy 2.0 async · Alembic · repos      │
-└────────────────────────────┬──────────────────────────────┘
-                             ▼
-                       [PostgreSQL]
-             canonical catalog · search · vectors · job queue
+└────────────────────────────┬──────────────────────┬───────┘
+                             ▼                      ▼  websocket
+                       [PostgreSQL]         [Home Assistant]
+             canonical catalog ·            registries and
+             search · vectors · job queue   players' states
 ```
 
 `adapters/` subdirectories are named for the upstream service when a port's
 implementation talks to one nameable external service (`emby/` →
-`SourceAdapter`, `tmdb/` → `MetadataProvider`) and for the capability otherwise
-(`bulk/`, `search/`, `embedding/`, `llm/`, `images/`). There is no
-`adapters/postgres/`.
+`SourceAdapter`, `tmdb/` → `MetadataProvider`, `homeassistant/` → `Players`)
+and for the capability otherwise (`bulk/`, `search/`, `embedding/`, `llm/`,
+`images/`). There is no `adapters/postgres/`.
 
 **Deployment:** `compose.yml` with `usher` + `postgres`. One stateful service.
 **There is no `meilisearch` service.** What exists is a feature gate behind the
@@ -54,7 +56,7 @@ implementation talks to one nameable external service (`emby/` →
 5. **`api/` maps domain models to response DTOs.** Wire format is versioned
    independently of internal models.
 
-Import discipline is enforced in CI by `import-linter`: **Thirteen contracts**.
+Import discipline is enforced in CI by `import-linter`: **Fifteen contracts**.
 `usher.api.routers` may not name `usher.composition`,
 `usher.services.curation` or `usher.ports.llm`; it reaches the wiring through
 `usher.api.deps`. `usher.config` imports nothing above `usher.domain`.
@@ -62,13 +64,15 @@ Import discipline is enforced in CI by `import-linter`: **Thirteen contracts**.
 ## Ports are ABCs, not Protocols
 
 All ports are `abc.ABC` with `@abstractmethod`. The shared httpx pieces live in
-`src/usher/adapters/http.py`; the client lifecycle is per-adapter.
+`src/usher/adapters/http.py` and the shared websocket transport in
+`src/usher/adapters/websocket.py`; the client lifecycle is per-adapter.
 
 ### Outbound calls and their limiters
 
-**Nine modules** under `src/usher/adapters/` dial an upstream: **eight over
-httpx**, between them **sixteen call sites**, and a ninth — `emby/push.py` —
-over `websockets`. Three of the nine are paced; six deliberately are not.
+**Ten modules** under `src/usher/adapters/` dial an upstream: **eight over
+httpx**, between them **sixteen call sites**, and two over `websockets` —
+`emby/push.py` and `homeassistant/players.py`. Three of the ten are paced;
+seven deliberately are not.
 
 | module → upstream | limiter |
 |---|---|
@@ -76,6 +80,7 @@ over `websockets`. Three of the nine are paced; six deliberately are not.
 | `api.themoviedb.org` (`tmdb/client.py`) | `_TokenBucket` at `USHER_TMDB_REQUESTS_PER_SECOND` |
 | `api.themoviedb.org` (`tmdb/provider.py`, six call sites) | the bucket above — this module holds no client of its own |
 | `/embywebsocket` (`emby/push.py`) | **none** — one socket held open; reconnects back off |
+| Home Assistant's `/api/websocket` (`homeassistant/players.py`) | **none** — one socket held open; registries read on connect and again after each registry change, at most one re-read pending; reconnects back off |
 | `image.tmdb.org` (`images/provider.py`) | **none** — each image is fetched once, then served from the cache |
 | the IMDb/TMDb/MovieLens dataset hosts (`bulk/download.py`, two call sites) | **none** — one streamed file per dataset plus one `HEAD` for its revision |
 | `query.wikidata.org` (`bulk/wikidata.py`) | **none** — a bootstrap phase run by hand, chunked and sequential |
@@ -93,6 +98,7 @@ over `websockets`. Three of the nine are paced; six deliberately are not.
 | `SuggestIndex` | `PostgresSuggestIndex` (`MeilisearchSuggestIndex` gated) |
 | `Embedder` | `FastEmbedEmbedder`, `OpenAICompatEmbedder` — **optional**, off by default; a deployment without one still has full-text and trigram |
 | `LLMClient` | `OpenAICompatibleClient` — one `POST /v1/chat/completions`; the provider abstraction is `USHER_LLM_BASE_URL` |
+| `Players` | `HomeAssistantPlayers` — one websocket to Home Assistant; reads the area, device and entity registries and the media players' states, and writes only Usher's two labels, created when HA lacks them, one of them on an entity, and a device's area — **optional**, off by default (`USHER_PLAYERS_ENABLED`) |
 | `TitleRepository` | `PostgresTitleRepository` |
 | `Row` | `BaseRow` in `services/rows/base.py` and its **ten** concrete rows |
 | `RowProvider` | `ContinueWatchingProvider`, `NextUpProvider`, `RecentlyAddedProvider`, `RediscoverProvider`, `BecauseYouWatchedProvider`, `FranchiseProvider`, `GenreAffinityProvider`, `SeasonalProvider`, `PeopleProvider`, `CuratedProvider` — **ten**, registered as `services/rows/__init__.py`'s `ROW_PROVIDERS` |
@@ -108,9 +114,10 @@ usher/
 ├── src/usher/
 │   ├── api/         routers/, deps.py, dto/, lanes.py
 │   ├── domain/      title.py, person.py, source.py, watch.py, rows.py,
-│   │                curation.py
+│   │                curation.py, house.py, recipes.py, screens.py, ways.py
 │   ├── ports/       *.py  (ABCs only), repository/
-│   ├── adapters/    emby/, tmdb/, bulk/, search/, embedding/, llm/, images/
+│   ├── adapters/    emby/, tmdb/, bulk/, search/, embedding/, llm/, images/,
+│   │                homeassistant/
 │   ├── services/    rows/ (base.py, cache.py, one module per provider),
 │   │                home.py, taste.py, derive.py, similar.py, search.py,
 │   │                matching.py, ingest.py, enrich.py, push.py, jobs.py,

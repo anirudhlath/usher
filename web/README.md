@@ -18,8 +18,8 @@ npm run e2e          # Playwright at 1440 / 834 / 390, with an axe sweep at each
 ## Where it is served, and why not at `/`
 
 At **`/console`**, by Usher's own FastAPI app — `src/usher/api/console.py`. Not
-at `/`, because the API mounts all seventeen routers with no prefix and already
-owns nineteen root path segments: a client route for a title detail page would
+at `/`, because the API mounts all nineteen routers with no prefix and already
+owns twenty root path segments: a client route for a title detail page would
 collide with `GET /titles/{title_id}`. Giving the API an `/api` prefix instead
 would be a breaking change to a public contract for the benefit of the client
 generated from it. Plex and Emby both use `/web/` for the same reason. `GET /`

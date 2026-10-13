@@ -85,7 +85,7 @@ function BackAndSearch(): ReactElement {
  * A failed query, rendered at the scale its `code` is designed at.
  *
  * The scale is **not** passed: `Problem` looks it up from the closed
- * seven-member vocabulary, so a screen cannot accidentally demote a `not_found`
+ * eight-member vocabulary, so a screen cannot accidentally demote a `not_found`
  * to a panel or promote a `source_unavailable` to a whole page. `onRetry` is
  * likewise safe to pass unconditionally — the same table suppresses the control
  * for every code where repeating the request cannot help.
@@ -129,9 +129,9 @@ export function ScreenProblem({ error, instance, onRetry }: ScreenProblemProps):
  *   says what happened.
  * · **`title` is deliberately dropped.** Usher sends the bare HTTP reason
  *   phrase ("Not Found"), and `Problem`'s own table carries the designed
- *   sentence for each of the seven. Passing the wire's value would replace
+ *   sentence for each of the eight. Passing the wire's value would replace
  *   "We couldn't find that." with "Not Found" for no gain.
- * · **A code outside the seven is not coerced into one.** It is left off, and
+ * · **A code outside the eight is not coerced into one.** It is left off, and
  *   `Problem` falls back to showing `status` and `detail`, which is all a
  *   surface can honestly claim about a vocabulary this build predates.
  */

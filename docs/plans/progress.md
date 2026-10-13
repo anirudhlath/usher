@@ -123,6 +123,17 @@ own — the owner's rulings are its plan's Decisions — and is not a milestone,
 row under any heading above would make that heading false.
 `tests/unit/test_docs_currency.py` reads it into the same union.
 
+## Send to a screen (from docs/specs/2026-10-06-send-to-screen-design.md)
+| Task | What it delivers | Plan file | Status |
+|---|---|---|---|
+| 1–10 | Slice 1, the house: the websocket transport shared with Emby, the house and its projection onto screens, recipes and the ranking, HA's recorded shapes, and `HomeAssistantPlayers` behind the `Players` port | docs/plans/2026-10-06-send-to-screen-slice-1.md | 🔨 built on feat/send-to-screen-slice-1, awaiting merge |
+| 11–16 | Slice 1, the surface: settings and wiring, the screens and ways services, `GET /screens`, confirm and `/ways` with `players_unavailable`, the console's eighth code, `USHER_CORS_ORIGINS`, and the wrap-up | docs/plans/2026-10-06-send-to-screen-slice-1.md | 🔨 built on feat/send-to-screen-slice-1, awaiting merge |
+| 17 | Slice 1's live acceptance against this house's Home Assistant: the labels created, the Apple TV confirmed, the label registry's shape recorded — owner-gated | docs/plans/2026-10-06-send-to-screen-slice-1.md | 📋 planned |
+
+**A seventh table, for the fourth's reason.** Send to a screen has its own spec
+and is not a milestone, so a row under any heading above would make that
+heading false. Slices 2–4 get plans of their own and rows here.
+
 ## M1 task groups → plan line ranges
 Plan file: `docs/plans/2026-07-28-m1-foundation.md` (2470 lines)
 

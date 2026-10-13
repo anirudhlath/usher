@@ -88,8 +88,8 @@ _PACED_THROUGH_ANOTHER_MODULE: dict[str, str] = {
 class _Decision:
     """What one call site dials, what paces it, and where the code says so.
 
-    `recorded_in` is where the *code* says so -- a module docstring for five of the six
-    declines, and `composition.image_proxy`'s own docstring for the sixth. `paced` is a
+    `recorded_in` is where the *code* says so -- a module docstring for six of the seven
+    declines, and `composition.image_proxy`'s own docstring for the seventh. `paced` is a
     field rather than a string match on `limiter`, because every decline's prose
     contains the word "limiter" too.
     """
@@ -143,7 +143,7 @@ _DECISIONS: dict[tuple[str, str], _Decision] = {
         recorded_in="src/usher/adapters/tmdb/client.py",
         paced=True,
     ),
-    # -- five of the six declines; `emby/push.py`'s is `_PUSH` below ----------
+    # -- five of the seven declines; the two websockets are `_SOCKETS` below ----
     ("usher.adapters.images.provider", "self._client.stream"): _Decision(
         upstream="image.tmdb.org (the provider's image CDN, unauthenticated)",
         limiter=(
@@ -194,9 +194,9 @@ _DECISIONS: dict[tuple[str, str], _Decision] = {
     ),
 }
 
-#: The sixth decline, and the one upstream in `adapters/` that this scan
-#: **cannot** see -- which is why it is a row here rather than in `_DECISIONS`
-#: above, and why it needs its own case below.
+#: The two declines this scan **cannot** see, because each holds a websocket rather
+#: than making an httpx call -- which is why they are rows here, keyed by module,
+#: and why they have their own case below.
 _PUSH = _Decision(
     upstream=(
         "/embywebsocket on the configured media source -- the same machine `_SOURCE` "
@@ -204,8 +204,8 @@ _PUSH = _Decision(
         "count differ here"
     ),
     limiter=(
-        "none: `usher.adapters.emby.push` dials through `websockets`, not httpx, and "
-        "holds the connection open. **A socket held open is not a request**, so a "
+        "none: `usher.adapters.emby.push` dials through `usher.adapters.websocket`, not "
+        "httpx, and holds the connection open. **A socket held open is not a request**, so a "
         "requests-per-second gate has nothing to space. What limits it is the "
         "reconnect *backoff* (`PushSupervisor._backoff`, `src/usher/services/push.py`), "
         "which is the right shape for the failure a limiter would be for here -- a "
@@ -214,19 +214,32 @@ _PUSH = _Decision(
     recorded_in="src/usher/adapters/emby/push.py",
     paced=False,
 )
-
-#: The module `_PUSH` is about, as the scan would name it if it could see it.
-_NOT_A_REQUEST = "usher.adapters.emby.push"
+_HOME_ASSISTANT = _Decision(
+    upstream="Home Assistant's /api/websocket (`USHER_HA_URL`), a machine in the household",
+    limiter=(
+        "none: `usher.adapters.homeassistant.players` holds one socket open and reads the "
+        "registries on connect and again after each registry change, at most one re-read "
+        "pending; its only writes are an owner's confirm. What limits it is the reconnect "
+        "backoff (`HomeAssistantPlayers._delay`, `USHER_PLAYERS_BACKOFF_SECONDS` doubling to "
+        "`USHER_PLAYERS_MAX_BACKOFF_SECONDS`)"
+    ),
+    recorded_in="src/usher/adapters/homeassistant/players.py",
+    paced=False,
+)
+_SOCKETS: dict[str, _Decision] = {
+    "usher.adapters.emby.push": _PUSH,
+    "usher.adapters.homeassistant.players": _HOME_ASSISTANT,
+}
 
 #: Every record this file keeps, declines included. `_DECISIONS` is keyed by
-#: call site and `_PUSH` has no call site to be keyed by, so the census and the
-#: back-pointer check both walk this instead.
-_RECORDS: tuple[_Decision, ...] = (*_DECISIONS.values(), _PUSH)
+#: call site and a socket has no call site, so the census and the back-pointer
+#: check both walk this instead.
+_RECORDS: tuple[_Decision, ...] = (*_DECISIONS.values(), *_SOCKETS.values())
 
 
 def _census() -> set[str]:
-    """The nine modules under `adapters/` that dial an upstream."""
-    return {module for module, _ in _DECISIONS} | {_NOT_A_REQUEST}
+    """The modules under `adapters/` that dial an upstream."""
+    return {module for module, _ in _DECISIONS} | set(_SOCKETS)
 
 
 def _module_name(path: pathlib.Path, root: pathlib.Path) -> str:
@@ -240,8 +253,8 @@ def _adapter_modules() -> list[tuple[str, pathlib.Path]]:
 
     Separate from `_call_sites` so a case can assert the walk *visited* a
     module that produces no call sites -- which is the whole of
-    `test_the_push_channel_is_not_a_request_and_the_scan_confirms_it`, whose
-    subject contributes nothing to the scan's output by design.
+    `test_no_socket_module_is_a_request_and_the_scan_confirms_it`, whose
+    subjects contribute nothing to the scan's output by design.
     """
     root = pathlib.Path(usher.adapters.__file__).parent
     return [(_module_name(path, root), path) for path in sorted(root.rglob("*.py"))]
@@ -359,29 +372,29 @@ def test_no_outbound_http_call_escapes_a_recorded_decision() -> None:
     )
 
 
-def test_the_push_channel_is_not_a_request_and_the_scan_confirms_it() -> None:
-    """The ninth upstream, and the control on the table's completeness.
+def test_no_socket_module_is_a_request_and_the_scan_confirms_it() -> None:
+    """The websocket upstreams, and the control on the table's completeness.
 
-    `emby/push.py` dials out and gets nothing from this scan because it is a websocket
-    rather than an httpx call -- a reason only if the scan really does find no httpx
-    call there, since a push channel that had quietly grown an HTTP poll would be an
-    unlimited request stream hidden behind the sentence that excuses the socket. An
-    absence assertion is the shape a broken scan satisfies, so both premises are
-    asserted: the `>= 9` guard, and that the walk parsed `emby/push.py` at all.
+    Each module in `_SOCKETS` dials out and gets nothing from this scan because it
+    holds a websocket -- a reason only if the scan really finds no httpx call there,
+    since a socket module that quietly grew an HTTP poll would be an unlimited request
+    stream behind the sentence that excuses the socket. Both premises are asserted:
+    the `>= 9` guard, and that the walk parsed every socket module at all.
     """
     walked = {module for module, _ in _adapter_modules()}
-    assert _NOT_A_REQUEST in walked, (
-        f"the premise: the walk never parsed {_NOT_A_REQUEST}, so its absence from the "
-        f"scan says nothing about what it dials -- {sorted(walked)}"
+    unparsed = set(_SOCKETS) - walked
+    assert not unparsed, (
+        f"the premise: the walk never parsed {sorted(unparsed)}, so their absence from the "
+        f"scan says nothing about what they dial -- {sorted(walked)}"
     )
     found = _call_sites()
     assert len(found) >= 9, (
         "the premise: the scan found nothing, and an absence assertion against a scan "
         f"that globs nothing passes exactly like one against a scan that works -- {found}"
     )
-
-    assert _NOT_A_REQUEST not in {module for module, _, _ in found}, (
-        f"{_NOT_A_REQUEST} now makes an httpx call, so `a socket held open is not a "
+    calling = set(_SOCKETS) & {module for module, _, _ in found}
+    assert not calling, (
+        f"{sorted(calling)} now makes an httpx call, so `a socket held open is not a "
         "request` no longer covers it and it needs a row in `_DECISIONS`"
     )
 
@@ -420,7 +433,7 @@ def test_the_module_census_is_the_one_the_records_quote() -> None:
     modules = _census()
     paced = {module for (module, _), record in _DECISIONS.items() if record.paced}
 
-    assert len(modules) == 9, (
+    assert len(modules) == 10, (
         "the module census moved, so `docs/prd/01-architecture.md`'s table and this file's "
         f"docstring are both now quoting a different tree: {sorted(modules)}"
     )
@@ -429,8 +442,8 @@ def test_the_module_census_is_the_one_the_records_quote() -> None:
         "in the same commit as the adapter that changed it"
     )
     assert len(paced) == 3, f"the paced modules are no longer three: {sorted(paced)}"
-    assert len(modules - paced) == 6, (
-        "the declines are no longer six, and each one has to be written beside its own "
+    assert len(modules - paced) == 7, (
+        "the declines are no longer seven, and each one has to be written beside its own "
         f"code as well as here: {sorted(modules - paced)}"
     )
     assert not paced - modules, "the premise: every paced module is in the census"
@@ -462,7 +475,7 @@ def test_every_module_that_imports_httpx_is_recorded_or_exempt() -> None:
         f"an empty set is satisfied by every exemption list there is -- {sorted(importers)}"
     )
 
-    recorded = _census() - {_NOT_A_REQUEST}
+    recorded = _census() - set(_SOCKETS)
     unrecorded = importers - recorded - set(_NO_CALL_OF_ITS_OWN)
     assert not unrecorded, (
         "a module under `adapters/` imports httpx, holds no row in `_DECISIONS` and is not "
@@ -485,8 +498,10 @@ def test_every_module_that_imports_httpx_is_recorded_or_exempt() -> None:
 _WORDS: dict[int, str] = {
     3: "three",
     6: "six",
+    7: "seven",
     8: "eight",
     9: "nine",
+    10: "ten",
     16: "sixteen",
 }
 
@@ -548,7 +563,7 @@ def test_prd_01_prints_the_census_this_table_computes() -> None:
     prose = " ".join(document.split()).lower()
     for figure in (
         f"**{_WORDS[len(census)]} modules**",
-        f"**{_WORDS[len(census) - 1]} over httpx**",
+        f"**{_WORDS[len(census) - len(_SOCKETS)]} over httpx**",
         f"**{_WORDS[len(_call_sites())]} call sites**",
         f"{_WORDS[len(paced)]} of the {_WORDS[len(census)]} are paced; "
         f"{_WORDS[len(census - paced)]} deliberately are not",

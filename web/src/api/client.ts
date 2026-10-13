@@ -4,7 +4,7 @@
  * Two things every call gets for free: an entry in the dev journal
  * (`devlog.ts`), and RFC 9457 problem documents turned into a typed error
  * instead of an unhelpful `TypeError` three frames later. Usher answers every
- * failure as `application/problem+json` over a closed seven-member `code`
+ * failure as `application/problem+json` over a closed eight-member `code`
  * vocabulary, so a client that parses it can say what actually went wrong.
  */
 
@@ -30,12 +30,12 @@ function field(source: unknown, key: string): unknown {
 
 export class UsherProblem extends Error {
   readonly status: number
-  /** The wire's `code`, verbatim, whether or not it is one of the seven. */
+  /** The wire's `code`, verbatim, whether or not it is one of the eight. */
   readonly code: string
   /**
    * The same value narrowed to Usher's closed vocabulary, or `null` when the
    * wire carried something else — a proxy's error page, a member of a future
-   * vocabulary. `RECOVERY` is keyed on this, so the seven-way lookup is total
+   * vocabulary. `RECOVERY` is keyed on this, so the eight-way lookup is total
    * and the fallback is explicit rather than a `default:` arm.
    */
   readonly knownCode: ProblemCode | null
@@ -47,14 +47,15 @@ export class UsherProblem extends Error {
    * `Retry-After` in seconds, or `null` when the header was absent or
    * unparseable. Parsed here because it lives on the *response* and is gone by
    * the time the error reaches a component — and patterns.md §3 requires the
-   * retry affordance for `source_unavailable` to honour it.
+   * retry affordance for `source_unavailable` and `players_unavailable` to
+   * honour it.
    */
   readonly retryAfter: number | null
   /**
    * The trace id of the server span that produced this failure, or `null`.
    *
    * Read from the `traceresponse` **response header**, not from the body: the
-   * problem envelope is a closed contract over six members and a seven-member
+   * problem envelope is a closed contract over six members and an eight-member
    * `code` vocabulary, `openapi-typescript` regenerates this client's types
    * from it, and a trace id is a fact about the exchange rather than about
    * what went wrong. The header is also there on a **200**, which is why

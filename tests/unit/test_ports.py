@@ -31,6 +31,7 @@ from usher.ports.images import ImageBlobStore, ImageFetcher
 from usher.ports.jobs import JobQueue
 from usher.ports.llm import LLMClient, LLMPurpose, LLMUsage
 from usher.ports.metadata import MetadataCandidate, MetadataProvider
+from usher.ports.players import Players
 from usher.ports.repository import (
     BackupRepository,
     BulkCatalogRepository,
@@ -119,6 +120,7 @@ ALL_PORTS: list[type[ABC]] = [
     Row,
     RowProvider,
     ScheduledJob,
+    Players,
 ]
 
 
@@ -248,6 +250,18 @@ def test_suggest_index_has_no_write_method() -> None:
     a decision; doing it without deleting this is a failing test.
     """
     assert SuggestIndex.__abstractmethods__ == frozenset({"suggest"})
+
+
+def test_players_declares_exactly_these_four_methods() -> None:
+    """A reading, a wait, and the only two writes Usher makes to the house.
+
+    The missing `call_service` is the plan's departure 2: slice 2 adds it with the
+    dispatcher that uses it. Adding it, or any other write, is that decision made
+    visibly; doing it without editing this case is a failing test.
+    """
+    four = frozenset({"snapshot", "set_role", "set_device_area", "wait_until"})
+    assert Players.__abstractmethods__ == four
+    assert {name for name in dir(Players) if not name.startswith("_")} == four
 
 
 def test_a_scheduled_job_declares_exactly_these_four_members() -> None:
