@@ -33,7 +33,7 @@ from usher.domain.rows import BuiltRow, DisplayHint, RowFamily
 from usher.domain.source import Source
 from usher.ports.errors import PortUnavailable
 from usher.ports.events import ClientEvent, ClientEventKind
-from usher.ports.ingest import MediaItemUpsert
+from usher.ports.ingest import MediaItemUpsert, Retraction
 from usher.ports.source import (
     SourceAdapter,
     SourceEvent,
@@ -477,6 +477,42 @@ async def test_a_confirmed_removal_retracts_and_publishes_after_its_commit(
     for external_id in removed:
         stored = await fixture.media_items.get_by_external_id(fixture.source.id, external_id)
         assert stored is not None and stored.available is False, external_id
+
+
+async def test_a_removal_publishes_in_sorted_order_whatever_order_its_targets_iterate(
+    fixture: _Fixture,
+) -> None:
+    """Sorted by title id, so the order a client hears does not follow set iteration.
+
+    Literal ids, because a `UUID`'s hash and `None`'s, unlike a `str`'s, are the same on
+    every run: the targets then iterate in one order, which the premise shows is not the
+    sorted one. The rows are stored, and the event names them, in two orders that are not
+    sorted either, so neither can stand in for the sort.
+    """
+    first, second, third = (uuid.UUID(f"00000000-0000-7000-8000-00000000000{n}") for n in "124")
+    rows = {"gone-a": second, "gone-b": third, "gone-c": first}
+    for external_id, title_id in rows.items():
+        await fixture.given_row(external_id, title_id=title_id)
+        fixture.adapter.forget(external_id)
+    retract = fixture.media_items.retract
+    returned: list[Retraction] = []
+
+    async def _spying(
+        source_id: uuid.UUID, external_ids: Collection[str], *, unseen_since: AwareDatetime
+    ) -> Retraction:
+        retraction = await retract(source_id, external_ids, unseen_since=unseen_since)
+        returned.append(retraction)
+        return retraction
+
+    fixture.media_items.retract = _spying  # type: ignore[method-assign]
+    await fixture.apply(
+        SourceEvent(kind=SourceEventKind.ITEM_REMOVED, external_ids=("gone-b", "gone-c", "gone-a"))
+    )
+    (retraction,) = returned
+    assert [target.title_id for target in retraction.targets] != [first, second, third], (
+        "the premise: the targets iterate out of sorted order"
+    )
+    assert [event.title_id for event in fixture.events.published] == [first, second, third]
 
 
 async def test_a_removal_the_source_still_serves_changes_nothing(fixture: _Fixture) -> None:

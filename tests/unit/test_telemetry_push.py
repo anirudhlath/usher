@@ -210,8 +210,9 @@ async def test_a_removal_counts_each_held_id_it_asked_about_once(
     )
     checks = _recorded(meter_reader)["usher.sync.retraction.checks"]
     assert sorted(
-        (str(labels["path"]), str(labels["outcome"]), value) for labels, value in checks
-    ) == [("push", "gone", 1.0), ("push", "served", 1.0)]
+        (str(labels["source"]), str(labels["path"]), str(labels["outcome"]), value)
+        for labels, value in checks
+    ) == [("Living Room Emby", "push", "gone", 1.0), ("Living Room Emby", "push", "served", 1.0)]
 
 
 def _instrument_names(reader: InMemoryMetricReader) -> set[str]:

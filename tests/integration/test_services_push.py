@@ -1,6 +1,6 @@
-"""`PushApplyService` against real Postgres.
+"""`PushApplyService` against real Postgres, where three cases need what no port fake can express.
 
-For the two things its port fakes structurally cannot express.
+The two removal cases repeat unit cases against the table that holds the `available` flag.
 """
 
 import uuid
