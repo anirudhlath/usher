@@ -120,7 +120,7 @@ class FakeMediaItemRepository(MediaItemRepository):
                 file_size_bytes=row.file_size_bytes,
                 runtime_seconds=row.runtime_seconds,
                 added_at=row.added_at if row.added_at is not None else existing.added_at,
-                last_seen_at=row.last_seen_at,
+                last_seen_at=max(existing.last_seen_at, row.last_seen_at),
                 available=True,
             )
             updated += 1

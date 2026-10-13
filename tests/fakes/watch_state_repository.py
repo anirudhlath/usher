@@ -90,7 +90,7 @@ class FakeWatchStateRepository(WatchStateRepository):
                 )
                 changed += 1
                 continue
-            # PRD 03's "latest updated_at wins", applied to the whole record
+            # PRD 03's "latest wins", applied to the whole record
             # rather than field by field: a stale read is stale about all of
             # it, including a reported zero.
             if stored.updated_at > entry.observed_at:

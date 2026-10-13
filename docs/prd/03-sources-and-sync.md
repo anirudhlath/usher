@@ -95,17 +95,31 @@ when the walk stops:
 
 - **Items are walked in ascending creation order**, so items added during a
   walk land at the end. Each page after the first re-reads the last 50 items of
-  the page before (half the page, if it held fewer than 100), so a deletion
-  mid-walk shifts nothing out of view unless more items than that vanish between
-  two pages; the walk then logs a WARNING naming the page, and the next full
-  reconcile covers what it missed. A resumed unit of a whole-library walk
-  re-reads only that overlap before where it stopped, and logs nothing: if more
-  items vanish ahead of it between attempts, it misses them, a full walk's sweep
-  retracts them, and the next full walk reads them again. Duplicates are
-  permitted; silent truncation is not, except across such a resume.
+  the page before (half the page, if it held fewer than 100). A page that holds
+  none of the page before's items, and does not start before the creation time
+  of the last item read, has moved — at least as many items as that overlap
+  left the listing between the two pages — and is not read: the walk logs a
+  WARNING naming both requests and asks again 100 items earlier, doubling while
+  pages keep moving, never before the start. A page at the start of the listing
+  is never judged, and neither is one after a page of a single item, which
+  re-reads nothing. A listing that is not in creation order is judged by its
+  items alone from the first page that shows two items out of that order, after
+  one WARNING. Before that page, a chunk of episodes ends at the first page
+  whose last item was created after the next chunk's first item, which on such a
+  listing can leave the rest of the chunk unread; at a page size of 1 no page
+  holds two items, so the WARNING never comes. An item whose creation time moves
+  behind the walk is read by the next full walk. A resumed unit of a
+  whole-library walk judges its first page the same way, against the creation
+  time of the last item it committed, so items that left its library between
+  attempts are not skipped either. One that stopped after a page of fewer than
+  four items reads again from 100 items earlier, or from its start, and logs
+  that WARNING whether or not its listing moved; a unit committed before that
+  time was recorded is read again from its start. Duplicates are permitted;
+  silent truncation is not.
 - **A walk fails on a listing that 10,000 pages do not finish**, and each unit
-  of a whole-library walk is a listing of its own: at the default page size
-  that is one of 9,500,050 items or more, and fewer at a smaller page (the
+  of a whole-library walk is a listing of its own: at the default page size,
+  while its listing holds still, that is one of 9,500,050 items or more, and
+  fewer at a smaller page (the
   [configuration guide](../guide/configuration.md#walking-a-large-library) has
   the table).
 - **The delta cursor is widened by one second.**
@@ -129,11 +143,18 @@ when the walk stops:
 - **A whole-library walk is split into units.** Emby plans three stages: what
   the account is watching, then each library's movies and series, then each
   library's episodes in chunks of `USHER_SYNC_UNIT_MAX_ITEMS` (default
-  **100,000**), the largest library first. A library is any view but a
-  collection or a playlist. The first stage is planned only when the played
-  and the in-progress filters each narrow the library. When the libraries hold
-  fewer items than the source, everything after the first stage is one walk of
-  the whole source, and a WARNING names both numbers.
+  **100,000**), the largest library first. Each chunk after the first is
+  bounded by the creation time of the item at its start, read once when the walk
+  is planned: a chunk starts 50 items before that item, further back if items
+  have left the library since, and reads until it passes the next chunk's first
+  item, so an item moving across a boundary is read by one chunk or both. A
+  chunk planned before chunks carried creation times starts where it was
+  planned to, however many items have left the library since, and reads to the
+  end of its library. A library is any view but a collection or a playlist. The
+  first stage is planned only when the played and the in-progress filters each
+  narrow the library. When the libraries hold fewer items than the source,
+  everything after the first stage is one walk of the whole source, and a
+  WARNING names both numbers.
 
 The item lane filters on the library edit time, the watch lane on the user-data
 change time.
@@ -213,18 +234,35 @@ until a walk whose process stopped can be resumed. `usher sync` exits non-zero,
 and a worker job is deferred: it spends none of its attempts, so it never parks,
 and tries again no sooner than 10 minutes later, when a walk whose process died
 has gone stale and is resumed.
+A walk whose task is cancelled — `usher sync` stopped with Ctrl-C, say — first
+closes its run `failed` with `cancelled: the walk was stopped before it finished`,
+as last committed, so the next walk starts at once and a whole-library walk
+resumes. A process killed outright cannot, and its run counts as live until its
+heartbeat is 10 minutes old; a close that cannot finish within 10 seconds is
+given up with a WARNING, and a second Ctrl-C abandons it.
+Every item walk moves its heartbeat with every commit and at least once a minute
+between commits, and before it starts closes its source's item walks still
+`running` whose heartbeat is 10 minutes old or missing, `failed` with
+`abandoned: its process stopped before it finished`, logging a WARNING that
+counts them; a whole-library walk closed this way is resumed all the same. A
+process paused that long rather than stopped — its machine suspended, say — is
+closed the same way; when it wakes, its next commit sets its run `running`
+again unless a walk has completed it meanwhile, and if a new walk has resumed
+that run, both walk it: each unit keeps the furthest position either committed,
+but the run's counts can be wrong.
 A run whose sweep was refused is not resumed, and neither is one that stopped
-before its units were stored or a full run from before units existed: a fresh
-walk starts, and such a run left `running` is closed `failed` with `superseded:
-a whole-library walk restarts`. A delta's claim reads only planned walks, so the
-gap-closer's walk of a source with no cursor never stands in its way.
+before its units were stored: a fresh walk starts. A walk's claim reads only
+whole-library walks, so a single walk's run — the gap-closer's, say — never
+stands in its way.
 
 **The watch lane runs as soon as the seed has committed.** When a
 whole-library walk's plan starts with what the account is watching, `usher
 sync` and a worker job run the watch lane the moment that stage has committed —
 on a resumed walk too — and again after the walk, as before. The second run
 reads back to the instant the walk began, so a state saved meanwhile for an
-item the walk had not yet stored is not skipped.
+item the walk had not yet stored is not skipped. `usher sync` takes the watch
+run after a walk as the source's last word: a failure of the run the seed
+started does not fail the command once the run after the walk completes.
 
 **A bounded walk records `FAILED`, never `COMPLETED`.**
 `USHER_PUSH_GAP_MAX_ITEMS` (default **20,000**; 0 is unlimited) stops a
@@ -243,8 +281,10 @@ than `sync_max_retract_fraction` (default `0.25`) of a source in one run,
 raising and changing nothing. `1.0` disables the ceiling. The ceiling is a
 fraction of what *Usher* holds for that source, not of the source itself.
 
-An item that reappears in a walk is available again at that moment. The sweep
-only ever sets `false`.
+An item that reappears in a walk is available again at that moment. An item
+keeps the latest instant it was seen at — a walk's start, or the moment a push
+event read it — so a walk that began earlier and reads it again never exposes
+it to a later full walk's sweep. The sweep only ever sets `false`.
 
 **A source is either a library this deployment owns or a *view* of somebody
 else's, and Usher does not model the difference.** Pointing Usher at a server
@@ -258,25 +298,29 @@ play state to an account on a server the operator does not administer.
 (full or delta). A full walk ignores every cursor. `watch_state` is a third lane
 with its own cursor.
 
-**A watch-lane delta is resumable.** A run checkpoints its position on
-`sync_runs.position`, and the next attempt reclaims that same row and resumes
-there, so a failure that outlasts a page's retries costs the page in flight
-rather than the whole walk. The run after a whole-library walk resumes a delta
-only when its cursor is at or before the instant the walk began; otherwise it
-starts afresh from that instant, and the delta, if still `running` and not
-alive (below), is closed `failed` with `superseded: a watch delta restarts from
-an earlier cursor`. **Until a source has completed one `watch_state`
-run, its watch lane has no cursor**, and its next run asks the source only for
-what the account has played or holds a resume position in — two filtered
-listings, a few requests on most libraries — and merges nothing else. That
-first walk is never resumed: an unfinished one still `running` and not alive
-(below) is closed `failed` with `superseded: a first watch walk restarts`, and
-the next run starts again. Nothing schedules it.
+**A watch-lane run is never resumed.** Each run starts afresh from the oldest of
+the lane's cursor and the cursor of each `failed` watch run of the source —
+cancelled and abandoned ones included — that no completed run covers yet, and
+never past the instant the item walk it follows began. A failed run with no
+cursor counts as older than any. A completed run covers a failed one when it
+started no earlier and either both read from a cursor, the completed run's no
+later, or neither had one. So a failure that outlasts a page's retries costs a
+re-read from that run's cursor, even after a run walking beside it from a later
+cursor, or from none, completes; a resumed `StartIndex` into a listing that has
+lost items since would skip some. **Until a source has completed one
+`watch_state` run, its watch lane has no cursor**, and a run with no cursor asks
+the source only for what the account has played or holds a resume position in —
+two filtered listings, a few requests on most libraries — and merges nothing
+else. Nothing schedules it.
 A watch run moves its heartbeat when it starts, with every batch it commits,
-and at least once a minute between commits, also while it waits on a page. One
-still `running` whose heartbeat is under 10 minutes old is alive, and a second
-watch run neither closes nor resumes it: it walks beside it in a run of its
-own, a delta from the cursor or, with no cursor yet, a first walk.
+and at least once a minute between commits, also while it waits on a page.
+Before it starts, a run closes its source's watch runs still `running` whose
+heartbeat is 10 minutes old or missing, `failed` with `abandoned: its process
+stopped before it finished`, and logs a WARNING counting them. A process paused
+that long rather than stopped is closed the same way; when it wakes, its next
+commit sets its run `running` again, and it walks on in that run. One whose
+heartbeat is younger is alive and is left alone: the new run walks beside it,
+in a run of its own.
 
 **Each batch is committed with the run's counters**, and a `sync_runs` row an
 operator can watch exists before the walk starts rather than after it finishes.
@@ -494,7 +538,10 @@ instead, with no API call, filling [05](05-search-and-similarity.md)'s
   - Reporting an item unplayed is the first call alone, with `Played` false.
 
   Both writes are idempotent, so the retry after a partial failure is safe.
-- **Conflicts:** latest `updated_at` wins.
+- **Conflicts:** latest wins: a walk's read carries the instant the walk began,
+  a push's or a backfill's the instant it finished reading, a client's write the
+  instant it was made, and whichever commits first, an older read never
+  overwrites a newer write or read.
 
 Watch state attaches to the canonical Title, so adding a second source later
 unifies it instead of fragmenting it.

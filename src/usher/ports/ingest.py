@@ -121,8 +121,9 @@ class WatchStateMerge:
     repository never reaches back into a port DTO it does not own. `0` is a
     positive claim and is written.
 
-    `observed_at` is the run's start instant and carries the conflict rule:
-    latest `updated_at` wins, so a stored row newer than this was written by
+    `observed_at` is the read's instant -- a walk's start, or when a push or a
+    backfill finished reading -- and carries the conflict rule: latest
+    `updated_at` wins, so a stored row newer than this was written by
     something that knows more recent truth and is left alone.
     """
 
@@ -144,7 +145,7 @@ class WatchStateWrite:
     The other direction from `WatchStateMerge`. No `observed_at`: that rule
     answers whether the walk saw something newer than what is stored, and a
     client write is never asked it -- `origin = api` always wins, because
-    `trg_watch_states_set_updated_at` stamps every write with the instant it
+    `trg_watch_states_set_updated_at` stamps a client write with the instant it
     happened, later by construction than any walk that started before it.
 
     No `play_count`, `last_played_at` or `runtime_seconds`: a client reports

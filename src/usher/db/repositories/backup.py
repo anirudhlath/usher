@@ -1025,6 +1025,9 @@ def _upsert_watch_state(arbiter: str) -> TextClause:
     merged columns already equal the artifact's returns nothing at all.
     """
     assignments = ", ".join(f"{column} = excluded.{column}" for column in _WATCH_STATE_MERGED)
+    # Stamped here, not by the trigger, which keeps the `updated_at` of a row whose
+    # origin is the source: a restore is a write made now, whatever its origin.
+    assignments += ", updated_at = now()"
     held = ", ".join(f"watch_states.{column}" for column in _WATCH_STATE_MERGED)
     offered = ", ".join(f"excluded.{column}" for column in _WATCH_STATE_MERGED)
     return text(

@@ -82,7 +82,7 @@ def _filler(index: int) -> SourceItem:
         height=1080,
         audio_channels=2,
         runtime_seconds=5400,
-        added_at=T0,
+        added_at=T0 + timedelta(minutes=index),
     )
 
 
@@ -90,7 +90,7 @@ class SourceAdapterContract:
     async def _seed_library(self, harness: SourceHarness) -> None:
         """Seven items, so any implementation that pages will page.
 
-        The Emby harness deliberately runs a page size of two.
+        The fake's units page in twos and the Emby harness in fours.
         """
         for index in range(7):
             await harness.given_item(_filler(index), changed_at=T0)
@@ -103,9 +103,9 @@ class SourceAdapterContract:
     # --- listing -------------------------------------------------------
 
     async def test_list_items_yields_every_seeded_item(self, harness: SourceHarness) -> None:
-        """Seven items across a page size of two is four pages.
+        """Seven items across pages of four is two pages, three with Emby's reach-back.
 
-        An adapter that stops after the first returns two.
+        An adapter that stops after the first returns four.
         """
         await self._seed_library(harness)
         seen = {item.external_id async for item in harness.adapter.list_items()}
@@ -219,7 +219,8 @@ class SourceAdapterContract:
     ) -> None:
         """`start_index=page.resume_at` continues after that page and loses nothing.
 
-        Seven items over pages of two, so the first page cannot be the whole unit.
+        The resume is handed that page's checkpoint. Seven items over pages of two or
+        four, so the first page cannot be the whole unit.
         """
         await self._seed_library(harness)
         plan = await harness.adapter.plan_walk()
@@ -229,7 +230,9 @@ class SourceAdapterContract:
         assert len(first.items) < 7, "the premise: the unit takes more than one page"
         rest: set[str] = set()
         async with aclosing(
-            harness.adapter.list_unit(unit.key, start_index=first.resume_at)
+            harness.adapter.list_unit(
+                unit.key, start_index=first.resume_at, checkpoint=first.checkpoint
+            )
         ) as pages:
             async for page in pages:
                 rest.update(item.external_id for item in page.items)

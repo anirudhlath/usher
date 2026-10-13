@@ -22,7 +22,10 @@ from usher.ports.source import (
     SourceWatchState,
 )
 
-PAGE_SIZE = 2
+# Four, the smallest page whose reach-back starts a resumed unit before the item its
+# checkpoint names. At two or three it reaches back to that item alone, a tie, which
+# counts as moved and reads the unit again from its start.
+PAGE_SIZE = 4
 
 
 async def instant_sleep(seconds: float) -> None:

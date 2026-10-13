@@ -158,6 +158,7 @@ def _service(session: AsyncSession, *, batch_size: int) -> ReconcileService:
         runs=PostgresSyncRunRepository(session),
         events=NullEventPublisher(),
         commit=session.commit,
+        rollback=session.rollback,
         batch_size=batch_size,
     )
 

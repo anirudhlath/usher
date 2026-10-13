@@ -29,9 +29,10 @@ class SyncRunRepository(ABC):
     cleanly.
 
     `latest_incomplete_run` is the one affordance that reads against that
-    grain: it hands the watch lane, or a whole-library walk, back its own
-    unfinished row, which the next attempt continues in place -- the watch
-    lane's only when its walk is a delta. `live_walk` reads it for a report.
+    grain: it hands a whole-library walk back its own unfinished row, which the
+    next attempt continues in place. `live_walk` reads it for a report. A watch
+    run is never continued: the next one closes it if its process stopped, and
+    takes only its cursor (`uncovered_failed_cursors`).
     """
 
     @abstractmethod
@@ -46,6 +47,16 @@ class SyncRunRepository(ABC):
         """Update an existing run.
 
         An unknown id raises `RepositoryNotFound`.
+        """
+
+    @abstractmethod
+    async def close_abandoned(
+        self, source_id: uuid.UUID, kinds: Sequence[SyncRunKind], *, now: datetime, error: str
+    ) -> int:
+        """Close this source's runs of `kinds` that are `running` and not live at `now`.
+
+        Each is closed `failed` with `error`. Returns how many. A live run is another
+        process's, and is never touched.
         """
 
     @abstractmethod
@@ -69,6 +80,21 @@ class SyncRunRepository(ABC):
         """
 
     @abstractmethod
+    async def uncovered_failed_cursors(
+        self, source_id: uuid.UUID, kind: SyncRunKind
+    ) -> set[AwareDatetime | None]:
+        """The `cursor_at` of each `failed` run of this kind that no completed run covers.
+
+        A completed run of the kind covers a failed one when it started at or after it and
+        read the same way: both with no `cursor_at`, or both with one and the completed
+        run's at or before the failed run's. A run with no cursor lists only played and
+        in-progress items, so it never applies an un-play, and a run with one never re-lists
+        an older played state, so neither covers the other. `None` is kept. The watch lane
+        reads from the oldest of these, so a failed run's window is read again until a run
+        that read it whole completes.
+        """
+
+    @abstractmethod
     async def latest_run(self, source_id: uuid.UUID, kind: SyncRunKind) -> SyncRun | None:
         """The newest run of this kind, whatever its status; `None` if there is none.
 
@@ -77,11 +103,11 @@ class SyncRunRepository(ABC):
 
     @abstractmethod
     async def latest_planned_run(self, source_id: uuid.UUID, kind: SyncRunKind) -> SyncRun | None:
-        """The newest run of this kind that carries a heartbeat, whatever its status.
+        """The newest planned run of this kind, whatever its status.
 
-        `None` if none does. Newest by `started_at`, then by `id`, as `latest_run`. On
-        the item lanes only a planned walk carries a heartbeat, so a single walk's row
-        is never this read's answer.
+        `None` if none is. Newest by `started_at`, then by `id`, as `latest_run`. Only a
+        whole-library walk is planned, so a single walk's row is never this read's
+        answer, however new.
         """
 
     async def latest_incomplete_run(
@@ -99,9 +125,9 @@ class SyncRunRepository(ABC):
         once a later run has completed, so every later walk resumes from a
         position that run already passed.
 
-        The watch lane's, and a whole-library walk's: a cursored delta restarts
-        from its cursor, but a walk of the whole library has to cost a page
-        rather than the run when it fails.
+        A whole-library walk's: a cursored delta, the watch lane's included,
+        restarts from its cursor, but a walk of the whole library has to cost a
+        page rather than the run when it fails.
         """
         read = self.latest_planned_run if planned else self.latest_run
         newest = await read(source_id, kind)

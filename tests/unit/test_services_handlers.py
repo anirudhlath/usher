@@ -515,7 +515,7 @@ async def test_the_watch_history_handler_backfills_the_item_its_key_names(
     )
     watch_states = FakeWatchStateRepository()
     service = WatchStateSyncService(
-        media_items, watch_states, FakeSyncRunRepository(), FakeJobQueue(), _noop
+        media_items, watch_states, FakeSyncRunRepository(), FakeJobQueue(), _noop, rollback=_noop
     )
 
     await watch_history_handler(service, _resolver(binding), user_id=_USER)(
@@ -535,6 +535,7 @@ async def test_the_watch_history_handler_does_nothing_for_an_unowned_key() -> No
         FakeSyncRunRepository(),
         FakeJobQueue(),
         _noop,
+        rollback=_noop,
     )
     await watch_history_handler(service, _resolver(None, seen), user_id=_USER)(
         Job(kind=JobKind.WATCH_HISTORY, key="emby-1")

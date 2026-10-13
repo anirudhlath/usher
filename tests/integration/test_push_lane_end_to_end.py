@@ -103,6 +103,7 @@ def applier(
             runs=PostgresSyncRunRepository(session),
             queue=queue,
             commit=session.flush,
+            rollback=session.rollback,
         ),
         bus,
         session.flush,

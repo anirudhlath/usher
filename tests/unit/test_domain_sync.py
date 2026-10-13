@@ -155,6 +155,11 @@ def test_a_run_has_no_heartbeat_until_a_writer_gives_it_one() -> None:
     assert SyncRun(source_id=SOURCE_ID, kind=SyncRunKind.FULL).heartbeat_at is None
 
 
+def test_a_run_is_no_whole_library_walk_until_its_walk_says_so() -> None:
+    """The watch lane never says, so its runs stay out of every planned read."""
+    assert SyncRun(source_id=SOURCE_ID, kind=SyncRunKind.FULL).planned is False
+
+
 # -- where a whole-library walk's plan stands --------------------------------
 
 _RUN = new_id()

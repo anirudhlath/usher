@@ -125,11 +125,12 @@ delta, permanently.
 runs `watch.sync(...)`** (#41): a source with completed delta runs and no
 completed `watch_state` run passes it and runs the watch lane's first walk, two
 filtered listings (`FIRST_WALK_FILTERS`), and **neither log line names it**.
-An unfinished first walk is superseded, never resumed
-(`watch_sync.SUPERSEDED_ERROR`): `save` only raises `position`, so its row
-cannot be reset. A `running` watch run whose heartbeat is under `STALE_AFTER`
-old is alive, first walk or delta, and is left alone: the next run walks beside
-it.
+No watch run is resumed: each starts at `StartIndex` 0 from the oldest of the
+lane's cursor and `uncovered_failed_cursors` — a failed run's cursor, never its
+position, kept until a completed run that started no earlier read from no later,
+both with a cursor or neither — after closing its source's dead watch runs
+`failed` (`ABANDONED_ERROR`), so theirs count. A `running` one whose heartbeat
+is under `STALE_AFTER` old is alive and left alone: the next walks beside it.
 
 ## The match ladder
 
@@ -170,9 +171,12 @@ job is enqueued at `BACKFILL` for that remote search.
   `RequestRefused`, the 4xx `EmbySession.ok` still reports as `PortUnavailable`.
   A test that fails a walk on purpose injects `sleep=instant_sleep`
   (`tests/fakes/emby_harness.py`), or it sits through those minutes as a hang.
-- **A page's reach-back is clamped to half the page before it**, and a walk ends
-  on a short page that brought nothing new (`paging.OffsetWindow`): a fixed
-  `PAGE_OVERLAP` stalls on pages of 50 or fewer, and deletions strand the total.
+- **A page's reach-back is clamped to half the page before it**, a walk ends on
+  a short page that brought nothing new, and **a page that moved is never read**
+  — it shares no id with the page before and does not start before the anchor's
+  `DateCreated` (`paging.OffsetWindow`): the walk asks again `BACKUP` earlier,
+  doubling. A fixed `PAGE_OVERLAP` stalls on pages of 50 or fewer, deletions
+  strand the total, and a tie on the anchor counts as moved.
 - **A service that checkpoints per batch must not evolve its own stale copy in
   the failure handler** — `reconcile`'s binding is the pre-walk value, so
   `run.evolve(status=FAILED)` writes `items_seen = 0` over a real checkpoint.
@@ -192,12 +196,13 @@ job is enqueued at `BACKFILL` for that remote search.
   pair with the episode winning: passing both raises `PortDataMalformed` and
   aborts a batch of thousands. `resolve_external_ids`' title branch needs
   `episode_id IS NULL`.
-- **A history backfill must carry its own fresh `observed_at`, and both test
-  layers are blind to why.** The trigger stamps the *write* instant, so a backfill
-  carrying the walk's instant is refused by the row it exists to repair; the fake
-  accepts what Postgres refuses and `now()` is frozen per transaction.
-  **Skipping `resolve_seasons`/`resolve_episodes`** is the same shape: unit cases
-  stay green — a dict has no foreign keys — and the FK fails on walk two.
+- **A history backfill must carry its own fresh `observed_at`.** It is a newer
+  read than the walk, and a row a client wrote since the walk began refuses the
+  walk's older instant. Only the integration layer is blind to it: a test
+  transaction's frozen `now()` stamps that write before the walk began, so stage
+  it with a `clock_timestamp()` seed. **Skipping `resolve_seasons`/
+  `resolve_episodes`** is the mirror case: unit cases stay green — a dict has no
+  foreign keys — and the FK fails on walk two.
 
 ## Scale
 

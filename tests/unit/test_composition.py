@@ -3441,6 +3441,22 @@ async def test_the_walk_settings_reach_the_reconciler_and_the_adapter() -> None:
         await engine.dispose()
 
 
+async def test_both_sync_lanes_commit_and_roll_back_through_the_pipelines_session() -> None:
+    """A cancelled walk's close rolls back the session its walk wrote through.
+
+    Commit and rollback are one type, so a swapped pair type-checks.
+    """
+    engine = create_async_engine("postgresql+asyncpg://usher:usher@127.0.0.1:1/usher")
+    try:
+        session = AsyncSession(engine)
+        pipeline = build_pipeline(session, _settings())
+        wired = (session.commit, session.rollback)
+        assert (pipeline.reconcile._commit, pipeline.reconcile._rollback) == wired
+        assert (pipeline.watch._commit, pipeline.watch._rollback) == wired
+    finally:
+        await engine.dispose()
+
+
 def _source_of(kind: SourceKind, name: str, ref: str) -> Source:
     return Source(
         id=new_id(),
