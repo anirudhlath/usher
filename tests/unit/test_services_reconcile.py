@@ -424,7 +424,7 @@ async def test_a_refused_sweep_keeps_the_upserts_the_walk_made(
 async def test_a_sweep_retracts_what_the_source_confirms_gone_and_stamps_what_it_serves(
     fixture: _Fixture,
 ) -> None:
-    """m9 is gone. m8 is still served by id but in no listing, as an alternate version is."""
+    """m9 is gone. m8 is still served by id but in no full listing, as an alternate version is."""
     for index in range(10):
         fixture.adapter.seed(_item(f"m{index}"), T0)
     await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)

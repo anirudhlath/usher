@@ -852,7 +852,7 @@ class ReconcileService:
         The rows the walk did not list are the candidates, and the ceiling is applied to
         them before the source is asked anything. Of the rest, those the source no longer
         serves are retracted, and those it still serves -- alternate versions, which
-        Emby's listing never shows -- are stamped as seen at the run's `started_at`. Both
+        Emby's full listing never shows -- are stamped as seen at the run's `started_at`. Both
         writes commit with the run's completing row. A source that cannot answer raises
         before either, so nothing changes and the run fails resumable.
 

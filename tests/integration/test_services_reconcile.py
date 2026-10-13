@@ -163,7 +163,8 @@ class _Adapter:
         # next delta re-requests what the truncated one never reached" is a
         # claim about.
         self.since_calls: list[datetime | None] = []
-        # Served by id but in no listing, as Emby serves an alternate version.
+        # Served by id but in no item listing, as Emby's full listing leaves out an
+        # alternate version.
         self.unlisted: set[str] = set()
 
     def list_items(self, since: datetime | None = None) -> AsyncGenerator[SourceItem]:

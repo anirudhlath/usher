@@ -116,7 +116,8 @@ class FakeSourceAdapter(SourceAdapter):
         #: Every `confirm_gone` question, in order, an empty one included.
         self.confirm_calls: list[frozenset[str]] = []
         self._confirm_fails = False
-        # Served by id but in no listing: what Emby does with an alternate version.
+        # Served by id but in no item listing, as Emby's full listing leaves out an
+        # alternate version.
         self._unlisted: set[str] = set()
 
     # -- harness-facing state ------------------------------------------
@@ -167,7 +168,7 @@ class FakeSourceAdapter(SourceAdapter):
 
         Emby's full listing shows one version of a film while a read by id serves each,
         so a full walk never lists an alternate it can still read. A later `place` does
-        not list it again. `watch_state` still lists it. A delta does not, though Emby's
+        not list it again. `watch_state` still lists it. An item delta does not, though Emby's
         delta listing returns alternates too.
         """
         self._unlisted.add(external_id)
