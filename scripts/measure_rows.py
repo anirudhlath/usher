@@ -68,11 +68,13 @@ class _Sizes:
 
 def _sizes(scale: int) -> _Sizes:
     factor = scale / 1_126_674
+    # No population goes below zero: argparse takes a negative --scale, and `generate_series`
+    # yields no rows for a negative bound, so zero is what the seed would insert.
     return _Sizes(
-        movies=int(94_448 * factor),
-        series=int(32_409 * factor),
+        movies=max(0, int(94_448 * factor)),
+        series=max(0, int(32_409 * factor)),
         regular=max(1, int(30 * factor)),
-        pathological=int(20_000 * factor),
+        pathological=max(0, int(20_000 * factor)),
     )
 
 
