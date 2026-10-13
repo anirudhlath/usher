@@ -111,7 +111,8 @@ class MediaItemRow(Base):
             "source_id",
             postgresql_where=text("title_id IS NULL"),
         ),
-        # `list_unseen`'s id read, and nothing else.
+        # Both of `list_unseen`'s reads: the id read seeks on all three columns, and the
+        # count is answered from the index alone.
         Index("ix_media_items_sweep", "source_id", "available", "last_seen_at"),
         # The Recently Added row.
         Index(

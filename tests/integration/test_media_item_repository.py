@@ -149,7 +149,7 @@ class TestPostgresMediaItemRepository(
     """Every case in `MediaItemRepositoryContract`, against real Postgres.
 
     The fixtures come from module scope rather than being redefined here, so
-    the four Postgres-only tests below share them.
+    the Postgres-only tests below share them.
     """
 
 
@@ -342,12 +342,12 @@ async def test_the_three_keyed_methods_cost_one_statement_each_and_none_for_noth
     among = await repository.available_among(source_id, ["m-0", "m-1"])
     among_statements = len(statement_counter)
     statement_counter.clear()
-    retraction = await repository.retract(source_id, ["m-0"], unseen_since=RUN_AT)
+    retraction = await repository.retract(source_id, ["m-0", "m-2"], unseen_since=RUN_AT)
     retract_statements = len(statement_counter)
     statement_counter.clear()
-    moved = await repository.mark_seen(source_id, ["m-1"], seen_at=RUN_AT)
+    moved = await repository.mark_seen(source_id, ["m-1", "m-3"], seen_at=RUN_AT)
     mark_statements = len(statement_counter)
-    assert (among, retraction.retracted, moved) == (frozenset({"m-0", "m-1"}), 1, 1), (
+    assert (among, retraction.retracted, moved) == (frozenset({"m-0", "m-1"}), 2, 2), (
         "the premise: each call did its work"
     )
 

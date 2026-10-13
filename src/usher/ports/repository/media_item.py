@@ -251,7 +251,4 @@ class MediaItemRepository(ABC):
 
     @abstractmethod
     async def count_for_source(self, source_id: uuid.UUID) -> int:
-        """How many items this source has, available or not.
-
-        The sweep's denominator, and the CLI's report.
-        """
+        """How many items this source has, available or not."""

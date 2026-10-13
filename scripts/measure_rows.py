@@ -3,7 +3,7 @@
 import argparse
 import asyncio
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -216,6 +216,14 @@ async def _seed(session: AsyncSession, scale: int) -> None:
 async def _statements(session: AsyncSession) -> Sequence[tuple[str, str, dict[str, object]]]:
     user = (await session.execute(text("SELECT id FROM users LIMIT 1"))).scalar_one()
     source = (await session.execute(text("SELECT id FROM sources LIMIT 1"))).scalar_one()
+    # The seed stamps every row with one instant and 200 of them three days earlier, so a
+    # day before the newest stamp splits the two however long ago the seed ran.
+    seeded_at = (
+        await session.execute(
+            text("SELECT max(last_seen_at) FROM media_items WHERE source_id = :source_id"),
+            {"source_id": source},
+        )
+    ).scalar_one()
     probed = [
         row[0]
         for row in (
@@ -244,7 +252,7 @@ async def _statements(session: AsyncSession) -> Sequence[tuple[str, str, dict[st
         (
             "list_unseen's id read",
             _UNSEEN,
-            {"source_id": source, "seen_since": datetime(2026, 8, 4, tzinfo=UTC)},
+            {"source_id": source, "seen_since": seeded_at - timedelta(days=1)},
         ),
         ("list_needing_history", _NEEDING_HISTORY, {"limit": 500}),
     )
