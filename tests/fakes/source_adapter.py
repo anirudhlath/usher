@@ -158,7 +158,9 @@ class FakeSourceAdapter(SourceAdapter):
         self._changed_at.pop(external_id, None)
         self._unlisted.discard(external_id)
         # Out of every library too, or seeding the id again would silently re-place it.
-        self._unplace(external_id)
+        for placed in self._libraries.values():
+            if external_id in placed:
+                placed.remove(external_id)
 
     def unlist(self, external_id: str) -> None:
         """Keep serving `external_id` by id, but leave it out of every listing.
@@ -168,12 +170,6 @@ class FakeSourceAdapter(SourceAdapter):
         list it again.
         """
         self._unlisted.add(external_id)
-        self._unplace(external_id)
-
-    def _unplace(self, external_id: str) -> None:
-        for placed in self._libraries.values():
-            if external_id in placed:
-                placed.remove(external_id)
 
     def recorded(self, external_id: str) -> tuple[int, bool] | None:
         state = self._states.get(external_id)
