@@ -224,6 +224,11 @@ async def _statements(session: AsyncSession) -> Sequence[tuple[str, str, dict[st
             {"source_id": source},
         )
     ).scalar_one()
+    if seeded_at is None:
+        raise SystemExit(
+            "the measured source holds no media items, so list_unseen's id read would plan "
+            "against nothing: run the seed first, which this script does on an empty database"
+        )
     probed = [
         row[0]
         for row in (
