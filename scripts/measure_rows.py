@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import text
@@ -35,6 +36,52 @@ _INDEXES = {
 }
 
 _NARROW = "CREATE INDEX ix_watch_states_user_played ON watch_states (user_id, played)"
+
+# How many rows the seed stamps stale. A seed must hold more, or none is left fresh and
+# the unseen read selects nothing.
+_STALE_ROWS = 200
+
+
+@dataclass(frozen=True, slots=True)
+class _Sizes:
+    """One seed's populations, scaled linearly off one real library's proportions."""
+
+    movies: int
+    series: int
+    regular: int
+    pathological: int
+
+    @property
+    def episodes(self) -> int:
+        """How many episodes the seed inserts.
+
+        Series 0 carries the pathological run and every other series `regular` episodes, so
+        with no series there are none.
+        """
+        return self.pathological + self.regular * (self.series - 1) if self.series else 0
+
+    @property
+    def media_items(self) -> int:
+        """One per title, movies and series alike, and one per episode."""
+        return self.movies + self.series + self.episodes
+
+
+def _sizes(scale: int) -> _Sizes:
+    factor = scale / 1_126_674
+    return _Sizes(
+        movies=int(94_448 * factor),
+        series=int(32_409 * factor),
+        regular=max(1, int(30 * factor)),
+        pathological=int(20_000 * factor),
+    )
+
+
+def _smallest_scale() -> int:
+    """The smallest `--scale` whose seed leaves a row fresh beside the stale ones."""
+    scale = 1
+    while _sizes(scale).media_items <= _STALE_ROWS:
+        scale += 1
+    return scale
 
 
 async def _exists(session: AsyncSession, name: str) -> bool:
@@ -78,15 +125,8 @@ async def _seed(session: AsyncSession, scale: int) -> None:
     rows got there. Scaled linearly off `scale`, whose default is one real
     library's item count.
     """
-    factor = scale / 1_126_674
-    movies = int(94_448 * factor)
-    series = int(32_409 * factor)
-    regular = max(1, int(30 * factor))
-    pathological = int(20_000 * factor)
-    print(
-        f"seeding {movies} movies, {series} series, "
-        f"~{pathological + regular * (series - 1)} episodes"
-    )
+    sizes = _sizes(scale)
+    print(f"seeding {sizes.movies} movies, {sizes.series} series, {sizes.episodes} episodes")
     await session.execute(text("SELECT setseed(0.20260804)"))
     await session.execute(
         text(
@@ -108,7 +148,7 @@ async def _seed(session: AsyncSession, scale: int) -> None:
             "'A synthetic overview for row ' || n "
             "FROM generate_series(1, :movies) AS n"
         ),
-        {"movies": movies},
+        {"movies": sizes.movies},
     )
     await session.execute(
         text("CREATE TABLE measure_series (idx integer primary key, id uuid not null)")
@@ -118,7 +158,7 @@ async def _seed(session: AsyncSession, scale: int) -> None:
             "INSERT INTO measure_series (idx, id) "
             "SELECT n, gen_random_uuid() FROM generate_series(0, :last) AS n"
         ),
-        {"last": series - 1},
+        {"last": sizes.series - 1},
     )
     await session.execute(
         text(
@@ -142,7 +182,7 @@ async def _seed(session: AsyncSession, scale: int) -> None:
             "INSERT INTO measure_ep SELECT 0, ((n - 1) / 100) + 1, ((n - 1) % 100) + 1 "
             "FROM generate_series(1, :count) AS n"
         ),
-        {"count": pathological},
+        {"count": sizes.pathological},
     )
     await session.execute(
         text(
@@ -150,7 +190,7 @@ async def _seed(session: AsyncSession, scale: int) -> None:
             "SELECT s.idx, ((e - 1) / 10) + 1, ((e - 1) % 10) + 1 FROM measure_series s "
             "CROSS JOIN LATERAL generate_series(1, :regular) AS e WHERE s.idx > 0"
         ),
-        {"regular": regular},
+        {"regular": sizes.regular},
     )
     await session.execute(
         text(
@@ -200,14 +240,15 @@ async def _seed(session: AsyncSession, scale: int) -> None:
                 f"random() AS c FROM {source}) d"  # `source`/`target` are module literals
             )
         )
-    # 200 stale rows, which is the nightly shape `f1a7d3c9e824`'s sweep index
+    # `_STALE_ROWS` stale rows, which is the nightly shape `f1a7d3c9e824`'s sweep index
     # exists for. Without them the sweep's unseen read plans against nothing and this
     # script's whole reason to run is vacuous.
     await session.execute(
         text(
             "UPDATE media_items SET last_seen_at = now() - interval '3 days' "
-            "WHERE id IN (SELECT id FROM media_items LIMIT 200)"
-        )
+            "WHERE id IN (SELECT id FROM media_items LIMIT :stale)"
+        ),
+        {"stale": _STALE_ROWS},
     )
     await session.commit()
     await session.execute(text("ANALYZE"))
@@ -216,8 +257,8 @@ async def _seed(session: AsyncSession, scale: int) -> None:
 async def _statements(session: AsyncSession) -> Sequence[tuple[str, str, dict[str, object]]]:
     user = (await session.execute(text("SELECT id FROM users LIMIT 1"))).scalar_one()
     source = (await session.execute(text("SELECT id FROM sources LIMIT 1"))).scalar_one()
-    # The seed stamps every row with one instant and 200 of them three days earlier, so a
-    # day before the newest stamp splits the two however long ago the seed ran.
+    # The seed stamps every row with one instant and `_STALE_ROWS` of them three days
+    # earlier, so a day before the newest stamp splits the two however long ago it ran.
     seeded_at = (
         await session.execute(
             text("SELECT max(last_seen_at) FROM media_items WHERE source_id = :source_id"),
@@ -264,6 +305,12 @@ async def _statements(session: AsyncSession) -> Sequence[tuple[str, str, dict[st
 
 
 async def measure(scale: int) -> None:
+    planned = _sizes(scale).media_items
+    if planned <= _STALE_ROWS:
+        raise SystemExit(
+            f"--scale {scale} seeds {planned} media items and the stale stamp takes "
+            f"{_STALE_ROWS}, so none would be fresh: use --scale {_smallest_scale()} or more"
+        )
     settings = get_settings()
     engine = build_engine(settings.database_url.get_secret_value())
     factory = build_session_factory(engine)
