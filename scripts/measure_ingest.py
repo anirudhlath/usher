@@ -338,10 +338,10 @@ async def scale(rows: int) -> None:
 
             print("\n2. the availability sweep")
             captured, stop = _capture(
-                lambda one: "count(*) FILTER" in one or "SET available = false" in one
+                lambda one: "count(*) FILTER" in one or "SELECT external_id" in one
             )
             try:
-                await media_items.mark_unseen_unavailable(
+                await media_items.list_unseen(
                     source.id, seen_since=datetime.now(UTC), max_retract_fraction=1.0
                 )
             finally:

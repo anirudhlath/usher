@@ -608,9 +608,7 @@ async def test_an_unavailable_copy_is_still_told(household: _Household) -> None:
     title_id = uuid.uuid4()
     source_id = uuid.uuid4()
     await household.add_copy(title_id=title_id, external_id="gone-42", source_id=source_id)
-    await household.media_items.mark_unseen_unavailable(
-        source_id, seen_since=datetime.now(UTC), max_retract_fraction=1.0
-    )
+    await household.media_items.retract(source_id, ["gone-42"], unseen_since=datetime.now(UTC))
     copies: Sequence[MediaItem] = await household.media_items.list_for_title(title_id)
     assert [copy.available for copy in copies] == [False]
 

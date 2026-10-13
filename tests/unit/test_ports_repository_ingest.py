@@ -19,7 +19,6 @@ def test_media_item_repository_surface() -> None:
     assert MediaItemRepository.__abstractmethods__ == frozenset(
         {
             "upsert_many",
-            "mark_unseen_unavailable",
             "list_unseen",
             "available_among",
             "retract",

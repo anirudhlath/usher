@@ -161,24 +161,6 @@ class WatchStateWrite:
 
 
 @dataclass(frozen=True, slots=True)
-class SweepResult:
-    """What an availability sweep actually changed, and out of how many.
-
-    `total` is the source's whole item count, available or not, which the
-    sweep already counted for its own guard. A bare "3 retracted" is not an
-    operational event: "3 of 4" and "3 of ninety thousand" want different
-    responses, and `sync_runs.items_retracted` stores only the numerator.
-
-    No `restored` count. Restoring an item that came back is `upsert_many`'s
-    doing -- appearing in a walk is the evidence of availability -- and the
-    sweep only ever sets `false`, so the field could only report zero.
-    """
-
-    retracted: int
-    total: int
-
-
-@dataclass(frozen=True, slots=True)
 class UnseenRows:
     """A source's rows a walk did not list, and how many rows the source has."""
 

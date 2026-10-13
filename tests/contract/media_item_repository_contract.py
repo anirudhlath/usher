@@ -144,10 +144,10 @@ class MediaItemRepositoryContract:
         assert stored is not None
         assert stored.last_seen_at == RUN_AT
         assert stored.container == "mp4", "the older sighting's read was refused with its stamp"
-        swept = await repository.mark_unseen_unavailable(
+        unseen = await repository.list_unseen(
             source_id, seen_since=RUN_AT, max_retract_fraction=1.0
         )
-        assert swept.retracted == 0
+        assert unseen.external_ids == frozenset()
 
     async def test_upsert_many_never_downgrades_a_matched_item_to_unmatched(
         self, repository: MediaItemRepository, source_id: uuid.UUID, title_id: uuid.UUID
@@ -410,152 +410,6 @@ class MediaItemRepositoryContract:
         assert await repository.mark_seen(source_id, [], seen_at=RUN_AT) == 0
         stored = await repository.get_by_external_id(source_id, "held")
         assert stored is not None and stored.last_seen_at == EARLIER
-
-    async def test_marking_unseen_unavailable_spares_items_seen_during_the_run(
-        self, repository: MediaItemRepository, source_id: uuid.UUID
-    ) -> None:
-        await repository.upsert_many(
-            [
-                item(source_id, "seen", last_seen_at=RUN_AT),
-                item(source_id, "gone", last_seen_at=EARLIER),
-            ]
-        )
-        result = await repository.mark_unseen_unavailable(
-            source_id, seen_since=RUN_AT, max_retract_fraction=1.0
-        )
-        assert (result.retracted, result.total) == (1, 2)
-        seen = await repository.get_by_external_id(source_id, "seen")
-        gone = await repository.get_by_external_id(source_id, "gone")
-        assert seen is not None and seen.available is True
-        assert gone is not None and gone.available is False
-
-    async def test_marking_unseen_unavailable_spares_another_source(
-        self, repository: MediaItemRepository, source_id: uuid.UUID, other_source_id: uuid.UUID
-    ) -> None:
-        """A household with two Embys syncs them independently.
-
-        A sweep keyed on `last_seen_at` alone retracts the other one's whole
-        library every night.
-        """
-        await repository.upsert_many([item(other_source_id, "theirs", last_seen_at=EARLIER)])
-        await repository.mark_unseen_unavailable(
-            source_id, seen_since=RUN_AT, max_retract_fraction=1.0
-        )
-        theirs = await repository.get_by_external_id(other_source_id, "theirs")
-        assert theirs is not None and theirs.available is True
-
-    async def test_marking_unseen_unavailable_restores_an_item_that_came_back(
-        self, repository: MediaItemRepository, source_id: uuid.UUID
-    ) -> None:
-        """PRD 02: items that vanish get `available = false`.
-
-        Items that come back must come back -- a sweep that only ever sets `false`
-        leaves a re-added file invisible until someone notices.
-        """
-        await repository.upsert_many([item(source_id, "movie-1", last_seen_at=EARLIER)])
-        await repository.mark_unseen_unavailable(
-            source_id, seen_since=RUN_AT, max_retract_fraction=1.0
-        )
-        await repository.upsert_many([item(source_id, "movie-1", last_seen_at=RUN_AT)])
-        stored = await repository.get_by_external_id(source_id, "movie-1")
-        assert stored is not None
-        assert stored.available is True
-
-    async def test_marking_unseen_unavailable_refuses_to_retract_a_whole_library(
-        self, repository: MediaItemRepository, source_id: uuid.UUID
-    ) -> None:
-        """A walk that *completes* and returns almost nothing is not a deletion.
-
-        An unmounted drive, or a library removed by accident, looks the same to
-        the adapter as a mass deletion, and Usher cannot undo one -- so the
-        sweep declines and changes nothing.
-        """
-        await repository.upsert_many(
-            [item(source_id, f"movie-{index}", last_seen_at=EARLIER) for index in range(10)]
-        )
-        with pytest.raises(AvailabilitySweepRefused) as caught:
-            await repository.mark_unseen_unavailable(
-                source_id, seen_since=RUN_AT, max_retract_fraction=0.25
-            )
-        assert caught.value.would_retract == 10
-        assert caught.value.total == 10
-        still = await repository.get_by_external_id(source_id, "movie-0")
-        assert still is not None
-        assert still.available is True, "a refused sweep must change nothing at all"
-
-    async def test_marking_unseen_unavailable_stays_under_its_ceiling(
-        self, repository: MediaItemRepository, source_id: uuid.UUID
-    ) -> None:
-        """The other side of the guard, so "raises unconditionally" cannot pass.
-
-        Two of ten stale against a 0.25 ceiling is within budget.
-        """
-        await repository.upsert_many(
-            [item(source_id, f"seen-{index}", last_seen_at=RUN_AT) for index in range(8)]
-            + [item(source_id, f"gone-{index}", last_seen_at=EARLIER) for index in range(2)]
-        )
-        result = await repository.mark_unseen_unavailable(
-            source_id, seen_since=RUN_AT, max_retract_fraction=0.25
-        )
-        assert (result.retracted, result.total) == (2, 10)
-
-    async def test_marking_unseen_unavailable_is_a_no_op_when_nothing_is_stale(
-        self, repository: MediaItemRepository, source_id: uuid.UUID
-    ) -> None:
-        """A ratio guard divides by zero on an empty source; a count comparison does not.
-
-        This case is here because the ratio is the obvious spelling.
-        """
-        result = await repository.mark_unseen_unavailable(
-            source_id, seen_since=RUN_AT, max_retract_fraction=0.25
-        )
-        assert (result.retracted, result.total) == (0, 0)
-
-    async def test_a_second_sweep_does_not_re_retract(
-        self, repository: MediaItemRepository, source_id: uuid.UUID
-    ) -> None:
-        """`retracted` counts rows this call changed, not rows already unavailable.
-
-        Otherwise every nightly run after a real deletion reports the same
-        retraction again, and the guard trips on history rather than on what
-        just happened.
-        """
-        await repository.upsert_many(
-            [item(source_id, f"movie-{index}", last_seen_at=EARLIER) for index in range(4)]
-        )
-        first = await repository.mark_unseen_unavailable(
-            source_id, seen_since=RUN_AT, max_retract_fraction=1.0
-        )
-        second = await repository.mark_unseen_unavailable(
-            source_id, seen_since=RUN_AT, max_retract_fraction=1.0
-        )
-        assert first.retracted == 4
-        assert second.retracted == 0
-
-    async def test_a_sweep_after_an_accepted_retraction_is_not_refused_forever(
-        self, repository: MediaItemRepository, source_id: uuid.UUID
-    ) -> None:
-        """The guard counts what *this* run would change.
-
-        Not how much of the source is already unavailable. An operator who has
-        looked at a refusal and re-run with the ceiling
-        raised has accepted the retraction; every nightly run after that must
-        go back to succeeding. An implementation whose count omits
-        `available` keeps measuring yesterday's retraction against today's
-        ceiling and refuses forever, which is worse than not having the guard
-        -- it fails the sync run, so the *upsert* half of the next walk never
-        commits either.
-        """
-        await repository.upsert_many(
-            [item(source_id, f"movie-{index}", last_seen_at=EARLIER) for index in range(10)]
-        )
-        await repository.mark_unseen_unavailable(
-            source_id, seen_since=RUN_AT, max_retract_fraction=1.0
-        )
-        result = await repository.mark_unseen_unavailable(
-            source_id, seen_since=RUN_AT, max_retract_fraction=0.25
-        )
-        assert (result.retracted, result.total) == (0, 10)
 
     async def test_upsert_many_never_hard_deletes(
         self, repository: MediaItemRepository, source_id: uuid.UUID
@@ -1055,9 +909,7 @@ class MediaItemRepositoryContract:
                 item(source_id, "unrelated", title_id=None),
             ]
         )
-        await repository.mark_unseen_unavailable(
-            other_source_id, seen_since=RUN_AT, max_retract_fraction=1.0
-        )
+        await repository.retract(other_source_id, ["theirs"], unseen_since=RUN_AT)
         listed = await repository.list_for_title(title_id)
         assert [(row.external_id, row.available) for row in listed] == [
             ("mine", True),
@@ -1078,8 +930,8 @@ class MediaItemRepositoryContract:
         await repository.upsert_many(
             [item(source_id, "fresh", title_id=title_id, last_seen_at=EARLIER)]
         )
-        await repository.mark_unseen_unavailable(
-            source_id, seen_since=RUN_AT + timedelta(days=1), max_retract_fraction=1.0
+        await repository.retract(
+            source_id, ["stale", "fresh"], unseen_since=RUN_AT + timedelta(days=1)
         )
         await repository.upsert_many(
             [item(source_id, "fresh", title_id=title_id, last_seen_at=EARLIER)]
@@ -1225,8 +1077,8 @@ class MediaItemRepositoryContract:
                 )
             ]
         )
-        await repository.mark_unseen_unavailable(
-            source_id, seen_since=RUN_AT + timedelta(days=1), max_retract_fraction=1.0
+        await repository.retract(
+            source_id, ["stale", "fresh"], unseen_since=RUN_AT + timedelta(days=1)
         )
         await repository.upsert_many(
             [
@@ -1501,9 +1353,7 @@ class MediaItemRepositoryRecentlyAddedContract:
                 ),
             ]
         )
-        await repository.mark_unseen_unavailable(
-            source_id, seen_since=RUN_AT, max_retract_fraction=1.0
-        )
+        await repository.retract(source_id, ["gone"], unseen_since=RUN_AT)
 
         rows = await repository.list_recently_added(since=WINDOW_START)
 

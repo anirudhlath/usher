@@ -980,8 +980,8 @@ async def test_a_retracted_copy_is_rendered_rather_than_filtered(
     source = await _seed_source(sources)
     title = await _seed_title(titles, EnrichmentState.ENRICHED)
     await _seed_copy(media_items, source_id=source.id, title_id=title.id)
-    await media_items.mark_unseen_unavailable(
-        source.id, seen_since=datetime(2026, 8, 2, tzinfo=UTC), max_retract_fraction=1.0
+    await media_items.retract(
+        source.id, [EXTERNAL_ID], unseen_since=datetime(2026, 8, 2, tzinfo=UTC)
     )
     body = (await client.get(f"/titles/{title.id}")).json()
     assert response_availability(body) == [("Living Room Emby", False)]

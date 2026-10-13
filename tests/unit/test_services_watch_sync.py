@@ -471,13 +471,13 @@ async def test_a_walk_never_retracts_a_watch_state(fixture: _Fixture) -> None:
     `ReconcileService`'s availability sweep is the shape this must never acquire.
     """
     swept: list[object] = []
-    original = fixture.media_items.mark_unseen_unavailable
+    original = fixture.media_items.retract
 
     async def _record(*args: object, **kwargs: object) -> object:
         swept.append(args)
         return await original(*args, **kwargs)  # type: ignore[arg-type]
 
-    fixture.media_items.mark_unseen_unavailable = _record  # type: ignore[method-assign, assignment]
+    fixture.media_items.retract = _record  # type: ignore[method-assign, assignment]
     await fixture.given_matched("movie-1")
     await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
     assert swept == []

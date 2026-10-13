@@ -14,7 +14,7 @@ from usher.ports.ingest import (
     MediaItemUpsert,
     NameYearProbe,
     ProviderRef,
-    SweepResult,
+    UnseenRows,
     WatchStateMerge,
 )
 
@@ -119,11 +119,11 @@ def test_the_sweep_refusal_survives_a_zero_denominator() -> None:
     assert exc.total == 0
 
 
-def test_a_sweep_result_reports_the_denominator_as_well_as_the_count() -> None:
-    """A bare "3 retracted" is not actionable on its own.
+def test_unseen_rows_report_the_denominator_as_well_as_the_candidates() -> None:
+    """A bare "3 unseen" is not actionable on its own.
 
     "3 of 4" and "3 of a whole library" are different operational events, and the sweep
     has already counted the denominator to evaluate its own guard.
     """
-    result = SweepResult(retracted=3, total=94_438)
-    assert (result.retracted, result.total) == (3, 94_438)
+    unseen = UnseenRows(external_ids=frozenset({"a", "b", "c"}), total=94_438)
+    assert (len(unseen.external_ids), unseen.total) == (3, 94_438)

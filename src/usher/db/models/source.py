@@ -111,7 +111,7 @@ class MediaItemRow(Base):
             "source_id",
             postgresql_where=text("title_id IS NULL"),
         ),
-        # The availability sweep's `UPDATE`, and nothing else.
+        # `list_unseen`'s id read, and nothing else.
         Index("ix_media_items_sweep", "source_id", "available", "last_seen_at"),
         # The Recently Added row.
         Index(

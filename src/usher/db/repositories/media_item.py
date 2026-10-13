@@ -19,7 +19,6 @@ from usher.ports.ingest import (
     MediaItemTarget,
     MediaItemUpsert,
     Retraction,
-    SweepResult,
     UnseenRows,
 )
 from usher.ports.repository import (
@@ -103,19 +102,6 @@ WITH deduped AS (
 SELECT count(*) FILTER (WHERE inserted) AS inserted,
        count(*) FILTER (WHERE NOT inserted) AS updated
 FROM upserted
-"""
-
-# Counted in the same transaction as the UPDATE it guards, so the guard and
-# the statement see the same rows.
-_SWEEP_COUNTS = """
-SELECT count(*) AS total,
-       count(*) FILTER (WHERE available AND last_seen_at < :seen_since) AS stale
-FROM media_items WHERE source_id = :source_id
-"""
-
-_SWEEP = """
-UPDATE media_items SET available = false
-WHERE source_id = :source_id AND available AND last_seen_at < :seen_since
 """
 
 # Two statements under READ COMMITTED: a row committed between them can reach the id read uncounted;
@@ -310,28 +296,6 @@ class PostgresMediaItemRepository(MediaItemRepository):
                 constraint=constraint_name(exc),
             ) from exc
         return BulkWriteResult(inserted=int(inserted), updated=int(updated))
-
-    async def mark_unseen_unavailable(
-        self, source_id: uuid.UUID, *, seen_since: AwareDatetime, max_retract_fraction: float
-    ) -> SweepResult:
-        parameters = {"source_id": source_id, "seen_since": seen_since}
-        with self._session.no_autoflush:
-            counts = (await self._session.execute(text(_SWEEP_COUNTS), parameters)).one()
-            total, stale = int(counts.total), int(counts.stale)
-            # A count comparison rather than a division: an empty source
-            # divides by zero, and `stale and` in front of it means a run
-            # with nothing to retract never consults the ceiling at all --
-            # so a ceiling of 0.0 still permits a no-op sweep.
-            if stale and stale > total * max_retract_fraction:
-                raise AvailabilitySweepRefused(
-                    would_retract=stale, total=total, ceiling=max_retract_fraction
-                )
-            if not stale:
-                return SweepResult(retracted=0, total=total)
-            retracted = cast(
-                CursorResult[Any], await self._session.execute(text(_SWEEP), parameters)
-            ).rowcount
-        return SweepResult(retracted=retracted, total=total)
 
     async def list_unseen(
         self, source_id: uuid.UUID, *, seen_since: AwareDatetime, max_retract_fraction: float

@@ -13,7 +13,6 @@ from usher.ports.ingest import (
     MediaItemTarget,
     MediaItemUpsert,
     Retraction,
-    SweepResult,
     UnseenRows,
 )
 from usher.ports.repository import (
@@ -127,22 +126,6 @@ class FakeMediaItemRepository(MediaItemRepository):
             )
             updated += 1
         return BulkWriteResult(inserted=inserted, updated=updated)
-
-    async def mark_unseen_unavailable(
-        self, source_id: uuid.UUID, *, seen_since: AwareDatetime, max_retract_fraction: float
-    ) -> SweepResult:
-        mine = [entry for entry in self._items.values() if entry.source_id == source_id]
-        stale = [entry for entry in mine if entry.available and entry.last_seen_at < seen_since]
-        # A count comparison, never `len(stale) / len(mine)`: an empty source
-        # divides by zero, and `mine` is empty on the very first sync of a
-        # source that turned out to hold nothing.
-        if stale and len(stale) > len(mine) * max_retract_fraction:
-            raise AvailabilitySweepRefused(
-                would_retract=len(stale), total=len(mine), ceiling=max_retract_fraction
-            )
-        for entry in stale:
-            self._items[(entry.source_id, entry.external_id)] = entry.evolve(available=False)
-        return SweepResult(retracted=len(stale), total=len(mine))
 
     async def list_unseen(
         self, source_id: uuid.UUID, *, seen_since: AwareDatetime, max_retract_fraction: float

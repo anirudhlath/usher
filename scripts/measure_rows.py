@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from usher.config import get_settings
 from usher.db.base import build_engine, build_session_factory
 from usher.db.repositories.episode import _NEXT_UP
-from usher.db.repositories.media_item import _RECENTLY_ADDED, _SWEEP
+from usher.db.repositories.media_item import _RECENTLY_ADDED, _UNSEEN
 from usher.db.repositories.watch_state import (
     _IN_PROGRESS,
     _NEEDING_HISTORY,
@@ -201,7 +201,7 @@ async def _seed(session: AsyncSession, scale: int) -> None:
             )
         )
     # 200 stale rows, which is the nightly shape `f1a7d3c9e824`'s sweep index
-    # exists for. Without them the sweep's UPDATE plans against nothing and this
+    # exists for. Without them the sweep's unseen read plans against nothing and this
     # script's whole reason to run is vacuous.
     await session.execute(
         text(
@@ -242,8 +242,8 @@ async def _statements(session: AsyncSession) -> Sequence[tuple[str, str, dict[st
         ),
         ("_NEXT_UP", _NEXT_UP, {"user_id": user, "title_ids": probed}),
         (
-            "mark_unseen_unavailable's UPDATE",
-            _SWEEP,
+            "list_unseen's id read",
+            _UNSEEN,
             {"source_id": source, "seen_since": datetime(2026, 8, 4, tzinfo=UTC)},
         ),
         ("list_needing_history", _NEEDING_HISTORY, {"limit": 500}),

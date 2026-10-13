@@ -266,60 +266,6 @@ async def test_a_batch_costs_the_same_number_of_statements_however_big_it_is(
     assert await repository.count_for_source(source_id) == 505
 
 
-async def test_the_sweep_costs_the_same_number_of_statements_however_big_it_is(
-    repository: PostgresMediaItemRepository,
-    source_id: uuid.UUID,
-    other_source_id: uuid.UUID,
-    statement_counter: list[str],
-) -> None:
-    """A sweep that loaded rows to decide which to retract is the design defect here.
-
-    It is also the *obvious* implementation, because the guard needs a count and the
-    retraction needs a set -- reading the rows once gives you both.
-    """
-    await repository.upsert_many(
-        [item(source_id, f"m-{index}", last_seen_at=RUN_AT) for index in range(4)]
-    )
-    await repository.upsert_many(
-        [item(other_source_id, f"m-{index}", last_seen_at=RUN_AT) for index in range(400)]
-    )
-
-    statement_counter.clear()
-    await repository.mark_unseen_unavailable(source_id, seen_since=RUN_AT, max_retract_fraction=1.0)
-    small = len(statement_counter)
-
-    statement_counter.clear()
-    await repository.mark_unseen_unavailable(
-        other_source_id, seen_since=RUN_AT, max_retract_fraction=1.0
-    )
-    large = len(statement_counter)
-
-    assert small == large, f"{small} statements for 4 rows, {large} for 400"
-
-
-async def test_a_refused_sweep_issues_no_update_at_all(
-    repository: PostgresMediaItemRepository,
-    source_id: uuid.UUID,
-    statement_counter: list[str],
-) -> None:
-    """A report of nothing retracted has to mean the UPDATE never ran.
-
-    Not that it ran and was rolled back -- a sweep that writes first and
-    checks after leaves the guard depending on the caller's transaction
-    discipline, and `deps.get_session` commits on any handler that does not
-    raise.
-    """
-    await repository.upsert_many(
-        [item(source_id, f"m-{index}", last_seen_at=EARLIER) for index in range(4)]
-    )
-    statement_counter.clear()
-    with pytest.raises(AvailabilitySweepRefused):
-        await repository.mark_unseen_unavailable(
-            source_id, seen_since=RUN_AT, max_retract_fraction=0.25
-        )
-    assert not any("UPDATE media_items" in statement for statement in statement_counter)
-
-
 async def test_list_unseen_costs_two_statements_however_many_rows_are_unseen(
     repository: PostgresMediaItemRepository,
     source_id: uuid.UUID,

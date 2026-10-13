@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pydantic import AwareDatetime
 
 from usher.domain.source import MediaItem
-from usher.ports.ingest import MediaItemTarget, MediaItemUpsert, Retraction, SweepResult, UnseenRows
+from usher.ports.ingest import MediaItemTarget, MediaItemUpsert, Retraction, UnseenRows
 from usher.ports.repository._results import BulkWriteResult
 
 __all__ = [
@@ -47,13 +47,11 @@ class MediaItemRepository(ABC):
     Same session/transaction ownership as `TitleRepository`: every method
     flushes so conflicts surface immediately, none commits.
 
-    Availability is retracted by exactly one method, and only after a walk
-    has provably finished. `SourceAdapter.list_items` guarantees a walk
-    raises rather than truncating so a caller can tell "the library ended"
-    from "the adapter gave up", and that guarantee is worth nothing if the
-    sweep runs either way. `mark_unseen_unavailable` is therefore a separate
-    call made after the walk returns normally, never a side effect of
-    `upsert_many`.
+    Availability is retracted only by `retract`, for rows the source confirms gone. A
+    full walk's sweep asks about the rows it did not list, after the walk has returned
+    normally -- `SourceAdapter.list_items` guarantees a walk raises rather than
+    truncating, and that guarantee is worth nothing if the sweep runs either way -- so
+    it is a separate call, never a side effect of `upsert_many`.
     """
 
     @abstractmethod
@@ -62,12 +60,6 @@ class MediaItemRepository(ABC):
 
         A stored `last_seen_at` is never moved back by an older one.
         """
-
-    @abstractmethod
-    async def mark_unseen_unavailable(
-        self, source_id: uuid.UUID, *, seen_since: AwareDatetime, max_retract_fraction: float
-    ) -> SweepResult:
-        """Retract availability for everything this source did not show us."""
 
     @abstractmethod
     async def list_unseen(
