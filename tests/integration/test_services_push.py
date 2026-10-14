@@ -14,8 +14,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from tests.fakes.event_publisher import FakeEventPublisher
 
 # The queue is a fake here deliberately: `PostgresJobQueue` has its own
-# contract run against real Postgres, and what these cases are about is the
-# merge SQL and the trigger the `watch_states` table carries.
+# contract run against real Postgres, and no case reads what is queued. Each
+# is about what the real tables do: the `watch_states` merge and its trigger,
+# the foreign keys a pushed item's rows must satisfy, or the `available` flag
+# a removal may clear.
 from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.source_adapter import FakeSourceAdapter
 from usher.db.repositories.episode import PostgresEpisodeRepository

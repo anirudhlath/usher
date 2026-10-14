@@ -485,9 +485,15 @@ async def test_a_removal_publishes_in_sorted_order_whatever_order_its_targets_it
     """Sorted by title id, so the order a client hears does not follow set iteration.
 
     Literal ids, because a `UUID`'s hash and `None`'s, unlike a `str`'s, are the same on
-    every run: the targets then iterate in one order, which the premise shows is not the
-    sorted one. The rows are stored, and the event names them, in two orders that are not
-    sorted either, so neither can stand in for the sort.
+    every run. That is not enough on its own: the fake adds the targets in the order of a
+    set of `str` ids, which moves with the seed, and where two targets share a slot of the
+    set's table, the one added first takes it. These three take three of the eight slots a
+    three-entry set has (`hash(target) % 8` is 7, 3 and 0 for `first`, `second` and
+    `third`), so they iterate in one order whatever order they arrive in, and the premise
+    shows it is not the sorted one. New ids need distinct slots too: with ids ending in 0, 1
+    and 6, two share slot 7 and the premise fails under some seeds. The rows are stored, and
+    the event names them, in two orders that are not sorted either, so neither can stand in
+    for the sort.
     """
     first, second, third = (uuid.UUID(f"00000000-0000-7000-8000-00000000000{n}") for n in "124")
     rows = {"gone-a": second, "gone-b": third, "gone-c": first}
