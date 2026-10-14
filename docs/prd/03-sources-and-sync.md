@@ -276,8 +276,9 @@ watch lane owns its own cursor and still walks whole.
 sends `ItemsRemoved` during an ordinary library refresh for items that are
 still there. So the lane asks the source about each removed item it holds
 available, and retracts those the source no longer serves. When one of those
-is a series, the lane also asks about the series' available episodes, and
-retracts in the same removal those the source no longer serves. It then
+is a series matched to a title, the lane also asks about the series' available
+episodes, and retracts in the same removal those the source no longer serves;
+an unmatched series' episodes wait for the next full walk. It then
 publishes one `title.updated` for each title or episode it retracted. A
 confirmed removal is applied at once, whatever its size: there is no
 retraction ceiling and no `push_max_items_per_event` deferral. Items Usher

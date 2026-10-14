@@ -71,8 +71,9 @@ Versioning is `0.x` while the wire contract may still move —
   reports items removed, Usher asks it about each one it holds, and marks
   unavailable those it no longer serves, publishing `title.updated` for each
   title or episode. A removed series' episodes are asked about and retracted
-  with it. `USHER_SYNC_MAX_RETRACT_FRACTION` does not limit it: a removal the
-  server confirms is applied however many items it names. Before, a removal
+  with it once the series is matched to a title.
+  `USHER_SYNC_MAX_RETRACT_FRACTION` does not limit it: a removal the server
+  confirms is applied however many items it names. Before, a removal
   changed nothing until a full walk. Items Emby still serves, which a library
   refresh also reports removed, are left alone. A removed season, folder or
   library still waits for the next full walk's sweep.

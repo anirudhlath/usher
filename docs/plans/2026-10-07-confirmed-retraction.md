@@ -4059,8 +4059,9 @@ an `E ` line. Then restore the file and read the restore back with `diff`.
    sends `ItemsRemoved` during an ordinary library refresh for items that are
    still there. So the lane asks the source about each removed item it holds
    available, and retracts those the source no longer serves. When one of those
-   is a series, the lane also asks about the series' available episodes, and
-   retracts in the same removal those the source no longer serves. It then
+   is a series matched to a title, the lane also asks about the series' available
+   episodes, and retracts in the same removal those the source no longer serves;
+   an unmatched series' episodes wait for the next full walk. It then
    publishes one `title.updated` for each title or episode it retracted. A
    confirmed removal is applied at once, whatever its size: there is no
    retraction ceiling and no `push_max_items_per_event` deferral. Items Usher
@@ -4087,7 +4088,8 @@ bullet, add:
 - **Removed films, series and episodes reach Usher as they happen.** When the
   server reports items removed, Usher asks it about each one it holds, and
   marks unavailable those it confirms gone, however many there are. A removed
-  series takes its episodes with it, once the server confirms each gone. A
+  series matched to a title takes its episodes with it, once the server
+  confirms each gone; an unmatched one's episodes wait for the next full sync. A
   library refresh also reports removals for files that are still there; those
   are left alone. A removed season, folder or library is caught by the next
   full sync instead.
@@ -4115,8 +4117,9 @@ anything is retracted, observed`.
   reports items removed, Usher asks it about each one it holds, and marks
   unavailable those it no longer serves, publishing `title.updated` for each
   title or episode. A removed series' episodes are asked about and retracted
-  with it. `USHER_SYNC_MAX_RETRACT_FRACTION` does not limit it: a removal the
-  server confirms is applied however many items it names. Before, a removal
+  with it once the series is matched to a title.
+  `USHER_SYNC_MAX_RETRACT_FRACTION` does not limit it: a removal the server
+  confirms is applied however many items it names. Before, a removal
   changed nothing until a full walk. Items Emby still serves, which a library
   refresh also reports removed, are left alone. A removed season, folder or
   library still waits for the next full walk's sweep.

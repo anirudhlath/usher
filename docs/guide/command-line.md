@@ -147,7 +147,8 @@ usher sync-status                       # recent walks and their plans, queue de
 - **Removed films, series and episodes reach Usher as they happen.** When the
   server reports items removed, Usher asks it about each one it holds, and
   marks unavailable those it confirms gone, however many there are. A removed
-  series takes its episodes with it, once the server confirms each gone. A
+  series matched to a title takes its episodes with it, once the server
+  confirms each gone; an unmatched one's episodes wait for the next full sync. A
   library refresh also reports removals for files that are still there; those
   are left alone. A removed season, folder or library is caught by the next
   full sync instead.

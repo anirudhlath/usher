@@ -81,7 +81,8 @@ class PushApplyService:
     ) -> PushOutcome:
         """Apply one push event.
 
-        Commits once, and never raises for a missing item.
+        Commits once, and a removal also after each read it asks the source
+        about. Never raises for a missing item.
 
         The span is a child of whatever the lane has active, which is
         nothing -- a push lane has no request above it -- so this is a root
