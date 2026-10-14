@@ -786,7 +786,7 @@ renderer.
 
 # Dashboard 3 — Pipeline
 
-Eleven panels, and the mixed one: Prometheus for rates and depths, Postgres for
+Twelve panels, and the mixed one: Prometheus for rates and depths, Postgres for
 the queue's and the reconciler's own breakdowns. Dashboard 1's principle
 ("the catalog *is* the record") does not decide this dashboard on its own,
 because half of what a pipeline does leaves no row behind — a completed job is
@@ -1249,6 +1249,18 @@ counter whose series begins at 1 has risen by nothing inside the window, so
 `rate()` divides zero by zero. The seed is one unit per walk, so its series is
 always `NaN`. The episodes line starts at 18:39, two minutes after the stage's
 first unit completed.
+
+### 12 — Retraction checks, by path and outcome
+
+`timeseries`, Prometheus.
+
+```
+sum by (path, outcome) (usher_sync_retraction_checks_total)
+```
+
+**Not yet observed.** The counter is first written when a full walk's sweep or
+a push removal asks a source about an item. Neither has run against a real
+source since this panel was committed, so there is no reading to record.
 
 ## ⚠️ Three Dashboard 3 panels plot a mean, not a quantile, and the reason is an instrument
 

@@ -12,7 +12,7 @@ Versioning is `0.x` while the wire contract may still move —
 
 - The counter `usher.sync.retraction.checks` counts the items a sweep or a
   push removal asked the server about, by `path` (`sweep` or `push`) and
-  `outcome` (`gone` or `served`).
+  `outcome` (`gone` or `served`). Dashboard 3 draws it.
 - Listing requests to a source are capped at `USHER_SYNC_WALKERS` (default 4)
   and back off on their own: an outage or a 429 drops the cap to one,
   and every ten pages that succeed raise it by one. The gauge
