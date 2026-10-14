@@ -1,7 +1,7 @@
 """Availability persistence, on the staged-`COPY` path."""
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from typing import Any, cast
 
 from pydantic import AwareDatetime
@@ -18,7 +18,8 @@ from usher.ports.ingest import (
     AvailabilitySweepRefused,
     MediaItemTarget,
     MediaItemUpsert,
-    SweepResult,
+    Retraction,
+    UnseenRows,
 )
 from usher.ports.repository import (
     AddedTitle,
@@ -103,17 +104,53 @@ SELECT count(*) FILTER (WHERE inserted) AS inserted,
 FROM upserted
 """
 
-# Counted in the same transaction as the UPDATE it guards, so the guard and
-# the statement see the same rows.
-_SWEEP_COUNTS = """
+# Two statements under READ COMMITTED: a row committed between them can reach the id read uncounted;
+# the source's confirmation is what makes that safe.
+_UNSEEN_COUNTS = """
 SELECT count(*) AS total,
-       count(*) FILTER (WHERE available AND last_seen_at < :seen_since) AS stale
+       count(*) FILTER (WHERE available AND last_seen_at < :seen_since) AS unseen
 FROM media_items WHERE source_id = :source_id
 """
 
-_SWEEP = """
-UPDATE media_items SET available = false
+_UNSEEN = """
+SELECT external_id FROM media_items
 WHERE source_id = :source_id AND available AND last_seen_at < :seen_since
+"""
+
+_AVAILABLE_AMONG = """
+SELECT external_id FROM media_items
+WHERE source_id = :source_id AND external_id = ANY(:external_ids) AND available
+"""
+
+# A series' own row is the one with no `episode_id`; its episodes share its `title_id`.
+_AVAILABLE_EPISODES_OF = """
+SELECT episode.external_id FROM media_items AS series
+JOIN media_items AS episode
+  ON episode.source_id = series.source_id AND episode.title_id = series.title_id
+WHERE series.source_id = :source_id
+  AND series.external_id = ANY(:external_ids)
+  AND series.episode_id IS NULL
+  AND episode.episode_id IS NOT NULL
+  AND episode.available
+"""
+
+# The guard is the caller's instant: a row any read has stamped since then is spared.
+_RETRACT = """
+UPDATE media_items SET available = false
+WHERE source_id = :source_id
+  AND external_id = ANY(:external_ids)
+  AND available
+  AND last_seen_at < :unseen_since
+RETURNING title_id, episode_id
+"""
+
+# Forward only, and never onto a retracted row.
+_MARK_SEEN = """
+UPDATE media_items SET last_seen_at = :seen_at
+WHERE source_id = :source_id
+  AND external_id = ANY(:external_ids)
+  AND available
+  AND last_seen_at < :seen_at
 """
 
 _RESOLVE_TARGETS = """
@@ -272,27 +309,103 @@ class PostgresMediaItemRepository(MediaItemRepository):
             ) from exc
         return BulkWriteResult(inserted=int(inserted), updated=int(updated))
 
-    async def mark_unseen_unavailable(
+    async def list_unseen(
         self, source_id: uuid.UUID, *, seen_since: AwareDatetime, max_retract_fraction: float
-    ) -> SweepResult:
+    ) -> UnseenRows:
         parameters = {"source_id": source_id, "seen_since": seen_since}
         with self._session.no_autoflush:
-            counts = (await self._session.execute(text(_SWEEP_COUNTS), parameters)).one()
-            total, stale = int(counts.total), int(counts.stale)
-            # A count comparison rather than a division: an empty source
-            # divides by zero, and `stale and` in front of it means a run
-            # with nothing to retract never consults the ceiling at all --
-            # so a ceiling of 0.0 still permits a no-op sweep.
-            if stale and stale > total * max_retract_fraction:
+            counts = (await self._session.execute(text(_UNSEEN_COUNTS), parameters)).one()
+            total, unseen = int(counts.total), int(counts.unseen)
+            # A count comparison rather than a division: an empty source divides by
+            # zero, and `unseen and` in front of it means a run with nothing unseen
+            # never consults the ceiling at all -- so a ceiling of 0.0 still permits a
+            # walk that missed nothing.
+            if unseen and unseen > total * max_retract_fraction:
                 raise AvailabilitySweepRefused(
-                    would_retract=stale, total=total, ceiling=max_retract_fraction
+                    would_retract=unseen, total=total, ceiling=max_retract_fraction
                 )
-            if not stale:
-                return SweepResult(retracted=0, total=total)
-            retracted = cast(
-                CursorResult[Any], await self._session.execute(text(_SWEEP), parameters)
-            ).rowcount
-        return SweepResult(retracted=retracted, total=total)
+            if not unseen:
+                return UnseenRows(external_ids=frozenset(), total=total)
+            rows = (await self._session.execute(text(_UNSEEN), parameters)).scalars().all()
+        return UnseenRows(external_ids=frozenset(rows), total=total)
+
+    async def available_among(
+        self, source_id: uuid.UUID, external_ids: Collection[str]
+    ) -> frozenset[str]:
+        if not external_ids:
+            return frozenset()
+        with self._session.no_autoflush:
+            rows = (
+                (
+                    await self._session.execute(
+                        text(_AVAILABLE_AMONG),
+                        {"source_id": source_id, "external_ids": list(set(external_ids))},
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        return frozenset(rows)
+
+    async def available_episodes_of(
+        self, source_id: uuid.UUID, external_ids: Collection[str]
+    ) -> frozenset[str]:
+        if not external_ids:
+            return frozenset()
+        with self._session.no_autoflush:
+            rows = (
+                (
+                    await self._session.execute(
+                        text(_AVAILABLE_EPISODES_OF),
+                        {"source_id": source_id, "external_ids": list(set(external_ids))},
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        return frozenset(rows)
+
+    async def retract(
+        self, source_id: uuid.UUID, external_ids: Collection[str], *, unseen_since: AwareDatetime
+    ) -> Retraction:
+        if not external_ids:
+            return Retraction(retracted=0, targets=frozenset())
+        rows = (
+            await self._session.execute(
+                text(_RETRACT),
+                {
+                    "source_id": source_id,
+                    "external_ids": list(set(external_ids)),
+                    "unseen_since": unseen_since,
+                },
+            )
+        ).all()
+        return Retraction(
+            retracted=len(rows),
+            targets=frozenset(
+                MediaItemTarget(title_id=row.title_id, episode_id=row.episode_id)
+                for row in rows
+                if row.title_id is not None or row.episode_id is not None
+            ),
+        )
+
+    async def mark_seen(
+        self, source_id: uuid.UUID, external_ids: Collection[str], *, seen_at: AwareDatetime
+    ) -> int:
+        if not external_ids:
+            return 0
+        result = cast(
+            CursorResult[Any],
+            await self._session.execute(
+                text(_MARK_SEEN),
+                {
+                    "source_id": source_id,
+                    "external_ids": list(set(external_ids)),
+                    "seen_at": seen_at,
+                },
+            ),
+        )
+        return result.rowcount
 
     async def get_by_external_id(self, source_id: uuid.UUID, external_id: str) -> MediaItem | None:
         with self._session.no_autoflush:

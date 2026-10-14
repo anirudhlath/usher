@@ -10,6 +10,9 @@ Versioning is `0.x` while the wire contract may still move —
 
 ### Added
 
+- The counter `usher.sync.retraction.checks` counts the items a sweep or a
+  push removal asked the server about, by `path` (`sweep` or `push`) and
+  `outcome` (`gone` or `served`). Dashboard 3 draws it.
 - Listing requests to a source are capped at `USHER_SYNC_WALKERS` (default 4)
   and back off on their own: an outage or a 429 drops the cap to one,
   and every ten pages that succeed raise it by one. The gauge
@@ -64,6 +67,16 @@ Versioning is `0.x` while the wire contract may still move —
 
 ### Changed
 
+- **A push removal now retracts what the server confirms gone.** When Emby
+  reports items removed, Usher asks it about each one it holds, and marks
+  unavailable those it no longer serves, publishing `title.updated` for each
+  title or episode. A removed series' episodes are asked about and retracted
+  with it once the series is matched to a title.
+  `USHER_SYNC_MAX_RETRACT_FRACTION` does not limit it: a removal the server
+  confirms is applied however many items it names. Before, a removal
+  changed nothing until a full walk. Items Emby still serves, which a library
+  refresh also reports removed, are left alone. A removed season, folder or
+  library still waits for the next full walk's sweep.
 - **`USHER_SOURCE_PAGE_SIZE` defaults to 1,000, up from 200.** A page of 1,000
   costs a source little more than a page of 200, so a walk makes a fifth of the
   requests. A `.env` copied from an earlier `.env.example` still sets
@@ -101,6 +114,13 @@ Versioning is `0.x` while the wire contract may still move —
 
 ### Fixed
 
+- **A full walk no longer marks items unavailable that the server still
+  serves.** Emby's full listing shows one version of a film with several, so
+  every full walk retracted the alternate versions a delta or a push event had
+  stored. The sweep now asks the server about the items the walk did not list,
+  retracts only those it confirms gone, and records the rest as seen. If the
+  server cannot answer, nothing is retracted, and the next full walk resumes
+  the run and only sweeps.
 - **Items deleted from the source mid-walk no longer hide others from the
   walk.** Each page re-reads the end of the page before, so a full walk no
   longer marks a file that is still there unavailable.

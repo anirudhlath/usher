@@ -48,8 +48,8 @@ SECOND_URL = f"https://f/b.mkv?api_key={TOKEN}"
 
 T0 = datetime(2026, 8, 10, 12, 0, tzinfo=UTC)
 LATER = T0 + timedelta(hours=1)
-# Past every `last_seen_at` any case seeds, so `mark_unseen_unavailable`
-# retracts whatever it is pointed at.
+# Past every `last_seen_at` any case seeds, so `retract` retracts whatever it
+# is pointed at.
 AFTER_EVERYTHING = T0 + timedelta(days=365)
 
 
@@ -170,6 +170,7 @@ class _Household:
         self.media_items = FakeMediaItemRepository()
         self.factory = RecordingFactory()
         self.mint = RecordingMint()
+        self._copies: dict[uuid.UUID, list[str]] = {}
 
     async def add_source(self, name: str, *, with_credentials: bool = True) -> Source:
         source = Source(
@@ -213,6 +214,7 @@ class _Household:
                 )
             ]
         )
+        self._copies.setdefault(source.id, []).append(external_id)
 
     async def retract(self, source: Source) -> None:
         """Soft-delete this source's copies, the only way a row becomes unavailable.
@@ -220,8 +222,8 @@ class _Household:
         `upsert_many` cannot seed one: appearing in a walk *is* the evidence of
         availability.
         """
-        await self.media_items.mark_unseen_unavailable(
-            source.id, seen_since=AFTER_EVERYTHING, max_retract_fraction=1.0
+        await self.media_items.retract(
+            source.id, self._copies.get(source.id, []), unseen_since=AFTER_EVERYTHING
         )
 
     def service(self) -> PlaybackService:
@@ -754,7 +756,7 @@ async def test_an_available_copy_is_offered_before_an_unavailable_one() -> None:
 async def test_a_household_holding_only_unavailable_copies_still_gets_targets() -> None:
     """A sweep that over-retracted must not tell a household it owns nothing.
 
-    `mark_unseen_unavailable` sets `available = false` and deletes nothing, and the file
+    `retract` sets `available = false` and deletes nothing, and the file
     is very often still there.
     """
     household = _Household()

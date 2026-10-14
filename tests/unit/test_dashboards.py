@@ -502,8 +502,8 @@ def test_the_catalogue_scan_reaches_the_row_that_carries_no_usher_prefix() -> No
         "the catalogue scan is still anchored on `usher.`, so an API-latency panel would "
         "fail invariant 2 for naming the one metric PRD 10 says it should"
     )
-    assert len(catalogue) == 44, (
-        f"PRD 10's metric table parsed to {len(catalogue)} rows, not the 44 its own header "
+    assert len(catalogue) == 45, (
+        f"PRD 10's metric table parsed to {len(catalogue)} rows, not the 45 its own header "
         "counts out — the table's shape has moved and both readers need checking"
     )
 
@@ -819,12 +819,12 @@ def _sql(panel: dict[str, Any]) -> str:
     return "\n".join(_target_sql(target) for target in panel.get("targets") or [])
 
 
-def _assert_dashboard_3_has_eleven_panels(panels: list[dict[str, Any]]) -> None:
-    """Dashboard 3's panel count: PRD 10's ten items, with queue depth drawn twice."""
+def _assert_dashboard_3_has_twelve_panels(panels: list[dict[str, Any]]) -> None:
+    """Dashboard 3's panel count: PRD 10's eleven items, with queue depth drawn twice."""
     titles = [str(panel["title"]) for panel in panels]
-    assert len(panels) == 11, (
-        "dashboard 3 is eleven panels -- PRD 10's ten items, with queue depth drawn twice -- "
-        f"not {len(panels)}: {titles}"
+    assert len(panels) == 12, (
+        "dashboard 3 is twelve panels -- PRD 10's eleven items, with queue depth drawn "
+        f"twice -- not {len(panels)}: {titles}"
     )
 
 
@@ -849,7 +849,7 @@ def test_the_queue_depth_panels_are_two_panels_over_two_datasources() -> None:
     assert "Parked jobs by kind" in titles, (
         f"the known-title anchor is gone, so this scan is reading something else: {titles}"
     )
-    _assert_dashboard_3_has_eleven_panels(panels)
+    _assert_dashboard_3_has_twelve_panels(panels)
 
     depth = [panel for panel in panels if "queue depth" in str(panel["title"]).lower()]
     assert len(depth) == 2, (
@@ -1091,6 +1091,19 @@ def test_the_walk_panel_draws_the_listing_limit_and_a_mean_unit_duration_by_stag
     assert [labels for labels, _operand in _aggregations(limit)] == [{"source"}], limit
 
 
+def test_the_retraction_panel_draws_checks_by_path_and_outcome() -> None:
+    """The two labels a check carries; summed over source, as panel 9 sums push events."""
+    retraction = [
+        panel
+        for panel in _live_panels(_PIPELINE)
+        if str(panel["title"]).startswith("Retraction checks")
+    ]
+    assert len(retraction) == 1, f"dashboard 3 has {len(retraction)} retraction panels, not one"
+    [expr] = _exprs(retraction[0])
+    assert _metric_tokens(expr) == {"usher_sync_retraction_checks_total"}, expr
+    assert [labels for labels, _operand in _aggregations(expr)] == [{"path", "outcome"}], expr
+
+
 def test_the_dashboard_3_prose_claims_are_falsifiable() -> None:
     """Each of the four checks above, handed an input it has to refuse.
 
@@ -1111,8 +1124,8 @@ def test_the_dashboard_3_prose_claims_are_falsifiable() -> None:
         _assert_names_the_transport_failures(
             {"title": "TMDb requests", "description": "429s over the total"}
         )
-    with pytest.raises(AssertionError, match=r"eleven panels .* not 10:"):
-        _assert_dashboard_3_has_eleven_panels([{"title": f"panel {n}"} for n in range(10)])
+    with pytest.raises(AssertionError, match=r"twelve panels .* not 11:"):
+        _assert_dashboard_3_has_twelve_panels([{"title": f"panel {n}"} for n in range(11)])
 
 
 # --------------------------------------------------------------------------------

@@ -106,7 +106,7 @@ control that does nothing.
 
 ### Metrics — OpenTelemetry → Prometheus
 
-**Every row is emitted today. 44 rows: 43 instruments Usher declares, plus one
+**Every row is emitted today. 45 rows: 44 instruments Usher declares, plus one
 `FastAPIInstrumentor` supplies.**
 
 | Metric | Type | Labels | Emitted |
@@ -129,6 +129,7 @@ control that does nothing.
 | `usher.match.result` | counter | method, confident | ✅ M4 |
 | `usher.sync.run.duration` | histogram | source, kind, status | ✅ M4 |
 | `usher.sync.retraction.fraction` | histogram | source, outcome | ✅ M10 |
+| `usher.sync.retraction.checks` | counter | source, path, outcome | ✅ confirmed retraction |
 | `usher.sync.unit.duration` | histogram | source, stage | ✅ fast first sync |
 | `usher.watch_state.run.duration` | histogram | source, status | ✅ M4 |
 | `usher.watch_state.backfilled` | counter | source | ✅ M4 |
@@ -346,12 +347,14 @@ and duration · **push connection uptime and reconnect count** · **push events
 applied, by kind**, which separates "the lane is up" from "the lane is doing
 anything" · Emby request latency · TMDb requests/sec against the
 `USHER_TMDB_REQUESTS_PER_SECOND` ceiling, with 429 count · **whole-library
-walks: the listing limit and the mean unit duration, by stage**.
+walks: the listing limit and the mean unit duration, by stage** · **retraction
+checks, by path and outcome**.
 
 ✅ **Every panel here is backed by real data as of M9, and the whole-library
-walk panel as of the fast first sync's acceptance walk.** ⚠️ A panel that drains
-the whole unmatched queue should page with the keyset cursor; the `OFFSET` form
-is quadratic in queue depth.
+walk panel as of the fast first sync's acceptance walk, except the
+retraction-checks panel, which is unbacked until a sweep or a push removal asks
+a real source.** ⚠️ A panel that drains the whole unmatched queue should page
+with the keyset cursor; the `OFFSET` form is quadratic in queue depth.
 
 ### 4 — Performance
 

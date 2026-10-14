@@ -138,10 +138,20 @@ usher sync-status                       # recent walks and their plans, queue de
   planned, and how many items the plan expected.
 - **A walk of a whole library that stops part-way resumes.** The next walk of
   the same kind continues where each piece stopped, rather than starting again.
-- **The retraction guard** refuses a walk that would mark more than
-  `USHER_SYNC_MAX_RETRACT_FRACTION` (25%) of a source's items unavailable, and
+- **The retraction guard** refuses a walk that left more than
+  `USHER_SYNC_MAX_RETRACT_FRACTION` (25%) of a source's items unlisted, and
   changes nothing. If you really did remove that much, run the walk with
-  `--allow-full-retraction`.
+  `--allow-full-retraction`. A walk marks an item unavailable only once the
+  server confirms it is gone. An item the server still serves but did not
+  list, such as a film's second version, stays available.
+- **Removed films, series and episodes reach Usher as they happen.** When the
+  server reports items removed, Usher asks it about each one it holds, and
+  marks unavailable those it confirms gone, however many there are. A removed
+  series matched to a title takes its episodes with it, once the server
+  confirms each gone; an unmatched one's episodes wait for the next full sync. A
+  library refresh also reports removals for files that are still there; those
+  are left alone. A removed season, folder or library is caught by the next
+  full sync instead.
 - **You don't have to own the server.** Pointing Usher at a server you don't
   administer is supported. Marking a title played writes to your account on
   that server.

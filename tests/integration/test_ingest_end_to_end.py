@@ -39,7 +39,7 @@ from usher.domain.source import Source
 from usher.domain.sync import SyncRunKind, SyncRunStatus
 from usher.domain.title import Title
 from usher.ports.credentials import SourceCredentials
-from usher.ports.ingest import MediaItemUpsert, SweepResult, WatchStateMerge
+from usher.ports.ingest import MediaItemUpsert, WatchStateMerge
 from usher.ports.source import SourceItem, SourceItemKind, SourceWatchState
 from usher.services.ingest import IngestService
 from usher.services.matching import MatchService
@@ -939,13 +939,13 @@ beats a scan. Seeding a source where *every* row is stale
 describes a library that vanished overnight, and any plan is right for that."""
 
 
-async def test_the_availability_sweeps_update_uses_its_index(
+async def test_the_availability_sweeps_unseen_read_uses_its_index(
     session: AsyncSession,
     media_items: PostgresMediaItemRepository,
     source: Source,
     analyze: Analyze,
 ) -> None:
-    """`ix_media_items_sweep` exists for the sweep's `UPDATE`, and the numbers say exactly that."""
+    """`ix_media_items_sweep` exists for the sweep's unseen read; the numbers say exactly that."""
     seen_since = CHANGED_AT + timedelta(days=1)
     await media_items.upsert_many(
         [
@@ -970,17 +970,19 @@ async def test_the_availability_sweeps_update_uses_its_index(
         ]
     )
     await analyze("media_items")
-    captured, stop = _capture(lambda statement: "SET available = false" in statement)
+    captured, stop = _capture(
+        lambda statement: "SELECT external_id" in statement and "last_seen_at <" in statement
+    )
     try:
-        result = await media_items.mark_unseen_unavailable(
+        unseen = await media_items.list_unseen(
             source.id, seen_since=seen_since, max_retract_fraction=1.0
         )
     finally:
         stop()
-    assert result == SweepResult(retracted=_STALE_ON_IT, total=_SWEPT_SOURCE), (
+    assert (len(unseen.external_ids), unseen.total) == (_STALE_ON_IT, _SWEPT_SOURCE), (
         "the premise: a mostly-fresh source with a stale tail, not a source that vanished"
     )
-    assert captured, "the sweep's UPDATE was not issued"
+    assert captured, "list_unseen's id read was not issued"
 
     await session.execute(text("SET LOCAL enable_seqscan = off"))
     statement, parameters = captured[0]

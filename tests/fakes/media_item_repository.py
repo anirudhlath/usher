@@ -1,7 +1,7 @@
 """In-memory `MediaItemRepository`."""
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from datetime import UTC, datetime
 
 from pydantic import AwareDatetime
@@ -12,7 +12,8 @@ from usher.ports.ingest import (
     AvailabilitySweepRefused,
     MediaItemTarget,
     MediaItemUpsert,
-    SweepResult,
+    Retraction,
+    UnseenRows,
 )
 from usher.ports.repository import (
     AddedTitle,
@@ -126,21 +127,76 @@ class FakeMediaItemRepository(MediaItemRepository):
             updated += 1
         return BulkWriteResult(inserted=inserted, updated=updated)
 
-    async def mark_unseen_unavailable(
+    async def list_unseen(
         self, source_id: uuid.UUID, *, seen_since: AwareDatetime, max_retract_fraction: float
-    ) -> SweepResult:
+    ) -> UnseenRows:
         mine = [entry for entry in self._items.values() if entry.source_id == source_id]
-        stale = [entry for entry in mine if entry.available and entry.last_seen_at < seen_since]
-        # A count comparison, never `len(stale) / len(mine)`: an empty source
+        unseen = [entry for entry in mine if entry.available and entry.last_seen_at < seen_since]
+        # A count comparison, never `len(unseen) / len(mine)`: an empty source
         # divides by zero, and `mine` is empty on the very first sync of a
         # source that turned out to hold nothing.
-        if stale and len(stale) > len(mine) * max_retract_fraction:
+        if unseen and len(unseen) > len(mine) * max_retract_fraction:
             raise AvailabilitySweepRefused(
-                would_retract=len(stale), total=len(mine), ceiling=max_retract_fraction
+                would_retract=len(unseen), total=len(mine), ceiling=max_retract_fraction
             )
-        for entry in stale:
-            self._items[(entry.source_id, entry.external_id)] = entry.evolve(available=False)
-        return SweepResult(retracted=len(stale), total=len(mine))
+        return UnseenRows(
+            external_ids=frozenset(entry.external_id for entry in unseen), total=len(mine)
+        )
+
+    async def available_among(
+        self, source_id: uuid.UUID, external_ids: Collection[str]
+    ) -> frozenset[str]:
+        return frozenset(
+            external_id
+            for external_id in external_ids
+            if (entry := self._items.get((source_id, external_id))) is not None and entry.available
+        )
+
+    async def available_episodes_of(
+        self, source_id: uuid.UUID, external_ids: Collection[str]
+    ) -> frozenset[str]:
+        series = {
+            entry.title_id
+            for external_id in set(external_ids)
+            if (entry := self._items.get((source_id, external_id))) is not None
+            and entry.title_id is not None
+            and entry.episode_id is None
+        }
+        return frozenset(
+            entry.external_id
+            for entry in self._items.values()
+            if entry.source_id == source_id
+            and entry.available
+            and entry.episode_id is not None
+            and entry.title_id in series
+        )
+
+    async def retract(
+        self, source_id: uuid.UUID, external_ids: Collection[str], *, unseen_since: AwareDatetime
+    ) -> Retraction:
+        retracted = 0
+        targets: set[MediaItemTarget] = set()
+        for external_id in set(external_ids):
+            entry = self._items.get((source_id, external_id))
+            if entry is None or not entry.available or entry.last_seen_at >= unseen_since:
+                continue
+            self._items[(source_id, external_id)] = entry.evolve(available=False)
+            retracted += 1
+            if entry.title_id is not None or entry.episode_id is not None:
+                targets.add(MediaItemTarget(title_id=entry.title_id, episode_id=entry.episode_id))
+        return Retraction(retracted=retracted, targets=frozenset(targets))
+
+    async def mark_seen(
+        self, source_id: uuid.UUID, external_ids: Collection[str], *, seen_at: AwareDatetime
+    ) -> int:
+        moved = 0
+        for external_id in set(external_ids):
+            entry = self._items.get((source_id, external_id))
+            if entry is None or not entry.available or entry.last_seen_at >= seen_at:
+                continue
+            self._items[(source_id, external_id)] = entry.evolve(last_seen_at=seen_at)
+            moved += 1
+        return moved
 
     async def get_by_external_id(self, source_id: uuid.UUID, external_id: str) -> MediaItem | None:
         return self._items.get((source_id, external_id))

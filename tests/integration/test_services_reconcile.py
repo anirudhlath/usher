@@ -5,7 +5,7 @@ For the things the fakes cannot say: a refused sweep, and the sweep's own SQL.
 
 import asyncio
 import functools
-from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator
+from collections.abc import AsyncGenerator, Awaitable, Callable, Collection, Iterator
 from datetime import UTC, datetime
 
 import pytest
@@ -148,7 +148,7 @@ def service(
 
 
 class _Adapter:
-    """The smallest `list_items`, `plan_walk` and `list_unit` that satisfy `ReconcileService`.
+    """The smallest `list_items`, `plan_walk`, `list_unit`, `confirm_gone` for `ReconcileService`.
 
     Not `FakeSourceAdapter`: that one is a `SourceAdapter` with a session
     model and a watch-state store, and none of it is under test here.
@@ -163,19 +163,27 @@ class _Adapter:
         # next delta re-requests what the truncated one never reached" is a
         # claim about.
         self.since_calls: list[datetime | None] = []
+        # Served by id but in no item listing, as Emby's full listing leaves out an
+        # alternate version.
+        self.unlisted: set[str] = set()
 
     def list_items(self, since: datetime | None = None) -> AsyncGenerator[SourceItem]:
         self.since_calls.append(since)
         return self._walk()
 
     async def _walk(self) -> AsyncGenerator[SourceItem]:
-        for index, item in enumerate(list(self.items.values())):
+        for index, item in enumerate(
+            [item for item in self.items.values() if item.external_id not in self.unlisted]
+        ):
             if self.fail_after is not None and index >= self.fail_after:
                 raise PortUnavailable("source went away mid-walk")
             yield item
 
     async def plan_walk(self) -> WalkPlan:
         return WHOLE_LIBRARY
+
+    async def confirm_gone(self, external_ids: Collection[str]) -> frozenset[str]:
+        return frozenset(external_ids).difference(self.items)
 
     def list_unit(
         self, key: str, *, start_index: int = 0, checkpoint: str | None = None
@@ -374,7 +382,7 @@ async def test_a_full_walk_retracts_and_restores_against_real_sql(
 ) -> None:
     """The sweep's own SQL, driven by the service that decides when it runs.
 
-    `mark_unseen_unavailable`'s `last_seen_at < :seen_since` and the upsert's `available
+    `list_unseen`'s `last_seen_at < :seen_since` and the upsert's `available
     = true` are two statements in two repositories, and only a run exercises the handoff
     between them.
     """
@@ -392,6 +400,29 @@ async def test_a_full_walk_retracts_and_restores_against_real_sql(
     assert third.items_retracted == 0
     back = await media_items.get_by_external_id(source.id, "m7")
     assert back is not None and back.available is True
+
+
+async def test_a_walk_retracts_only_what_the_source_confirms_gone(
+    service: ReconcileService,
+    media_items: PostgresMediaItemRepository,
+    source: Source,
+    adapter: _Adapter,
+) -> None:
+    """Against the real table: m6 is gone, m7 is served but in no listing."""
+    for index in range(10):
+        adapter.items[f"m{index}"] = _item(f"m{index}")
+    await service.reconcile(source, SyncRunKind.FULL, adapter)  # type: ignore[arg-type]
+    del adapter.items["m6"]
+    adapter.unlisted.add("m7")
+    second = await service.reconcile(source, SyncRunKind.FULL, adapter)  # type: ignore[arg-type]
+    assert second.items_seen == 8, "the premise: the walk listed neither m6 nor m7"
+    assert second.status is SyncRunStatus.COMPLETED
+    assert second.items_retracted == 1
+    gone = await media_items.get_by_external_id(source.id, "m6")
+    assert gone is not None and gone.available is False
+    served = await media_items.get_by_external_id(source.id, "m7")
+    assert served is not None
+    assert (served.available, served.last_seen_at) == (True, second.started_at)
 
 
 async def test_a_walk_that_raises_leaves_every_row_available(

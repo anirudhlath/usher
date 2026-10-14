@@ -247,8 +247,8 @@ async def test_availability_spans_two_sources_and_keeps_a_retracted_copy(
         _copy(source_id=theirs.id, title_id=title.id, external_id="theirs-1"),
     )
     async with sessions() as session:
-        await PostgresMediaItemRepository(session).mark_unseen_unavailable(
-            theirs.id, seen_since=SWEPT_AFTER, max_retract_fraction=1.0
+        await PostgresMediaItemRepository(session).retract(
+            theirs.id, ["theirs-1"], unseen_since=SWEPT_AFTER
         )
         await session.commit()
 

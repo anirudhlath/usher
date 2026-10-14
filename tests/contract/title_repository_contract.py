@@ -829,7 +829,7 @@ class TitleRepositoryCandidateContract:
     ) -> None:
         """`media_items.available` is a column the availability sweep *writes*.
 
-        `mark_unseen_unavailable` sets it false for an item a walk stopped seeing -- so
+        `retract` sets it false for an item its source confirmed gone -- so
         a row with `available = false` is the ordinary state of a film the household
         deleted, not an exotic one.
 

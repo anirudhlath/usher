@@ -1,7 +1,7 @@
 """Pipeline spans, under a real FastAPI server span."""
 
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Collection
 from datetime import UTC, datetime
 from typing import Annotated
 
@@ -39,10 +39,10 @@ _SERVER_SPAN = "GET /_probe/sync"
 
 
 class _Adapter:
-    """The smallest `list_items`, `plan_walk` and `list_unit` `ReconcileService` uses, no network.
+    """The smallest `list_items`, `plan_walk`, `list_unit`, `confirm_gone` for `ReconcileService`.
 
-    `tests/integration/test_services_reconcile.py` uses the same shape and
-    for the same reason: `FakeSourceAdapter` carries a session model and a
+    No network. `tests/integration/test_services_reconcile.py` uses the same shape
+    and for the same reason: `FakeSourceAdapter` carries a session model and a
     watch-state store, none of which is under test here.
     """
 
@@ -63,6 +63,9 @@ class _Adapter:
         self, key: str, *, start_index: int = 0, checkpoint: str | None = None
     ) -> AsyncGenerator[UnitPage]:
         return pages_of(self._walk(), start_index=start_index)
+
+    async def confirm_gone(self, external_ids: Collection[str]) -> frozenset[str]:
+        return frozenset(external_ids).difference(item.external_id for item in self._items)
 
 
 def _movie(external_id: str) -> SourceItem:

@@ -19,7 +19,12 @@ def test_media_item_repository_surface() -> None:
     assert MediaItemRepository.__abstractmethods__ == frozenset(
         {
             "upsert_many",
-            "mark_unseen_unavailable",
+            "list_unseen",
+            "available_among",
+            # The push lane's expansion from a removed series to its episodes.
+            "available_episodes_of",
+            "retract",
+            "mark_seen",
             "get_by_external_id",
             "resolve_series_titles",
             "resolve_targets",

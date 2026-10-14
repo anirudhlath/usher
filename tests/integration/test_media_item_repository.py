@@ -24,7 +24,7 @@ from usher.domain.ids import new_id
 from usher.domain.source import Source
 from usher.domain.title import Title
 from usher.ports.errors import RepositoryConflict
-from usher.ports.ingest import AvailabilitySweepRefused
+from usher.ports.ingest import AvailabilitySweepRefused, UnseenRows
 
 
 async def _make_source(session: AsyncSession, name: str) -> uuid.UUID:
@@ -149,7 +149,7 @@ class TestPostgresMediaItemRepository(
     """Every case in `MediaItemRepositoryContract`, against real Postgres.
 
     The fixtures come from module scope rather than being redefined here, so
-    the four Postgres-only tests below share them.
+    the Postgres-only tests below share them.
     """
 
 
@@ -266,58 +266,130 @@ async def test_a_batch_costs_the_same_number_of_statements_however_big_it_is(
     assert await repository.count_for_source(source_id) == 505
 
 
-async def test_the_sweep_costs_the_same_number_of_statements_however_big_it_is(
+async def test_list_unseen_costs_two_statements_however_many_rows_are_unseen(
     repository: PostgresMediaItemRepository,
     source_id: uuid.UUID,
     other_source_id: uuid.UUID,
     statement_counter: list[str],
 ) -> None:
-    """A sweep that loaded rows to decide which to retract is the design defect here.
-
-    It is also the *obvious* implementation, because the guard needs a count and the
-    retraction needs a set -- reading the rows once gives you both.
-    """
+    """A count, then the ids: never a statement per row."""
     await repository.upsert_many(
-        [item(source_id, f"m-{index}", last_seen_at=RUN_AT) for index in range(4)]
+        [item(source_id, f"m-{index}", last_seen_at=EARLIER) for index in range(4)]
     )
     await repository.upsert_many(
-        [item(other_source_id, f"m-{index}", last_seen_at=RUN_AT) for index in range(400)]
+        [item(other_source_id, f"m-{index}", last_seen_at=EARLIER) for index in range(400)]
     )
 
     statement_counter.clear()
-    await repository.mark_unseen_unavailable(source_id, seen_since=RUN_AT, max_retract_fraction=1.0)
-    small = len(statement_counter)
+    small = await repository.list_unseen(source_id, seen_since=RUN_AT, max_retract_fraction=1.0)
+    small_statements = len(statement_counter)
 
     statement_counter.clear()
-    await repository.mark_unseen_unavailable(
+    large = await repository.list_unseen(
         other_source_id, seen_since=RUN_AT, max_retract_fraction=1.0
     )
-    large = len(statement_counter)
+    large_statements = len(statement_counter)
 
-    assert small == large, f"{small} statements for 4 rows, {large} for 400"
+    assert (len(small.external_ids), len(large.external_ids)) == (4, 400), (
+        "the premise: every row of both sources is unseen"
+    )
+    assert (small_statements, large_statements) == (2, 2)
 
 
-async def test_a_refused_sweep_issues_no_update_at_all(
+async def test_a_refused_list_unseen_reads_no_id(
     repository: PostgresMediaItemRepository,
     source_id: uuid.UUID,
     statement_counter: list[str],
 ) -> None:
-    """A report of nothing retracted has to mean the UPDATE never ran.
-
-    Not that it ran and was rolled back -- a sweep that writes first and
-    checks after leaves the guard depending on the caller's transaction
-    discipline, and `deps.get_session` commits on any handler that does not
-    raise.
-    """
+    """Over the ceiling, the count is the whole cost: the ids are never read."""
     await repository.upsert_many(
         [item(source_id, f"m-{index}", last_seen_at=EARLIER) for index in range(4)]
     )
     statement_counter.clear()
     with pytest.raises(AvailabilitySweepRefused):
-        await repository.mark_unseen_unavailable(
-            source_id, seen_since=RUN_AT, max_retract_fraction=0.25
-        )
-    assert not any("UPDATE media_items" in statement for statement in statement_counter)
+        await repository.list_unseen(source_id, seen_since=RUN_AT, max_retract_fraction=0.25)
+    [statement] = statement_counter
+    assert "count(*)" in statement
+
+
+async def test_list_unseen_with_nothing_unseen_reads_no_id(
+    repository: PostgresMediaItemRepository,
+    source_id: uuid.UUID,
+    statement_counter: list[str],
+) -> None:
+    """With every row seen, the count is the whole cost: there is no id to read."""
+    await repository.upsert_many(
+        [item(source_id, f"m-{index}", last_seen_at=RUN_AT) for index in range(4)]
+    )
+    statement_counter.clear()
+    unseen = await repository.list_unseen(source_id, seen_since=RUN_AT, max_retract_fraction=1.0)
+    statements = len(statement_counter)
+    assert unseen == UnseenRows(external_ids=frozenset(), total=4), (
+        "the premise: every row of the source was stamped at the instant"
+    )
+    assert statements == 1
+
+
+async def test_the_three_keyed_methods_cost_one_statement_each_and_none_for_nothing(
+    repository: PostgresMediaItemRepository,
+    source_id: uuid.UUID,
+    statement_counter: list[str],
+) -> None:
+    await repository.upsert_many(
+        [item(source_id, f"m-{index}", last_seen_at=EARLIER) for index in range(4)]
+    )
+    statement_counter.clear()
+    among = await repository.available_among(source_id, ["m-0", "m-1"])
+    among_statements = len(statement_counter)
+    statement_counter.clear()
+    retraction = await repository.retract(source_id, ["m-0", "m-2"], unseen_since=RUN_AT)
+    retract_statements = len(statement_counter)
+    statement_counter.clear()
+    moved = await repository.mark_seen(source_id, ["m-1", "m-3"], seen_at=RUN_AT)
+    mark_statements = len(statement_counter)
+    assert (among, retraction.retracted, moved) == (frozenset({"m-0", "m-1"}), 2, 2), (
+        "the premise: each call did its work"
+    )
+
+    statement_counter.clear()
+    await repository.available_among(source_id, [])
+    await repository.retract(source_id, [], unseen_since=RUN_AT)
+    await repository.mark_seen(source_id, [], seen_at=RUN_AT)
+    nothing_statements = len(statement_counter)
+
+    assert (among_statements, retract_statements, mark_statements, nothing_statements) == (
+        1,
+        1,
+        1,
+        0,
+    )
+
+
+async def test_available_episodes_of_costs_one_statement_and_none_for_nothing(
+    repository: PostgresMediaItemRepository,
+    source_id: uuid.UUID,
+    series_title_id: uuid.UUID,
+    episode_ids: list[uuid.UUID],
+    statement_counter: list[str],
+) -> None:
+    """One join, however many series are named; never one read per series."""
+    await repository.upsert_many(
+        [item(source_id, "series", title_id=series_title_id)]
+        + [
+            item(source_id, f"ep-{index}", title_id=series_title_id, episode_id=episode_id)
+            for index, episode_id in enumerate(episode_ids)
+        ]
+    )
+    statement_counter.clear()
+    episodes = await repository.available_episodes_of(source_id, ["series", "never-stored"])
+    statements = len(statement_counter)
+    statement_counter.clear()
+    await repository.available_episodes_of(source_id, [])
+    nothing_statements = len(statement_counter)
+    assert episodes == {f"ep-{index}" for index in range(len(episode_ids))}, (
+        "the premise: every episode was named"
+    )
+    assert (statements, nothing_statements) == (1, 0)
 
 
 async def _seed_a_series_with_episodes(

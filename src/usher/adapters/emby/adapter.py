@@ -4,7 +4,15 @@ import asyncio
 import re
 import time
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Collection,
+    Mapping,
+    Sequence,
+)
 from contextlib import AbstractAsyncContextManager, aclosing
 from itertools import batched
 from typing import Any
@@ -83,7 +91,7 @@ ITEM_TYPES = "Movie,Series,Episode"
 # total while an item sits in no library at all.
 NOT_LIBRARIES = frozenset({"boxsets", "playlists"})
 
-# Series asked for by `Ids` in one request: a hundred ids keep the URL short.
+# Items asked for by `Ids` in one request: a hundred ids keep the URL short.
 IDS_PER_REQUEST = 100
 NEXT_UP_PATH = "/Shows/NextUp"
 SEED_UNIT = WalkUnit(SEED_KEY, WalkStage.SEED, "what the account is watching")
@@ -522,7 +530,7 @@ class EmbyAdapter(SourceAdapter):
 
         Giving up raises `PortUnavailable` naming the attempts, whatever the last
         failure was. `op` labels the request's span and duration, so a count, a views
-        read or a read of series by `Ids` is not timed as a listing page.
+        read, a read of series by `Ids` or a confirmation is not timed as a listing page.
         """
         attempts = len(PAGE_RETRY_WAITS) + 1
         first_failure: float | None = None
@@ -872,6 +880,53 @@ class EmbyAdapter(SourceAdapter):
             payload = await self._fetch(external_id)
             span.set_attribute("usher.found", payload is not None)
             return None if payload is None else to_source_item(payload)
+
+    async def confirm_gone(self, external_ids: Collection[str]) -> frozenset[str]:
+        """The asked ids Emby no longer lists for this account, read by `Ids` in rounds.
+
+        An `Ids` listing names one member of a version group per request, so an id a round
+        does not list is asked again in the next. A round whose listings are all empty
+        proves the rest gone: it would have listed a member of every group with one still
+        served. Only an id that was asked for counts.
+        """
+        with _tracer.start_as_current_span("source.confirm_gone") as span:
+            remaining = set(external_ids)
+            span.set_attribute("usher.source", self._source.name)
+            span.set_attribute("usher.confirm.asked", len(remaining))
+            while remaining:
+                listed: set[str] = set()
+                for chunk in batched(sorted(remaining), IDS_PER_REQUEST, strict=False):
+                    listed |= await self._listed_of(chunk)
+                if not listed:
+                    break
+                remaining -= listed
+            span.set_attribute("usher.confirm.gone", len(remaining))
+            return frozenset(remaining)
+
+    async def _listed_of(self, chunk: Sequence[str]) -> set[str]:
+        """Which of `chunk` one `Ids` listing names; `Limit` is the chunk's length.
+
+        An entry with no string `Id` raises, because it may be one of `chunk`. A string
+        `Id` nobody asked for is skipped beside one that was asked for. A listing of only
+        such ids raises: a server that answers `Ids` never sends one, so a server that
+        does cannot say what is gone.
+        """
+        params = {"Ids": ",".join(chunk), "Limit": str(len(chunk))}
+        body = await self._page(await self._items_path(), params, 0, op="confirm")
+        entries = body.get("Items")
+        if not isinstance(entries, list):
+            raise PortDataMalformed("Emby's Ids listing carried no Items array")
+        asked = set(chunk)
+        listed: set[str] = set()
+        for entry in entries:
+            listed_id = entry.get("Id") if isinstance(entry, dict) else None
+            if not isinstance(listed_id, str):
+                raise PortDataMalformed("Emby's Ids listing carried an entry with no string Id")
+            if listed_id in asked:
+                listed.add(listed_id)
+        if entries and not listed:
+            raise PortDataMalformed("Emby's Ids listing named none of the ids it was asked for")
+        return listed
 
     async def stream_targets(self, external_id: str) -> list[StreamTarget]:
         with _tracer.start_as_current_span("source.stream_targets") as span:
