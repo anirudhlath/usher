@@ -885,7 +885,7 @@ class EmbyAdapter(SourceAdapter):
         """The asked ids Emby no longer lists for this account, read by `Ids` in rounds.
 
         An `Ids` listing names one member of a version group per request, so an id a round
-        does not list is asked again in the next. A round that lists none of what it asked
+        does not list is asked again in the next. A round whose listings are all empty
         proves the rest gone: it would have listed a member of every group with one still
         served. Only an id that was asked for counts.
         """
@@ -907,7 +907,9 @@ class EmbyAdapter(SourceAdapter):
         """Which of `chunk` one `Ids` listing names; `Limit` is the chunk's length.
 
         An entry with no string `Id` raises, because it may be one of `chunk`. A string
-        `Id` nobody asked for is skipped.
+        `Id` nobody asked for is skipped beside one that was asked for. A listing of only
+        such ids raises: a server that answers `Ids` never sends one, so a server that
+        does cannot say what is gone.
         """
         params = {"Ids": ",".join(chunk), "Limit": str(len(chunk))}
         body = await self._page(await self._items_path(), params, 0, op="confirm")
@@ -922,6 +924,8 @@ class EmbyAdapter(SourceAdapter):
                 raise PortDataMalformed("Emby's Ids listing carried an entry with no string Id")
             if listed_id in asked:
                 listed.add(listed_id)
+        if entries and not listed:
+            raise PortDataMalformed("Emby's Ids listing named none of the ids it was asked for")
         return listed
 
     async def stream_targets(self, external_id: str) -> list[StreamTarget]:

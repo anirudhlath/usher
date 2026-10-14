@@ -80,25 +80,39 @@ async def test_a_served_version_its_sibling_hid_is_asked_again_and_kept() -> Non
     assert _asked(seen) == ["v0,v1", "v1"]
 
 
-async def test_an_id_nobody_asked_for_is_never_read_as_listed() -> None:
-    """A listing naming only a stray id lists none of what was asked, so the asked id is gone.
+async def test_a_listing_of_only_ids_nobody_asked_for_raises_rather_than_reading_as_gone() -> None:
+    """A correct server never lists an id it was not asked for, so this one cannot decide.
 
-    Counted as listed, the stray would keep every round non-empty, and the rounds would
+    It is what a server ignoring `Ids` sends. Read as "none listed", it would condemn every
+    asked id; counted as listed, it would keep every round non-empty, and the rounds would
     never end: hence the deadline.
     """
     stray = {"Items": [{"Id": "stray-1"}], "TotalRecordCount": 1}
     adapter, seen = _adapter(FakeEmbyServer(), answer=stray)
     try:
         async with asyncio.timeout(5):
-            gone = await adapter.confirm_gone(["gone-1"])
+            with pytest.raises(PortDataMalformed, match="none of the ids it was asked for"):
+                await adapter.confirm_gone(["gone-1"])
     finally:
         await adapter.aclose()
-    assert gone == {"gone-1"}
     assert _asked(seen) == ["gone-1"]
 
 
+async def test_a_stray_id_beside_an_asked_one_is_skipped() -> None:
+    """The listing names an asked id, so it decided; the stray beside it is not counted."""
+    answer = {"Items": [{"Id": "kept-1"}, {"Id": "stray-1"}], "TotalRecordCount": 2}
+    adapter, seen = _adapter(FakeEmbyServer(), answer=answer)
+    try:
+        async with asyncio.timeout(5):
+            gone = await adapter.confirm_gone(["kept-1"])
+    finally:
+        await adapter.aclose()
+    assert gone == frozenset()
+    assert _asked(seen) == ["kept-1"]
+
+
 async def test_a_hundred_and_one_ids_go_as_two_requests_each_limited_to_its_chunk() -> None:
-    """`Limit` is each chunk's own length: a default page would cut a full chunk short."""
+    """`Limit` is each chunk's own length, so a server that ignores `Ids` sends back no more."""
     asked = [f"gone-{index:03d}" for index in range(IDS_PER_REQUEST + 1)]
     adapter, seen = _adapter(FakeEmbyServer())
     try:
