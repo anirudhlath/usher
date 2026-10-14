@@ -114,6 +114,13 @@ class EmbyHarness(SourceHarness):
                 self._server.add_view(self._view_ids[name], name)
         self._server.place(item.external_id, *(self._view_ids[name] for name in libraries))
 
+    async def given_versions(
+        self, items: Sequence[SourceItem], *, changed_at: AwareDatetime
+    ) -> None:
+        for item in items:
+            self._server.add_item(item, changed_at)
+        self._server.group_versions(*(item.external_id for item in items))
+
     async def given_watch_state(self, state: SourceWatchState) -> None:
         self._server.set_watch_state(state)
 

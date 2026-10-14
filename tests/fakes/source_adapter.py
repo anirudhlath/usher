@@ -2,7 +2,7 @@
 
 import asyncio
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Collection, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from urllib.parse import quote
 
@@ -113,6 +113,12 @@ class FakeSourceAdapter(SourceAdapter):
         self._push_now = 0.0
         self._push_reconnects = 0
         self.push_stale_after = 90.0
+        #: Every `confirm_gone` question, in order, an empty one included.
+        self.confirm_calls: list[frozenset[str]] = []
+        self._confirm_fails = False
+        # Served by id but in no item listing, as Emby's full listing leaves out an
+        # alternate version.
+        self._unlisted: set[str] = set()
 
     # -- harness-facing state ------------------------------------------
 
@@ -151,10 +157,21 @@ class FakeSourceAdapter(SourceAdapter):
     def forget(self, external_id: str) -> None:
         self._items.pop(external_id, None)
         self._changed_at.pop(external_id, None)
+        self._unlisted.discard(external_id)
         # Out of every library too, or seeding the id again would silently re-place it.
         for placed in self._libraries.values():
             if external_id in placed:
                 placed.remove(external_id)
+
+    def unlist(self, external_id: str) -> None:
+        """Keep serving `external_id` by id, but leave it out of every item listing.
+
+        Emby's full listing shows one version of a film while a read by id serves each,
+        so a full walk never lists an alternate it can still read. A later `place` does
+        not list it again. `watch_state` still lists it. An item delta does not, though Emby's
+        delta listing returns alternates too.
+        """
+        self._unlisted.add(external_id)
 
     def recorded(self, external_id: str) -> tuple[int, bool] | None:
         state = self._states.get(external_id)
@@ -167,7 +184,7 @@ class FakeSourceAdapter(SourceAdapter):
         self._fail_after = count
 
     def clear_failure(self) -> None:
-        """Undo `fail_after` and `fail_unit_after`.
+        """Undo `fail_after`, `fail_unit_after` and `fail_confirm`.
 
         `ReconcileService`'s cursor case needs a run that failed *followed by* one that
         succeeds, which is the only way to show that a delta walk resumes from the last
@@ -175,6 +192,11 @@ class FakeSourceAdapter(SourceAdapter):
         """
         self._fail_after = None
         self._unit_failures.clear()
+        self._confirm_fails = False
+
+    def fail_confirm(self) -> None:
+        """Make every non-empty `confirm_gone` raise, as a source lost mid-question would."""
+        self._confirm_fails = True
 
     def reject_credentials(self) -> None:
         self._credentials_valid = False
@@ -302,6 +324,8 @@ class FakeSourceAdapter(SourceAdapter):
         await self._ready()
         yielded = 0
         for external_id, item in list(self._items.items()):
+            if external_id in self._unlisted:
+                continue
             if since is not None and self._changed_at[external_id] < since:
                 continue
             if self._fail_after is not None and yielded >= self._fail_after:
@@ -313,21 +337,22 @@ class FakeSourceAdapter(SourceAdapter):
         await self._ready()
         if not self._libraries:
             return WHOLE_LIBRARY
+        listed = [one for one in self._items if one not in self._unlisted]
         in_a_library = {one for placed in self._libraries.values() for one in placed}
-        if not in_a_library.issuperset(self._items):
+        if not in_a_library.issuperset(listed):
             # An item in no library would be in no unit, and a plan must cover every
             # item, so a partly placed source walks as one unit.
-            return WalkPlan(WHOLE_LIBRARY.units, expected_total=len(self._items))
+            return WalkPlan(WHOLE_LIBRARY.units, expected_total=len(listed))
         units = tuple(
             WalkUnit(
                 f"library:{name}",
                 self._stages.get(name, WalkStage.TITLES),
                 f"library {name}",
-                None if name in self._uncounted else len(placed),
+                None if name in self._uncounted else len(set(placed) - self._unlisted),
             )
             for name, placed in self._libraries.items()
         )
-        return WalkPlan(units, expected_total=len(self._items))
+        return WalkPlan(units, expected_total=len(listed))
 
     def list_unit(
         self, key: str, *, start_index: int = 0, checkpoint: str | None = None
@@ -350,7 +375,7 @@ class FakeSourceAdapter(SourceAdapter):
         yielded = 0
         for external_id in list(self._libraries[name]):
             item = self._items.get(external_id)
-            if item is None:
+            if item is None or external_id in self._unlisted:
                 continue
             if yielded == self._unit_failures.get(name):
                 raise PortUnavailable(f"library {name} went away mid-walk")
@@ -363,6 +388,18 @@ class FakeSourceAdapter(SourceAdapter):
     async def get_item(self, external_id: str) -> SourceItem | None:
         await self._ready()
         return self._items.get(external_id)
+
+    async def confirm_gone(self, external_ids: Collection[str]) -> frozenset[str]:
+        asked = frozenset(external_ids)
+        self.confirm_calls.append(asked)
+        if not asked:
+            return frozenset()
+        await self._ready()
+        if self._confirm_fails:
+            raise PortUnavailable("source went away while confirming removals")
+        # A turn of the loop, as a request gives, so a caller's heartbeat can run.
+        await asyncio.sleep(0)
+        return frozenset(external_id for external_id in asked if external_id not in self._items)
 
     async def stream_targets(self, external_id: str) -> list[StreamTarget]:
         await self._ready()
@@ -580,6 +617,13 @@ class FakeSourceHarness(SourceHarness):
     ) -> None:
         self._adapter.seed(item, changed_at)
         self._adapter.place(item.external_id, *libraries)
+
+    async def given_versions(
+        self, items: Sequence[SourceItem], *, changed_at: AwareDatetime
+    ) -> None:
+        # The fake answers by id alone, so versions are just items.
+        for item in items:
+            self._adapter.seed(item, changed_at)
 
     async def given_watch_state(self, state: SourceWatchState) -> None:
         self._adapter.seed_state(state)

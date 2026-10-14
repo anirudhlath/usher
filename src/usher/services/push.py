@@ -14,6 +14,7 @@ from opentelemetry import metrics, trace
 from usher.domain.source import Source
 from usher.ports.errors import UsherPortError
 from usher.ports.events import ClientEvent, ClientEventKind, EventPublisher
+from usher.ports.repository import MediaItemRepository
 from usher.ports.source import (
     SourceAdapter,
     SourceEvent,
@@ -23,6 +24,7 @@ from usher.ports.source import (
     SourceWatchState,
 )
 from usher.services.ingest import IngestService
+from usher.services.retraction import confirmed_gone
 from usher.services.rows import WATCH_STATE_ROWS
 from usher.services.rows.cache import RowCache
 from usher.services.watch_sync import MergedState, WatchStateSyncService
@@ -46,7 +48,7 @@ class PushOutcome:
 
     items_ingested: int = 0
     states_merged: int = 0
-    ignored: int = 0
+    items_retracted: int = 0
     deferred_to_delta: bool = False
 
 
@@ -58,6 +60,7 @@ class PushApplyService:
         events: EventPublisher,
         commit: Callable[[], Awaitable[None]],
         *,
+        media_items: MediaItemRepository,
         cache: RowCache | None = None,
         max_items_per_event: int = 50,
     ) -> None:
@@ -65,6 +68,7 @@ class PushApplyService:
         self._watch = watch
         self._events = events
         self._commit = commit
+        self._media_items = media_items
         # The push lane invalidates; the nightly walk expires. A push event *is* a
         # change -- the same reason this lane publishes `watchstate.updated`
         # where the walk does not -- so the fan-out is per
@@ -77,7 +81,8 @@ class PushApplyService:
     ) -> PushOutcome:
         """Apply one push event.
 
-        Commits once, and never raises for a missing item.
+        Commits once, and a removal also after each read it asks the source
+        about. Never raises for a missing item.
 
         The span is a child of whatever the lane has active, which is
         nothing -- a push lane has no request above it -- so this is a root
@@ -90,7 +95,7 @@ class PushApplyService:
             if event.kind is SourceEventKind.WATCH_STATE_CHANGED:
                 outcome = await self._apply_watch_state(source, adapter, event, user_id)
             elif event.kind is SourceEventKind.ITEM_REMOVED:
-                outcome = self._ignore_removal(source, event)
+                outcome = await self._apply_removal(source, adapter, event)
             else:
                 outcome = await self._apply_items(source, adapter, event)
             span.set_attribute("usher.push.deferred", outcome.deferred_to_delta)
@@ -223,27 +228,72 @@ class PushApplyService:
                 )
         return PushOutcome(items_ingested=len(items))
 
-    def _ignore_removal(self, source: Source, event: SourceEvent) -> PushOutcome:
-        """A removal event retracts nothing, and says so.
+    async def _apply_removal(
+        self, source: Source, adapter: SourceAdapter, event: SourceEvent
+    ) -> PushOutcome:
+        """Retract the named rows the source confirms gone, and a gone series' episodes.
 
-        Availability is retracted only by a walk that provably finished, because
-        there is no way to tell a genuine deletion from an unmounted drive, a
-        library removed by accident, or a permissions change -- and only one of
-        those is reversible. Emby emits `ItemsRemoved` during an ordinary
-        library refresh for items that have not gone anywhere.
+        Emby sends `ItemsRemoved` during an ordinary library refresh for items that have
+        not gone anywhere, so only an available row the event names is asked about, and
+        only one the source no longer serves is retracted. A named series confirmed gone
+        brings its available episodes into the same removal, each asked about once. No
+        ceiling and no `max_items_per_event` deferral: the source is asked a hundred ids
+        a request. Ids Usher holds no row for -- seasons, folders, libraries -- change
+        nothing here; the next full walk's sweep retracts what they held.
 
-        PRD 03: "the row stays available until a walk sweeps it." Counted
-        and logged rather than dropped silently, so an
-        operator watching a source that really did lose a library can see
-        the events arriving before the nightly walk acts on them.
+        The guard is `asked_at`, taken before anything is read, so a row a read has
+        stamped since -- the item came back -- is spared. A failed confirmation raises,
+        as any failed read in the lane does.
         """
+        asked_at = datetime.now(UTC)
+        named = frozenset(event.external_ids)
+        held = await self._media_items.available_among(source.id, named)
+        gone = await self._confirm(source, adapter, held)
+        episodes = await self._media_items.available_episodes_of(source.id, gone) - held
+        gone |= await self._confirm(source, adapter, episodes)
+        held |= episodes
+        retraction = await self._media_items.retract(source.id, gone, unseen_since=asked_at)
         logger.info(
-            "{source} reported {count} items removed; availability is retracted only by "
-            "a full walk, so nothing changes until the nightly reconcile",
+            "{source} reported {count} items removed: {held} held, {gone} gone, "
+            "{retracted} retracted, {served} still served",
             source=source.name,
-            count=len(event.external_ids),
+            count=len(named),
+            held=len(held),
+            gone=len(gone),
+            retracted=retraction.retracted,
+            served=len(held) - len(gone),
         )
-        return PushOutcome(ignored=len(event.external_ids))
+        if not retraction.retracted:
+            return PushOutcome()
+        await self._commit()
+        # Sorted, so the order a client hears them in does not depend on set iteration.
+        for target in sorted(
+            retraction.targets, key=lambda one: (str(one.title_id), str(one.episode_id))
+        ):
+            if target.title_id is not None:
+                await self._events.publish(
+                    ClientEvent(
+                        kind=ClientEventKind.TITLE_UPDATED,
+                        title_id=target.title_id,
+                        episode_id=target.episode_id,
+                        data={"fields": ["availability"]},
+                    )
+                )
+        return PushOutcome(items_retracted=retraction.retracted)
+
+    async def _confirm(
+        self, source: Source, adapter: SourceAdapter, external_ids: frozenset[str]
+    ) -> frozenset[str]:
+        """The ids among `external_ids` the source confirms gone, asked outside a transaction.
+
+        The commit ends the transaction the caller's read opened. Nothing has been written
+        yet, so it commits nothing; it keeps the connection from sitting idle in a
+        transaction for as long as the source takes to answer.
+        """
+        if not external_ids:
+            return frozenset()
+        await self._commit()
+        return await confirmed_gone(adapter, external_ids, source=source.name, path="push")
 
 
 # The three units of work a lane needs, each opening its own session.

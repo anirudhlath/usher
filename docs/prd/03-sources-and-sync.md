@@ -47,7 +47,7 @@ Emby exposes a WebSocket at `/embywebsocket?api_key=<token>&deviceId=<id>`.
 
 | Message | Scope | Use | Becomes |
 |---|---|---|---|
-| `LibraryChanged` | Per-user, payload-filtered | Items added / updated / removed | One `SourceEvent` per non-empty array: `ITEM_ADDED`, `ITEM_UPDATED`, `ITEM_REMOVED`. A removal **retracts nothing** |
+| `LibraryChanged` | Per-user, payload-filtered | Items added / updated / removed | One `SourceEvent` per non-empty array: `ITEM_ADDED`, `ITEM_UPDATED`, `ITEM_REMOVED`. A removal retracts only what the source confirms gone |
 | `UserDataChanged` | Own data only | Watch position, played flags | One `WATCH_STATE_CHANGED` carrying the ids *and* the states the message itself contained |
 | `Sessions` (subscribe) | Per-user row-filtered | Liveness only | Nothing. Counted before it is parsed |
 
@@ -190,9 +190,9 @@ Push is the fast path, never the only path.
 
 | Lane | Trigger | Work |
 |---|---|---|
-| **Push** | WebSocket event | Apply it inline when it is small; defer to a delta when it is large. A `WATCH_STATE_CHANGED` carrying its own payload merges with no request at all; one naming more than `push_max_items_per_event` items with no payload becomes a delta walk |
+| **Push** | WebSocket event | Apply it inline when it is small; defer to a delta when it is large. A removal is always applied inline, asking the source a hundred items a request. A `WATCH_STATE_CHANGED` carrying its own payload merges with no request at all; one naming more than `push_max_items_per_event` items with no payload becomes a delta walk |
 | **Reconnect delta** | Socket re-established, or a push event deferred to a delta | Items changed since the last cursor. Bounded by `USHER_PUSH_GAP_MAX_ITEMS`, and **refused outright when there is no cursor** under `USHER_PUSH_GAP_CLOSE`'s `cursored` default |
-| **Full reconcile** | An operator's `POST /admin/sources/{id}/sync` or `usher sync`. Nothing in Usher schedules it; run it nightly from cron | Walk the source; upsert everything; mark unseen items `available = false` |
+| **Full reconcile** | An operator's `POST /admin/sources/{id}/sync` or `usher sync`. Nothing in Usher schedules it; run it nightly from cron | Walk the source; upsert everything; ask the source about the rows the walk did not list, and mark those it confirms gone `available = false` |
 
 **A triggered sync is a queued job, never a walk run inside the request.** The
 route enqueues `JobKind.SYNC` — the item lane then the watch lane — and its 202
@@ -227,7 +227,8 @@ whole-library walk of the same kind continues the same `sync_runs` row, with
 the same `started_at`: completed units are skipped, and every other unit
 continues from the position it committed. Completed units are not read again
 however long ago they ran, so an item removed from one of their libraries since
-then stays available until the next full walk, which starts afresh. A run still
+then stays available until the next full walk, which starts afresh, unless a
+push removal confirms it gone first. A run still
 `running` whose heartbeat is under 10 minutes old is a live walk, and a second
 is refused, saying as durations how long ago that heartbeat moved and how long
 until a walk whose process stopped can be resumed. `usher sync` exits non-zero,
@@ -271,15 +272,34 @@ gap-closing delta that does have a cursor, with `error_code =
 names `usher sync --kind full`. **The ceiling bounds the item lane only**: the
 watch lane owns its own cursor and still walks whole.
 
-**A push `ITEM_REMOVED` retracts nothing.** The event is counted and logged;
-the row stays available until a walk sweeps it.
+**A push `ITEM_REMOVED` retracts only what the source confirms gone.** Emby
+sends `ItemsRemoved` during an ordinary library refresh for items that are
+still there. So the lane asks the source about each removed item it holds
+available, and retracts those the source no longer serves. When one of those
+is a series matched to a title, the lane also asks about the series' available
+episodes, and retracts in the same removal those the source no longer serves;
+an unmatched series' episodes wait for the next full walk. It then
+publishes one `title.updated` for each title or episode it retracted. A
+confirmed removal is applied at once, whatever its size: there is no
+retraction ceiling and no `push_max_items_per_event` deferral. Items Usher
+does not hold are not asked about, so a removed season, folder or library
+changes nothing here: the next full walk's sweep retracts what it held. If
+the source cannot answer, the event fails like any failed read in the lane.
+The gap-closing delta after the reconnect does not retract the items; the
+next full walk's sweep does.
 
-**Retraction is a separate step, and it can decline.** Marking unseen items
-unavailable happens only after a walk returns normally — after a whole-library
-walk, once every unit has completed — and even then it refuses to retract more
-than `sync_max_retract_fraction` (default `0.25`) of a source in one run,
-raising and changing nothing. `1.0` disables the ceiling. The ceiling is a
-fraction of what *Usher* holds for that source, not of the source itself.
+**Retraction is a separate step, and it can decline.** It runs only after a
+walk returns normally — after a whole-library walk, once every unit has
+completed. The rows the walk did not list are its candidates. If they are more
+than `sync_max_retract_fraction` (default `0.25`) of a source's rows, it
+refuses, raising and changing nothing, before asking the source anything.
+`1.0` disables the ceiling. The ceiling is a fraction of what *Usher* holds
+for that source, not of the source itself. Otherwise it asks the source about
+each candidate. It marks unavailable those the source confirms gone, and
+records the rest as seen at the walk's start, since the source still serves
+them. If the source cannot answer, the sweep changes nothing and the run
+fails; the next full walk resumes it and only sweeps. On either path, an
+Emby listing that names only items Usher did not ask about counts as no answer.
 
 An item that reappears in a walk is available again at that moment. An item
 keeps the latest instant it was seen at — a walk's start, or the moment a push
@@ -289,8 +309,9 @@ it to a later full walk's sweep. The sweep only ever sets `false`.
 **A source is either a library this deployment owns or a *view* of somebody
 else's, and Usher does not model the difference.** Pointing Usher at a server
 somebody else runs is supported, with two consequences: the retraction ceiling
-treats removals as the operator's to authorise, and the watch write-back writes
-play state to an account on a server the operator does not administer.
+treats a walk that left many of a source's rows unlisted as the operator's to
+authorise, and the watch write-back writes play state to an account on a server
+the operator does not administer.
 
 **Only a full walk sweeps.**
 

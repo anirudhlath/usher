@@ -3,7 +3,7 @@
 Read [`../README.md`](../README.md) first: it states the licensing rule, the
 reserved identifier bands, and the guard that enforces them.
 
-**Every value in these eight files is invented**, including the `ProviderIds`,
+**Every value in these nine files is invented**, including the `ProviderIds`,
 which until 2026-08-01 carried real TMDb/IMDb/TVDb ids for four real works.
 That is a licensing constraint, not a style, and a doubled one: a real Emby
 response *embeds TMDb-sourced metadata*, which TMDb's terms forbid
@@ -29,6 +29,7 @@ them would test nothing.
 | `episode_item.json` | an episode carrying **its own** provider ids rather than its series' — the payload fact behind "an episode never walks the match ladder" |
 | `multi_version_movie.json` | three `MediaSources`, the first transcode-only (`Protocol: Http`, `Size: 0`, `SupportsDirectPlay: false`), so `primary_media_source`'s selection rule has something to select |
 | `view_item.json` | one library view from `/Users/{id}/Views`: `CollectionType` says what the library holds, and `boxsets`/`playlists` views are not libraries |
+| `ids_version_group.json` | an `Ids` listing naming two versions of one item, asked both ways round, then each version alone: the request lists one of them, the same one in either order, and each alone lists itself. Only `Id` keys, both invented |
 
 `multi_version_movie.json` has been looked for twice against the live server,
 over disjoint slices totalling 1,400 movies, and has never met a real
@@ -70,7 +71,7 @@ in this project's history, 12 `LibraryChanged`**. Four guesses were
 | A `UserDataList` entry is a `UserItemDataDto` (`ItemId`, `PlaybackPositionTicks`, `Played`, …) | **confirmed, with two corrections** | Observed keys: `ItemId`, `PlaybackPositionTicks`, `Played`, `PlayCount`, `IsFavorite`, plus `PlayedPercentage` (a float, when the position is non-zero) and `LastPlayedDate` (when played). |
 | `Key` equals the item id | **refuted — there is no `Key`** | Absent from every entry. Removed from the fixture, from `user_data_changed_frame`, and from the case that asserted it. |
 | `UnplayedItemCount` on an entry | **not observed** | Absent from all five, all of them movies. Removed; a *series* entry is where it would plausibly appear and none was captured. |
-| `LibraryChanged.Data`'s five arrays hold **ids** rather than item objects | **confirmed** | Twelve real messages, all seven keys present on each, every array a list of id strings. One carried all six arrays non-empty at once (including a real `ItemsRemoved` on a library nothing was deleted from — why a removal event retracts nothing, observed) and one carried **42** `ItemsUpdated` ids against `push_max_items_per_event`'s default of 50. The shipped `to_source_events` produced 7 `ITEM_ADDED`, 7 `ITEM_UPDATED` and 1 `ITEM_REMOVED`: one event per non-empty array, live. |
+| `LibraryChanged.Data`'s five arrays hold **ids** rather than item objects | **confirmed** | Twelve real messages, all seven keys present on each, every array a list of id strings. One carried all six arrays non-empty at once (including a real `ItemsRemoved` on a library nothing was deleted from — why a removal is confirmed before anything is retracted, observed) and one carried **42** `ItemsUpdated` ids against `push_max_items_per_event`'s default of 50. The shipped `to_source_events` produced 7 `ITEM_ADDED`, 7 `ITEM_UPDATED` and 1 `ITEM_REMOVED`: one event per non-empty array, live. |
 | `Sessions.Data` is a list of session DTOs | **confirmed** | A list; entry keys are a superset of this fixture's, and the fixture now carries all of them (`AdditionalUsers`, `ApplicationVersion`, `DeviceId`, `InternalDeviceId`, `LastActivityDate`, `PlayableMediaTypes`, `PlaylistIndex`, `PlaylistLength`, `Protocol`, `RemoteEndPoint`, `ServerId`, `SupportedCommands`, `UserName`, and five more on `PlayState`) so the next diff is empty. |
 | **A `UserDataChanged` entry is *correct* about `PlaybackPositionTicks` and `Played`** | **confirmed — and about `PlayCount` and `LastPlayedDate` too** | Compared against `GET /Users/{u}/Items/{item}` in the same second, across three transitions of one item: 613 s written → `PlaybackPositionTicks: 6130000000` with `Played: false`; marked played → `PlayCount: 1`, `Played: true`, and the *same* `LastPlayedDate` string the item route returned; restored → all zero. So this third shape is **not** the partly-honest one the listing route is, and the failure this row was written to catch — a zeroed position behind a green contract case — does not occur. The adapter still reports `play_count`/`last_played_at` as `None`, for the reason given below the table. |
 | `LibraryUpdateInfo.IsEmpty` means "no array carries anything" | **still unverified** | `false` on all twelve, every one of which carried something. Consistent with the guess and not discriminating. Nothing reads it. |
@@ -123,6 +124,11 @@ empty, so the `Ids` row comes from a follow-up that took its series from a
 listing: a sign-in and three requests. The one shape kept is
 `view_item.json`, every value in it invented.
 
+The version-group row comes from a third read-only script, which asked the
+same server by `Ids` for pairs of versions an earlier probe had found,
+printed counts and booleans only, and wrote `ids_version_group.json` with
+both ids replaced by invented ones.
+
 | Behaviour | What the server does | What depends on it |
 |---|---|---|
 | `EnableTotalRecordCount=false` | `TotalRecordCount` is still present, as **0**, at the head of the listing and a million items deep | `OffsetWindow` reads the total from a walk's first page only; `FakeEmbyServer` renders 0 |
@@ -137,6 +143,7 @@ listing: a sign-in and three requests. The one shape kept is
 | Concurrent pages at the deployment gate | 1 walker 0.31/s, 2 walkers 0.34/s, 4 walkers 0.37/s | the `USHER_SYNC_WALKERS` default |
 | `/Shows/NextUp` | nothing on the recorded account (`TotalRecordCount` 0), so its paging and its entries' shape are unmeasured | the seed's third source |
 | `Ids=a,b,c` | without `Recursive`, 3 of 3 series asked came back, all of type `Series`; with it, 3 of 3 | the seed's series request |
+| `Ids` naming two versions of one item | **one** of them, the same one whichever order they are named in, for 4 of 4 pairs; asked alone, each is listed. A fifth pair was skipped, because one of its versions was no longer listed alone | `EmbyAdapter.confirm_gone` asks again, in rounds, for every id a round did not list; `FakeEmbyServer.group_versions`; `ids_version_group.json` |
 
 No source has been seen to cap `Limit`. `FakeEmbyServer.max_limit` exists for
 one that does, and so do two of the conditions on a short page that ends a

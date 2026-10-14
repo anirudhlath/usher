@@ -371,9 +371,7 @@ async def test_a_retracted_copy_is_returned_rather_than_hidden(
     source = await _seed_source(sources)
     title = await _seed_title(titles, EnrichmentState.ENRICHED)
     await _seed_copy(media_items, source_id=source.id, title_id=title.id, external_id="e1")
-    await media_items.mark_unseen_unavailable(
-        source.id, seen_since=datetime(2026, 8, 2, tzinfo=UTC), max_retract_fraction=1.0
-    )
+    await media_items.retract(source.id, ["e1"], unseen_since=datetime(2026, 8, 2, tzinfo=UTC))
     detail = await service.detail(title.id, user_id=USER_ID)
     assert detail is not None
     assert [(copy.external_id, copy.available) for copy in detail.availability] == [("e1", False)]

@@ -38,6 +38,16 @@ class SourceHarness(ABC):
         """
 
     @abstractmethod
+    async def given_versions(
+        self, items: Sequence[SourceItem], *, changed_at: AwareDatetime
+    ) -> None:
+        """`given_item` for each of `items`, held as versions of one item.
+
+        Emby groups a film's files into one item with several versions, and its `Ids`
+        listing names one version of a group per request.
+        """
+
+    @abstractmethod
     async def given_watch_state(self, state: SourceWatchState) -> None:
         """Make the source hold `state` for `state.external_id`."""
 

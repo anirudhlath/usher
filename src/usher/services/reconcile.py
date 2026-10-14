@@ -4,10 +4,11 @@ import asyncio
 import math
 import time
 from collections import deque
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from loguru import logger
 from opentelemetry import metrics, trace
@@ -34,6 +35,7 @@ from usher.ports.ingest import AvailabilitySweepRefused
 from usher.ports.repository import MediaItemRepository, SyncRunRepository
 from usher.ports.source import SourceAdapter, SourceItem, UnitPage
 from usher.services.ingest import IngestService
+from usher.services.retraction import confirmed_gone
 from usher.services.run_closing import close_cancelled
 
 _tracer = trace.get_tracer("usher.reconcile")
@@ -342,7 +344,7 @@ class ReconcileService:
                         # `try` boundary wide, and the ceiling is inside it: a
                         # bounded walk has items it never looked at, so a sweep
                         # after one would retract every one of them.
-                        run = await self._sweep(progress.run, kind, source.name)
+                        run = await self._sweep(progress, kind, source.name, adapter)
                         run = run.evolve(
                             status=SyncRunStatus.COMPLETED, finished_at=datetime.now(UTC)
                         )
@@ -564,17 +566,7 @@ class ReconcileService:
         if resumed:
             units = await self._runs.units_for(progress.run.id)
         else:
-            planning = asyncio.create_task(adapter.plan_walk())
-            try:
-                pending = {planning}
-                while pending:
-                    _, pending = await asyncio.wait(pending, timeout=self._heartbeat_seconds)
-                    if pending:
-                        await self._beat(progress)
-            finally:
-                planning.cancel()
-                await asyncio.gather(planning, return_exceptions=True)
-            plan = planning.result()
+            plan = await self._beating(progress, adapter.plan_walk())
             units = [
                 SyncRunUnit(
                     run_id=progress.run.id,
@@ -764,6 +756,24 @@ class ReconcileService:
         await self._runs.save(progress.run)
         await self._commit()
 
+    async def _beating[T](self, progress: _Progress, work: Coroutine[Any, Any, T]) -> T:
+        """Await `work`, moving the run's heartbeat every `heartbeat_seconds` meanwhile.
+
+        `work` must not touch the session, because a beat commits beside it. However the
+        wait ends -- `work` raising, or a beat -- `work` is not left running.
+        """
+        task = asyncio.create_task(work)
+        try:
+            pending: set[asyncio.Task[T]] = {task}
+            while pending:
+                _, pending = await asyncio.wait(pending, timeout=self._heartbeat_seconds)
+                if pending:
+                    await self._beat(progress)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        return task.result()
+
     async def _flush(
         self,
         source: Source,
@@ -834,27 +844,37 @@ class ReconcileService:
             )
         )
 
-    async def _sweep(self, run: SyncRun, kind: SyncRunKind, source_name: str) -> SyncRun:
-        """Retract availability -- full walks only, and only after one finished.
+    async def _sweep(
+        self, progress: _Progress, kind: SyncRunKind, source_name: str, adapter: SourceAdapter
+    ) -> SyncRun:
+        """Retract what the source confirms gone -- full walks only, after one finished.
 
-        `source_name` is carried in for the metric's label rather than read off
-        the run, which holds only a `source_id`: `usher.sync.run.duration` beside
-        it is already labelled by name, and a second per-source identity in
-        telemetry is one identity too many.
+        The rows the walk did not list are the candidates, and the ceiling is applied to
+        them before the source is asked anything. Of the rest, those the source no longer
+        serves are retracted, and those it still serves -- alternate versions, which
+        Emby's full listing never shows -- are stamped as seen at the run's `started_at`. Both
+        writes commit with the run's completing row. A source that cannot answer raises
+        before either, so nothing changes and the run fails resumable.
+
+        `source_name` is carried in for the metric's label rather than read off the run,
+        which holds only a `source_id`: `usher.sync.run.duration` beside it is already
+        labelled by name, and a second per-source identity in telemetry is one identity
+        too many.
         """
+        run = progress.run
         if kind is not SyncRunKind.FULL:
             return run
         try:
-            result = await self._media_items.mark_unseen_unavailable(
+            unseen = await self._media_items.list_unseen(
                 run.source_id,
                 seen_since=run.started_at,
                 max_retract_fraction=self._max_retract_fraction,
             )
         except AvailabilitySweepRefused as exc:
-            # The refusal's own numerator, never `SweepResult.retracted` --
-            # which is what a refused sweep did, i.e. nothing. See the
-            # instrument's own comment: the two differ exactly when the guard
-            # fires, which is the one state this series exists for.
+            # The refusal's own numerator, never a retraction count -- which is
+            # what a refused sweep did, i.e. nothing. See the instrument's own
+            # comment: the two differ exactly when the guard fires, which is the
+            # one state this series exists for.
             _retraction_fraction.record(
                 _fraction(exc.would_retract, exc.total),
                 {"source": source_name, "outcome": "refused"},
@@ -869,8 +889,27 @@ class ReconcileService:
             # `AvailabilitySweepRefused` is a `UsherPortError`, so it lands
             # in the same branch a transport failure does.
             raise
+        gone = await self._beating(
+            progress,
+            confirmed_gone(adapter, unseen.external_ids, source=source_name, path="sweep"),
+        )
+        retraction = await self._media_items.retract(
+            run.source_id, gone, unseen_since=run.started_at
+        )
+        await self._media_items.mark_seen(
+            run.source_id, unseen.external_ids - gone, seen_at=run.started_at
+        )
+        logger.info(
+            "{source}'s sweep found {candidates} rows the walk did not list: "
+            "{gone} gone, {served} still served",
+            source=source_name,
+            candidates=len(unseen.external_ids),
+            gone=len(gone),
+            served=len(unseen.external_ids) - len(gone),
+        )
         _retraction_fraction.record(
-            _fraction(result.retracted, result.total),
+            _fraction(retraction.retracted, unseen.total),
             {"source": source_name, "outcome": "swept"},
         )
-        return run.evolve(items_retracted=result.retracted)
+        # `progress.run`, not `run`: a beat while the source was asked moved its heartbeat.
+        return progress.run.evolve(items_retracted=retraction.retracted)

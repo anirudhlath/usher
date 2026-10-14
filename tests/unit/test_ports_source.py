@@ -530,6 +530,11 @@ def test_get_watch_state_is_on_the_port() -> None:
     assert signature.return_annotation == SourceWatchState | None
 
 
+def test_confirm_gone_is_abstract_so_no_adapter_inherits_a_silent_default() -> None:
+    """A default answering "none gone" would switch retraction off for a new adapter."""
+    assert "confirm_gone" in SourceAdapter.__abstractmethods__
+
+
 def test_a_walks_resume_point_is_keyword_only() -> None:
     """`watch_state` takes a cursor and a resume point, and an `int` would fill either.
 

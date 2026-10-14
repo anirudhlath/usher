@@ -299,8 +299,8 @@ async def test_availability_spans_two_sources_and_keeps_a_retracted_copy(
     title = await _seed_title(session, EnrichmentState.ENRICHED)
     await _seed_copy(session, source_id=source.id, title_id=title.id, external_id="mine")
     await _seed_copy(session, source_id=other.id, title_id=title.id, external_id="theirs")
-    await PostgresMediaItemRepository(session).mark_unseen_unavailable(
-        other.id, seen_since=datetime(2026, 8, 2, tzinfo=UTC), max_retract_fraction=1.0
+    await PostgresMediaItemRepository(session).retract(
+        other.id, ["theirs"], unseen_since=datetime(2026, 8, 2, tzinfo=UTC)
     )
 
     detail = await service.detail(title.id, user_id=user_id)

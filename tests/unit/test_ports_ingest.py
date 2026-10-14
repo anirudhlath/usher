@@ -14,7 +14,6 @@ from usher.ports.ingest import (
     MediaItemUpsert,
     NameYearProbe,
     ProviderRef,
-    SweepResult,
     WatchStateMerge,
 )
 
@@ -110,20 +109,10 @@ def test_the_sweep_refusal_is_a_port_error() -> None:
 def test_the_sweep_refusal_survives_a_zero_denominator() -> None:
     """An empty source must not make the message's own percentage divide by zero.
 
-    Unreachable through today's one guard (`stale > 0` implies `total > 0`), but a
+    Unreachable through today's one guard (`unseen > 0` implies `total > 0`), but a
     `ZeroDivisionError` raised from the constructor of the error that keeps a sweep from
     destroying a library is not worth leaving reachable.
     """
     exc = AvailabilitySweepRefused(would_retract=0, total=0, ceiling=0.25)
     assert isinstance(exc, UsherPortError)
     assert exc.total == 0
-
-
-def test_a_sweep_result_reports_the_denominator_as_well_as_the_count() -> None:
-    """A bare "3 retracted" is not actionable on its own.
-
-    "3 of 4" and "3 of a whole library" are different operational events, and the sweep
-    has already counted the denominator to evaluate its own guard.
-    """
-    result = SweepResult(retracted=3, total=94_438)
-    assert (result.retracted, result.total) == (3, 94_438)

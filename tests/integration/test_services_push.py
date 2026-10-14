@@ -1,6 +1,6 @@
-"""`PushApplyService` against real Postgres.
+"""`PushApplyService` against real Postgres, where three cases need what no port fake can express.
 
-For the two things its port fakes structurally cannot express.
+The three removal cases repeat unit cases against the table that holds the `available` flag.
 """
 
 import uuid
@@ -14,8 +14,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from tests.fakes.event_publisher import FakeEventPublisher
 
 # The queue is a fake here deliberately: `PostgresJobQueue` has its own
-# contract run against real Postgres, and what these cases are about is the
-# merge SQL and the trigger the `watch_states` table carries.
+# contract run against real Postgres, and no case reads what is queued. Each
+# is about what the real tables do: the `watch_states` merge and its trigger,
+# the foreign keys a pushed item's rows must satisfy, or the `available` flag
+# a removal may clear.
 from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.source_adapter import FakeSourceAdapter
 from usher.db.repositories.episode import PostgresEpisodeRepository
@@ -115,6 +117,7 @@ def applier(
         # one connection-bound transaction it rolls back, which is what makes
         # each test isolated. What is under test is the SQL, not durability.
         session.flush,
+        media_items=media_items,
     )
 
 
@@ -301,25 +304,139 @@ async def test_a_pushed_item_is_ingested_and_published(
     assert [event.kind for event in events.published] == [ClientEventKind.TITLE_UPDATED]
 
 
-async def test_a_removal_leaves_every_row_available(
+async def test_a_removal_the_source_confirms_retracts_the_row(
     session: AsyncSession,
     applier: PushApplyService,
+    events: FakeEventPublisher,
     source: Source,
     user_id: uuid.UUID,
 ) -> None:
-    """A removal leaves every row available, against the table that holds the flag.
-
-    An Emby library refresh emits `ItemsRemoved` for items that have not gone
-    anywhere, and the one thing that must not happen is a row flipping to
-    `available = false` on the strength of it.
-    """
-    await _given_matched_movie(session, source, "movie-1")
+    """Against the table that holds the flag: the source no longer serves movie-1."""
+    title_id = await _given_matched_movie(session, source, "movie-1")
     outcome = await applier.apply(
         source,
         FakeSourceAdapter(source),
         SourceEvent(kind=SourceEventKind.ITEM_REMOVED, external_ids=("movie-1",)),
         user_id=user_id,
     )
-    assert outcome.ignored == 1
+    assert outcome.items_retracted == 1
+    stored = await PostgresMediaItemRepository(session).get_by_external_id(source.id, "movie-1")
+    assert stored is not None and stored.available is False
+    assert [(event.kind, event.title_id) for event in events.published] == [
+        (ClientEventKind.TITLE_UPDATED, title_id)
+    ]
+
+
+async def test_a_removal_the_source_still_serves_leaves_the_row_available(
+    session: AsyncSession,
+    applier: PushApplyService,
+    events: FakeEventPublisher,
+    source: Source,
+    user_id: uuid.UUID,
+) -> None:
+    """What an Emby library refresh sends: `ItemsRemoved` for a file that is still there."""
+    await _given_matched_movie(session, source, "movie-1")
+    adapter = FakeSourceAdapter(source)
+    adapter.seed(
+        SourceItem(
+            external_id="movie-1",
+            name="Film movie-1",
+            kind=SourceItemKind.MOVIE,
+            year=2021,
+            container="mkv",
+        ),
+        SEEN_AT,
+    )
+    outcome = await applier.apply(
+        source,
+        adapter,
+        SourceEvent(kind=SourceEventKind.ITEM_REMOVED, external_ids=("movie-1",)),
+        user_id=user_id,
+    )
+    assert outcome.items_retracted == 0
     stored = await PostgresMediaItemRepository(session).get_by_external_id(source.id, "movie-1")
     assert stored is not None and stored.available is True
+    assert events.published == []
+
+
+async def _given_a_series_with_episodes(
+    session: AsyncSession, source: Source, episodes: int
+) -> tuple[uuid.UUID, list[uuid.UUID]]:
+    """`series-1`, one season, and `ep-0` onward, each with its `media_items` row."""
+    series = Title(kind=TitleKind.SERIES, name="Pushed Series", sort_name="Pushed Series")
+    await PostgresTitleRepository(session).add(series)
+    season, episode_ids = new_id(), [new_id() for _ in range(episodes)]
+    await session.execute(
+        text("INSERT INTO seasons (id, title_id, season_number) VALUES (:id, :title_id, 1)"),
+        {"id": season, "title_id": series.id},
+    )
+    for number, episode_id in enumerate(episode_ids, start=1):
+        await session.execute(
+            text(
+                "INSERT INTO episodes (id, title_id, season_id, season_number, episode_number) "
+                "VALUES (:id, :title_id, :season_id, 1, :number)"
+            ),
+            {"id": episode_id, "title_id": series.id, "season_id": season, "number": number},
+        )
+    rows = [("series-1", None)] + [(f"ep-{index}", one) for index, one in enumerate(episode_ids)]
+    await PostgresMediaItemRepository(session).upsert_many(
+        [
+            MediaItemUpsert(
+                source_id=source.id,
+                external_id=external_id,
+                title_id=series.id,
+                episode_id=episode_id,
+                container=None if episode_id is None else "mkv",
+                video_codec=None,
+                audio_codec=None,
+                width=None,
+                height=None,
+                hdr_format=None,
+                audio_channels=None,
+                file_size_bytes=None,
+                runtime_seconds=None,
+                added_at=None,
+                last_seen_at=SEEN_AT,
+            )
+            for external_id, episode_id in rows
+        ]
+    )
+    return series.id, episode_ids
+
+
+async def test_a_removed_series_retracts_its_episodes_the_source_confirms_gone(
+    session: AsyncSession,
+    applier: PushApplyService,
+    events: FakeEventPublisher,
+    source: Source,
+    user_id: uuid.UUID,
+) -> None:
+    """Emby names the series alone; `ep-0` and `ep-1` go with it, and the served `ep-2` stays."""
+    series, episode_ids = await _given_a_series_with_episodes(session, source, episodes=3)
+    adapter = FakeSourceAdapter(source)
+    adapter.seed(
+        SourceItem(external_id="ep-2", name="Episode 3", kind=SourceItemKind.EPISODE),
+        SEEN_AT,
+    )
+    outcome = await applier.apply(
+        source,
+        adapter,
+        SourceEvent(kind=SourceEventKind.ITEM_REMOVED, external_ids=("series-1",)),
+        user_id=user_id,
+    )
+    assert adapter.confirm_calls == [frozenset({"series-1"}), frozenset({"ep-0", "ep-1", "ep-2"})]
+    assert outcome.items_retracted == 3
+    repository = PostgresMediaItemRepository(session)
+    for external_id, available in (
+        ("series-1", False),
+        ("ep-0", False),
+        ("ep-1", False),
+        ("ep-2", True),
+    ):
+        stored = await repository.get_by_external_id(source.id, external_id)
+        assert stored is not None and stored.available is available, external_id
+    assert {(event.title_id, event.episode_id) for event in events.published} == {
+        (series, None),
+        (series, episode_ids[0]),
+        (series, episode_ids[1]),
+    }

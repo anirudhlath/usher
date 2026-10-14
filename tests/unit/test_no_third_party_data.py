@@ -64,6 +64,22 @@ _ID_KEYS = frozenset(
     }
 )
 
+# Keys whose value is a *list* of entity ids, each member checked as an `_ID_KEYS`
+# value is: the ids each `Ids` request named in `emby/ids_version_group.json`, every
+# array of a `LibraryChanged` frame, and a TMDb search result's `genre_ids`.
+_ID_LIST_KEYS = frozenset(
+    {
+        "asked",
+        "ItemsAdded",
+        "ItemsRemoved",
+        "ItemsUpdated",
+        "FoldersAddedTo",
+        "FoldersRemovedFrom",
+        "CollectionFolders",
+        "genre_ids",
+    }
+)
+
 # Every third-party identifier this repository is known to have committed, as a
 # truncated SHA-256 of the id rather than the id.
 _ONCE_COMMITTED_HERE = frozenset(
@@ -213,7 +229,7 @@ def _all_imdb_ids() -> set[str]:
 
 
 def _walk_ids(node: Any, where: str) -> list[tuple[str, object]]:
-    """Every value under an id-bearing key, with a path to it."""
+    """Every value under an id-bearing key, and every member of an id list, with a path to it."""
     found: list[tuple[str, object]] = []
     if isinstance(node, dict):
         for key, value in node.items():
@@ -221,6 +237,13 @@ def _walk_ids(node: Any, where: str) -> list[tuple[str, object]]:
                 found.extend((f"{where}.ProviderIds.{k}", v) for k, v in value.items())
             elif key in _ID_KEYS and not isinstance(value, dict | list):
                 found.append((f"{where}.{key}", value))
+            elif key in _ID_LIST_KEYS and isinstance(value, list):
+                for index, member in enumerate(value):
+                    at = f"{where}.{key}[{index}]"
+                    if isinstance(member, dict | list):
+                        found.extend(_walk_ids(member, at))
+                    else:
+                        found.append((at, member))
             else:
                 found.extend(_walk_ids(value, f"{where}.{key}"))
     elif isinstance(node, list):
@@ -293,6 +316,31 @@ def test_every_id_in_a_fixture_is_synthetic() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "key",
+    [
+        "asked",
+        "ItemsAdded",
+        "ItemsRemoved",
+        "ItemsUpdated",
+        "FoldersAddedTo",
+        "FoldersRemovedFrom",
+        "CollectionFolders",
+        "genre_ids",
+    ],
+)
+def test_every_member_of_an_id_list_is_walked(key: str) -> None:
+    """A list under an id-list key is walked member by member, nested entries included.
+
+    Without this, dropping a key from `_ID_LIST_KEYS`, or the branch that reads it,
+    leaves every fixture case green: the committed lists hold synthetic ids, so the
+    guard passes whether it reads them or not. Parametrized rather than a set
+    comparison, as `test_the_guard_reads_what_it_claims_to_read` is.
+    """
+    walked = _walk_ids({key: ["a", {"Id": "b"}]}, "f.json")
+    assert walked == [(f"f.json.{key}[0]", "a"), (f"f.json.{key}[1].Id", "b")]
+
+
 def test_no_identifier_this_repository_once_committed_has_come_back() -> None:
     """The regression list, checked in id *positions* only.
 
@@ -349,6 +397,7 @@ def test_no_dataset_row_is_committed_anywhere() -> None:
         "tests/fixtures/emby/push_library_changed.json",
         "tests/fixtures/emby/push_sessions.json",
         "tests/fixtures/emby/view_item.json",
+        "tests/fixtures/emby/ids_version_group.json",
         "tests/fixtures/tmdb/movie.json",
         "tests/fixtures/tmdb/series.json",
         "tests/fixtures/tmdb/season.json",
