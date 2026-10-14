@@ -46,7 +46,7 @@ The spec leaves these open. Each is settled here so that no task has to settle i
 9. **`PushApplyService` takes `media_items` as a required keyword argument.**
 10. **Five contract cases are shared by both adapters**, so the Emby contract's
     pinned case count goes from 55 to 60. The wire-level cases (rounds, `Limit`,
-    a malformed body, a stray id, spans) are Emby-only, in a new
+    a malformed body or entry, a stray id, spans) are Emby-only, in a new
     `tests/unit/test_adapters_emby_confirm.py`.
 11. **The recorded fixture uses two invented `Id`s:**
     `0000000000000000000000000000e001` is the version the request lists, and
@@ -89,7 +89,8 @@ The spec leaves these open. Each is settled here so that no task has to settle i
 - **The fake adapter's failure:** `PortUnavailable("source went away while
   confirming removals")`
 - **Emby's malformed body:** `PortDataMalformed("Emby's Ids listing carried no
-  Items array")`
+  Items array")`, and for an entry with no string `Id`,
+  `PortDataMalformed("Emby's Ids listing carried an entry with no string Id")`
 
 **Scope and safety**
 
@@ -135,7 +136,8 @@ The spec leaves these open. Each is settled here so that no task has to settle i
    `PortDataMalformed`. Read as an empty listing, it would mark every asked id
    gone. (Task 3, `test_a_body_without_items_raises_rather_than_reading_as_gone`.)
 2. **101 ids go as two requests, with `Limit` 100 and 1.** A `Limit` left at the
-   default page size would truncate a full chunk and read its tail as gone.
+   default page size would cut a full chunk short, and the rounds would take
+   extra requests to re-ask its tail.
    (Task 3, `test_a_hundred_and_one_ids_go_as_two_requests_each_limited_to_its_chunk`.)
 3. **A push event naming the same id twice handles it once.** It is asked,
    retracted and counted once, and published once. (Task 7,
@@ -174,9 +176,10 @@ These are known and accepted. None blocks this slice.
 |---|---|---|
 | `tests/fixtures/emby/ids_version_group.json` | 1 | a new recording |
 | `tests/fixtures/emby/README.md` | 1, 7 | the file count, a file row, the capture note and a protocol row (1); the `LibraryChanged` row's reason (7) |
-| `tests/unit/test_no_third_party_data.py` | 1 | the fixture joins the scanned list |
+| `tests/unit/test_no_third_party_data.py` | 1 | the fixture joins the scanned list, and the guard walks every member of an id list |
+| `tests/fixtures/README.md`, `.claude/rules/fixtures-and-fakes.md` | 1 | three cases fail if the scans stop scanning |
 | `tests/fakes/emby_server.py` | 2 | `group_versions` and `_listed_for` |
-| `tests/unit/test_fakes_emby_server.py` | 2 | three cases |
+| `tests/unit/test_fakes_emby_server.py` | 2 | four cases |
 | `src/usher/ports/source.py` | 3 | the abstract `confirm_gone`, and `get_item`'s docstring |
 | `src/usher/adapters/emby/adapter.py` | 3 | `confirm_gone` and `_listed_of` |
 | `tests/fakes/source_adapter.py` | 3, 5 | `confirm_gone`, `confirm_calls` and `fail_confirm` (3); `unlist` (5) |
@@ -190,13 +193,14 @@ These are known and accepted. None blocks this slice.
 | `src/usher/db/repositories/media_item.py` | 4, 6 | four methods and five statements (4); the old method and its statements go (6) |
 | `tests/fakes/media_item_repository.py` | 4, 6 | four methods (4); the old one goes (6) |
 | `tests/contract/media_item_repository_contract.py` | 4, 6 | thirteen cases (4); the old cases go or are re-pointed (6) |
-| `tests/integration/test_media_item_repository.py` | 4, 6 | three statement-count cases (4); two old ones go (6) |
-| `tests/unit/test_ports_repository_ingest.py` | 4 | the surface set |
+| `tests/integration/test_media_item_repository.py` | 4, 6 | four statement-count cases (4); two old ones go (6) |
+| `tests/unit/test_ports_repository_ingest.py` | 4, 6 | the surface set |
 | `src/usher/services/retraction.py` | 5 | new: `confirmed_gone` and the counter |
 | `src/usher/services/reconcile.py` | 5 | `_beating`, and the sweep |
 | `tests/unit/test_services_reconcile.py` | 5 | the sweep cases, with the window case re-pointed |
-| `tests/unit/test_telemetry_retraction.py` | 5 | new |
+| `tests/unit/test_telemetry_retraction.py` | 5 | new, with the counter reader the sweep cases import |
 | `tests/integration/test_services_reconcile.py` | 5 | `confirm_gone` on the duck adapter, and one case |
+| `tests/integration/test_pipeline_spans.py` | 5 | `confirm_gone` on its duck adapter |
 | `docs/prd/03-sources-and-sync.md` | 5, 7 | the retraction paragraph, the lanes table and the push paragraph |
 | `docs/prd/08-operations.md`, `docs/guide/command-line.md` | 5, 7 | the failure rows and the guide bullets |
 | `docs/prd/10-telemetry-and-dashboards.md` | 5, 8 | the counter row and the count (5); Dashboard 3 (8) |
@@ -223,6 +227,7 @@ that identifies the server or its account goes into the repo.
 - Create: `tests/fixtures/emby/ids_version_group.json`
 - Modify: `tests/fixtures/emby/README.md`
 - Modify: `tests/unit/test_no_third_party_data.py`
+- Modify: `tests/fixtures/README.md` and `.claude/rules/fixtures-and-fakes.md`
 
 **Interfaces:**
 - Consumes: `/var/tmp/sync-speed/versions.txt`, an earlier probe's output. Each
@@ -368,10 +373,12 @@ Make four edits.
    both ids replaced by invented ones.
    ```
 
-4. After the protocol-table row that begins `` | `Ids=a,b,c` | ``, add:
+4. After the protocol-table row that begins `` | `Ids=a,b,c` | ``, add this
+   row. Its sample is the capture's: four pairs served alone and asked both ways
+   round, and a fifth skipped as not served alone.
 
    ```markdown
-   | `Ids` naming two versions of one item | **one** of them, the same one whichever order they are named in; asked alone, each is listed | `EmbyAdapter.confirm_gone` asks again, in rounds, for every id a round did not list; `FakeEmbyServer.group_versions`; `ids_version_group.json` |
+   | `Ids` naming two versions of one item | **one** of them, the same one whichever order they are named in, for 4 of 4 pairs; asked alone, each is listed. A fifth pair was skipped, because one of its versions was no longer listed alone | `EmbyAdapter.confirm_gone` asks again, in rounds, for every id a round did not list; `FakeEmbyServer.group_versions`; `ids_version_group.json` |
    ```
 
 - [ ] **Step 6: Put the fixture inside the third-party-data guard**
@@ -381,16 +388,104 @@ In `tests/unit/test_no_third_party_data.py`, in the list that
 `"tests/fixtures/emby/ids_version_group.json",` directly after
 `"tests/fixtures/emby/view_item.json",`.
 
-- [ ] **Step 7: Run the guard, then the gate**
+The guard reads a scalar only under an id key, so the six ids in the
+recording's `asked` arrays would go unread. Teach it to walk id lists. Directly
+after `_ID_KEYS`, add:
+
+```python
+# Keys whose value is a *list* of entity ids, each member checked as an `_ID_KEYS`
+# value is: the ids each `Ids` request named in `emby/ids_version_group.json`, every
+# array of a `LibraryChanged` frame, and a TMDb search result's `genre_ids`.
+_ID_LIST_KEYS = frozenset(
+    {
+        "asked",
+        "ItemsAdded",
+        "ItemsRemoved",
+        "ItemsUpdated",
+        "FoldersAddedTo",
+        "FoldersRemovedFrom",
+        "CollectionFolders",
+        "genre_ids",
+    }
+)
+```
+
+In `_walk_ids`, change the docstring to
+`"""Every value under an id-bearing key, and every member of an id list, with a path to it."""`,
+and directly after the `elif key in _ID_KEYS and not isinstance(value, dict | list):`
+branch, add:
+
+```python
+            elif key in _ID_LIST_KEYS and isinstance(value, list):
+                for index, member in enumerate(value):
+                    at = f"{where}.{key}[{index}]"
+                    if isinstance(member, dict | list):
+                        found.extend(_walk_ids(member, at))
+                    else:
+                        found.append((at, member))
+```
+
+Directly after `test_every_id_in_a_fixture_is_synthetic`, add:
+
+```python
+@pytest.mark.parametrize(
+    "key",
+    [
+        "asked",
+        "ItemsAdded",
+        "ItemsRemoved",
+        "ItemsUpdated",
+        "FoldersAddedTo",
+        "FoldersRemovedFrom",
+        "CollectionFolders",
+        "genre_ids",
+    ],
+)
+def test_every_member_of_an_id_list_is_walked(key: str) -> None:
+    """A list under an id-list key is walked member by member, nested entries included.
+
+    Without this, dropping a key from `_ID_LIST_KEYS`, or the branch that reads it,
+    leaves every fixture case green: the committed lists hold synthetic ids, so the
+    guard passes whether it reads them or not. Parametrized rather than a set
+    comparison, as `test_the_guard_reads_what_it_claims_to_read` is.
+    """
+    walked = _walk_ids({key: ["a", {"Id": "b"}]}, "f.json")
+    assert walked == [(f"f.json.{key}[0]", "a"), (f"f.json.{key}[1].Id", "b")]
+```
+
+The guard now has three cases that fail if the scans stop scanning, so the two
+documents that count them change:
+
+- In `tests/fixtures/README.md`, replace `Two more fail if the scans stop
+  scanning. Mutation-verified: eleven mutations, eleven killed.` with
+  `Three more fail if the scans stop scanning. Mutation-verified when the guard
+  had two of them: eleven mutations, eleven killed. The third was added with the
+  walk over id lists and verified by planting against it.`
+- In `.claude/rules/fixtures-and-fakes.md`, change `**Keep the two cases that
+  fail if the scans stop scanning**` to `**Keep the three cases that fail if the
+  scans stop scanning**`, and in the mutation list after it, insert `an id
+  list's members left unwalked,` before `each matcher made to match nothing`.
+
+- [ ] **Step 7: Run the guard, plant the walk away, then the gate**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest tests/unit/test_no_third_party_data.py -p no:randomly`
 
-Expected: PASS. Then run the full gate (Global Constraints). Expected: green.
+Expected: PASS.
+
+Plant the new branch away once:
+1. Back up: `cp tests/unit/test_no_third_party_data.py /var/tmp/confirmed-retraction-plant.bak`.
+2. With Edit, delete the `elif key in _ID_LIST_KEYS` branch.
+3. Rerun the file. Expected: all eight parameters of
+   `test_every_member_of_an_id_list_is_walked` fail, and nothing else does.
+4. Restore and read the restore back:
+   `cp /var/tmp/confirmed-retraction-plant.bak tests/unit/test_no_third_party_data.py && diff /var/tmp/confirmed-retraction-plant.bak tests/unit/test_no_third_party_data.py`.
+
+Then run the full gate (Global Constraints). Expected: green.
 
 - [ ] **Step 8: Commit**
 
 ```bash
-git add tests/fixtures/emby/ids_version_group.json tests/fixtures/emby/README.md tests/unit/test_no_third_party_data.py
+git add tests/fixtures/emby/ids_version_group.json tests/fixtures/emby/README.md tests/unit/test_no_third_party_data.py tests/fixtures/README.md .claude/rules/fixtures-and-fakes.md
 git commit -m "tests: record how an Ids listing answers two versions of one item"
 ```
 
@@ -412,7 +507,7 @@ git commit -m "tests: record how an Ids listing answers two versions of one item
 
 - [ ] **Step 1: Write the failing tests**
 
-Add these three cases to `tests/unit/test_fakes_emby_server.py`, directly after
+Add these four cases to `tests/unit/test_fakes_emby_server.py`, directly after
 `test_ids_lists_only_the_named_items`. Every name they use is already imported
 or defined in that module: `replace`, `load_emby_fixture`, `MOVIE`, `ADDED_AT`,
 `_Driver`, `_listed` and the `driver` fixture.
@@ -427,6 +522,12 @@ async def test_an_ids_listing_replays_the_recorded_version_group(driver: _Driver
     driver.server.group_versions(*versions)
     listings = recorded["listings"]
     assert len(listings) == 4, "the premise: both orders, then each version alone"
+    assert {tuple(listing["asked"]) for listing in listings} == {
+        tuple(versions),
+        tuple(reversed(versions)),
+        (versions[0],),
+        (versions[1],),
+    }, "the premise: both orders, then each version alone"
     for listing in listings:
         asked = listing["asked"]
         assert await _listed(driver, Ids=",".join(asked), Limit=str(len(asked))) == [
@@ -449,15 +550,22 @@ async def test_a_version_group_changes_no_listing_but_one_by_ids(driver: _Driver
         driver.server.add_item(replace(MOVIE, external_id=version), ADDED_AT)
     driver.server.group_versions("v0", "v1")
     assert sorted(await _listed(driver)) == ["v0", "v1"]
+
+
+async def test_a_version_group_lists_by_its_own_order_not_the_ids(driver: _Driver) -> None:
+    for version in ("v0", "v1"):
+        driver.server.add_item(replace(MOVIE, external_id=version), ADDED_AT)
+    driver.server.group_versions("v1", "v0")
+    assert await _listed(driver, Ids="v0,v1", Limit="2") == ["v1"]
 ```
 
 - [ ] **Step 2: Run them to see them fail**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest tests/unit/test_fakes_emby_server.py -p no:randomly -k "version_group"`
 
-Expected: the first two FAIL with `AttributeError: 'FakeEmbyServer' object has
-no attribute 'group_versions'`. The third fails the same way, because it calls
-`group_versions` before it lists.
+Expected: the first two and the fourth FAIL with `AttributeError:
+'FakeEmbyServer' object has no attribute 'group_versions'`. The third fails the
+same way, because it calls `group_versions` before it lists.
 
 - [ ] **Step 3: Implement the groups**
 
@@ -475,8 +583,8 @@ Add this method directly after `add_alternate_version`:
         """Hold `external_ids` as versions of one item, in this order.
 
         An `Ids` listing then names one member of the group per request: the first, in
-        this order, of those the request names and the server holds. That is what
-        `ids_version_group.json` records Emby doing. Emby's full listing shows one
+        this order, of those the rest of the request matches, before paging. That is
+        what `ids_version_group.json` records Emby doing. Emby's full listing shows one
         version per group too; this fake does not model that, and no walk test groups
         versions.
         """
@@ -512,7 +620,8 @@ Expected: PASS, every case in the file.
 
 - [ ] **Step 5: Plant the rule false, once**
 
-The replay case is the only test of which member is listed, so prove it can fail.
+The replay case and the own-order case are the tests of which member is listed.
+Prove the replay can fail against the recording.
 
 1. Back up the file:
    `cp tests/fakes/emby_server.py /var/tmp/confirmed-retraction-plant.bak`
@@ -721,7 +830,9 @@ def _adapter(
     """An adapter over `server`, every request it sends, and an optional canned `Ids` answer."""
     seen: list[httpx.Request] = []
 
-    def handle(request: httpx.Request) -> httpx.Response:
+    async def handle(request: httpx.Request) -> httpx.Response:
+        # A turn of the loop per request, as a real one gives, so a deadline can fire.
+        await asyncio.sleep(0)
         seen.append(request)
         if answer is not None and "Ids" in request.url.params:
             return httpx.Response(200, json=answer)
@@ -777,7 +888,7 @@ async def test_a_hundred_and_one_ids_go_as_two_requests_each_limited_to_its_chun
     finally:
         await adapter.aclose()
     assert gone == frozenset(asked)
-    limits = [request.url.params["Limit"] for request in seen if "Ids" in request.url.params]
+    limits = [request.url.params.get("Limit") for request in seen if "Ids" in request.url.params]
     assert limits == [str(IDS_PER_REQUEST), "1"]
 
 
@@ -785,6 +896,23 @@ async def test_a_body_without_items_raises_rather_than_reading_as_gone() -> None
     adapter, _ = _adapter(FakeEmbyServer(), answer={"TotalRecordCount": 0})
     try:
         with pytest.raises(PortDataMalformed, match="no Items array"):
+            await adapter.confirm_gone(["kept-1"])
+    finally:
+        await adapter.aclose()
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [{"Name": "Movie kept-1"}, {"id": "kept-1"}, {"Id": 1}, "kept-1"],
+    ids=["no-id", "lowercase-id", "integer-id", "bare-string"],
+)
+async def test_an_entry_without_a_string_id_raises_rather_than_reading_as_gone(
+    entry: object,
+) -> None:
+    """An entry with no readable `Id` may be the asked one, so the round cannot decide."""
+    adapter, _ = _adapter(FakeEmbyServer(), answer={"Items": [entry], "TotalRecordCount": 1})
+    try:
+        with pytest.raises(PortDataMalformed, match="no string Id"):
             await adapter.confirm_gone(["kept-1"])
     finally:
         await adapter.aclose()
@@ -922,8 +1050,21 @@ Directly after `get_item`, add:
 
 In `src/usher/adapters/emby/adapter.py`:
 
-- Change line 7 to
-  `from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Collection, Mapping, Sequence`.
+- Change line 7 to the `collections.abc` import below, which `ruff format`
+  wraps because one line would pass 100 columns:
+
+  ```python
+  from collections.abc import (
+      AsyncGenerator,
+      AsyncIterator,
+      Awaitable,
+      Callable,
+      Collection,
+      Mapping,
+      Sequence,
+  )
+  ```
+
 - Change the comment above `IDS_PER_REQUEST = 100` to
   `# Items asked for by `Ids` in one request: a hundred ids keep the URL short.`
 - In `_page`'s docstring, change `so a count, a views read or a read of series by
@@ -956,7 +1097,11 @@ Directly after `get_item`, add:
             return frozenset(remaining)
 
     async def _listed_of(self, chunk: Sequence[str]) -> set[str]:
-        """Which of `chunk` one `Ids` listing names; `Limit` is the chunk's length."""
+        """Which of `chunk` one `Ids` listing names; `Limit` is the chunk's length.
+
+        An entry with no string `Id` raises, because it may be one of `chunk`. A string
+        `Id` nobody asked for is skipped.
+        """
         params = {"Ids": ",".join(chunk), "Limit": str(len(chunk))}
         body = await self._page(await self._items_path(), params, 0, op="confirm")
         entries = body.get("Items")
@@ -966,7 +1111,9 @@ Directly after `get_item`, add:
         listed: set[str] = set()
         for entry in entries:
             listed_id = entry.get("Id") if isinstance(entry, dict) else None
-            if isinstance(listed_id, str) and listed_id in asked:
+            if not isinstance(listed_id, str):
+                raise PortDataMalformed("Emby's Ids listing carried an entry with no string Id")
+            if listed_id in asked:
                 listed.add(listed_id)
         return listed
 ```
@@ -980,7 +1127,7 @@ Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest tests/unit/test_adapters_emby_conf
 
 Expected: PASS.
 
-- [ ] **Step 10: Plant the two Review Focus guards**
+- [ ] **Step 10: Plant the Review Focus guards and the two `_listed_of` guards**
 
 For each plant below:
 - back up the adapter first:
@@ -996,7 +1143,16 @@ The plants:
    `test_a_body_without_items_raises_rather_than_reading_as_gone` fails.
 2. In `_listed_of`, drop `"Limit"` from `params`. Expected:
    `test_a_hundred_and_one_ids_go_as_two_requests_each_limited_to_its_chunk`
-   fails.
+   fails on `assert [None, None] == ['100', '1']`.
+3. In `_listed_of`, replace the `raise` for an entry with no string `Id` with
+   `continue`. Expected: all four parameters of
+   `test_an_entry_without_a_string_id_raises_rather_than_reading_as_gone` fail
+   with `DID NOT RAISE`.
+4. In `_listed_of`, add every string `Id` to `listed`, dropping
+   `if listed_id in asked:`. Expected:
+   `test_an_id_nobody_asked_for_is_never_read_as_listed` fails on its
+   `TimeoutError` after five seconds. Bound the run from outside with
+   `timeout -s KILL 60`.
 
 - [ ] **Step 11: Run the gate, then commit**
 
@@ -1129,7 +1285,9 @@ before `test_marking_unseen_unavailable_spares_items_seen_during_the_run`:
         Counted the other way, every walk after an accepted mass retraction is refused.
         """
         names = [f"movie-{index}" for index in range(10)]
-        await repository.upsert_many([item(source_id, name, last_seen_at=EARLIER) for name in names])
+        await repository.upsert_many(
+            [item(source_id, name, last_seen_at=EARLIER) for name in names]
+        )
         premise = await repository.retract(source_id, names, unseen_since=RUN_AT)
         assert premise.retracted == 10
         unseen = await repository.list_unseen(
@@ -1143,6 +1301,7 @@ before `test_marking_unseen_unavailable_spares_items_seen_during_the_run`:
         await repository.upsert_many(
             [
                 item(source_id, "held"),
+                item(source_id, "unasked"),
                 item(source_id, "retracted", last_seen_at=EARLIER),
                 item(other_source_id, "theirs"),
             ]
@@ -1248,6 +1407,7 @@ before `test_marking_unseen_unavailable_spares_items_seen_during_the_run`:
             [
                 item(source_id, "older", last_seen_at=EARLIER),
                 item(source_id, "newer", last_seen_at=later),
+                item(source_id, "unasked", last_seen_at=EARLIER),
                 item(source_id, "retracted", last_seen_at=EARLIER),
                 item(other_source_id, "theirs", last_seen_at=EARLIER),
             ]
@@ -1262,6 +1422,7 @@ before `test_marking_unseen_unavailable_spares_items_seen_during_the_run`:
             "older": (True, RUN_AT),
             "newer": (True, later),
             "retracted": (False, EARLIER),
+            "unasked": (True, EARLIER),
         }
         for external_id, (available, seen) in expected.items():
             stored = await repository.get_by_external_id(source_id, external_id)
@@ -1281,8 +1442,10 @@ before `test_marking_unseen_unavailable_spares_items_seen_during_the_run`:
 
 - [ ] **Step 2: Write the statement-count cases**
 
-In `tests/integration/test_media_item_repository.py`, add these three cases
-directly after `test_a_refused_sweep_issues_no_update_at_all`:
+In `tests/integration/test_media_item_repository.py`, change
+`from usher.ports.ingest import AvailabilitySweepRefused` to
+`from usher.ports.ingest import AvailabilitySweepRefused, UnseenRows`, and add
+these four cases directly after `test_a_refused_sweep_issues_no_update_at_all`:
 
 ```python
 async def test_list_unseen_costs_two_statements_however_many_rows_are_unseen(
@@ -1331,6 +1494,24 @@ async def test_a_refused_list_unseen_reads_no_id(
     assert "count(*)" in statement
 
 
+async def test_list_unseen_with_nothing_unseen_reads_no_id(
+    repository: PostgresMediaItemRepository,
+    source_id: uuid.UUID,
+    statement_counter: list[str],
+) -> None:
+    """With every row seen, the count is the whole cost: there is no id to read."""
+    await repository.upsert_many(
+        [item(source_id, f"m-{index}", last_seen_at=RUN_AT) for index in range(4)]
+    )
+    statement_counter.clear()
+    unseen = await repository.list_unseen(source_id, seen_since=RUN_AT, max_retract_fraction=1.0)
+    statements = len(statement_counter)
+    assert unseen == UnseenRows(external_ids=frozenset(), total=4), (
+        "the premise: every row of the source was stamped at the instant"
+    )
+    assert statements == 1
+
+
 async def test_the_three_keyed_methods_cost_one_statement_each_and_none_for_nothing(
     repository: PostgresMediaItemRepository,
     source_id: uuid.UUID,
@@ -1343,12 +1524,12 @@ async def test_the_three_keyed_methods_cost_one_statement_each_and_none_for_noth
     among = await repository.available_among(source_id, ["m-0", "m-1"])
     among_statements = len(statement_counter)
     statement_counter.clear()
-    retraction = await repository.retract(source_id, ["m-0"], unseen_since=RUN_AT)
+    retraction = await repository.retract(source_id, ["m-0", "m-2"], unseen_since=RUN_AT)
     retract_statements = len(statement_counter)
     statement_counter.clear()
-    moved = await repository.mark_seen(source_id, ["m-1"], seen_at=RUN_AT)
+    moved = await repository.mark_seen(source_id, ["m-1", "m-3"], seen_at=RUN_AT)
     mark_statements = len(statement_counter)
-    assert (among, retraction.retracted, moved) == ({"m-0", "m-1"}, 1, 1), (
+    assert (among, retraction.retracted, moved) == (frozenset({"m-0", "m-1"}), 2, 2), (
         "the premise: each call did its work"
     )
 
@@ -1468,7 +1649,8 @@ In `src/usher/db/repositories/media_item.py`:
 Directly after `_SWEEP`, add:
 
 ```python
-# Counted in the same transaction as the id read it guards, so both see the same rows.
+# Two statements under READ COMMITTED: a row committed between them can reach the id read uncounted;
+# the source's confirmation is what makes that safe.
 _UNSEEN_COUNTS = """
 SELECT count(*) AS total,
        count(*) FILTER (WHERE available AND last_seen_at < :seen_since) AS unseen
@@ -1621,8 +1803,7 @@ Directly after `mark_unseen_unavailable`, add the methods below. Like
         return frozenset(
             external_id
             for external_id in external_ids
-            if (entry := self._items.get((source_id, external_id))) is not None
-            and entry.available
+            if (entry := self._items.get((source_id, external_id))) is not None and entry.available
         )
 
     async def retract(
@@ -1659,7 +1840,7 @@ Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest tests/unit/test_media_item_reposit
 
 Expected: PASS. The integration file needs Docker.
 
-- [ ] **Step 9: Plant three guards**
+- [ ] **Step 9: Plant six guards**
 
 Back up both arms first:
 
@@ -1681,6 +1862,21 @@ The plants:
    `test_mark_seen_moves_an_available_rows_stamp_forward_only` fails.
 3. In both `list_unseen`s, change `>` to `>=` in the ceiling comparison.
    Expected: `test_list_unseen_allows_exactly_the_ceiling` fails.
+4. In `_AVAILABLE_AMONG`, delete `AND external_id = ANY(:external_ids)`; make the
+   fake's `available_among` read every row of the source behind an
+   `if not external_ids: return frozenset()` guard. Expected:
+   `test_available_among_names_only_this_sources_available_rows` fails on its
+   `unasked` row.
+5. In `_MARK_SEEN`, delete `AND external_id = ANY(:external_ids)`; make the
+   fake's `mark_seen` move every row of the source behind an
+   `if not external_ids: return 0` guard. Expected:
+   `test_mark_seen_moves_an_available_rows_stamp_forward_only` fails on
+   `assert moved == 1`.
+
+Then plant the Postgres arm alone: delete `list_unseen`'s
+`if not unseen: return UnseenRows(...)`. Expected:
+`test_list_unseen_with_nothing_unseen_reads_no_id` fails on
+`assert statements == 1`.
 
 - [ ] **Step 10: Run the gate, then commit**
 
@@ -1704,12 +1900,13 @@ git commit -m "db: the four media item methods confirmed retraction needs"
   - `_sweep` (lines 837–876);
   - its call site (line 345).
 - Modify: `tests/fakes/source_adapter.py`: `unlist`, `_unlisted`, `forget`,
-  `_walk_items` (line 301), `plan_walk` (lines 312–330)
+  `_walk_items` (line 301), `plan_walk` (lines 312–330), `_walk_library`
 - Modify: `src/usher/ports/ingest.py`: the docstrings of `MediaItemUpsert` and
   `AvailabilitySweepRefused`
 - Test: `tests/unit/test_services_reconcile.py`
 - Create: `tests/unit/test_telemetry_retraction.py`
-- Test: `tests/integration/test_services_reconcile.py`
+- Test: `tests/integration/test_services_reconcile.py` and
+  `tests/integration/test_pipeline_spans.py`
 - Docs:
   - `docs/prd/03-sources-and-sync.md`, `docs/prd/08-operations.md`,
     `docs/guide/command-line.md`, `docs/prd/10-telemetry-and-dashboards.md`;
@@ -1727,6 +1924,8 @@ git commit -m "db: the four media item methods confirmed retraction needs"
   - `usher.services.retraction.confirmed_gone(adapter: SourceAdapter, external_ids: Collection[str], *, source: str, path: Literal["sweep", "push"]) -> frozenset[str]`.
     Task 7 calls it with `path="push"`.
   - `FakeSourceAdapter.unlist(external_id: str) -> None`.
+  - `tests.unit.test_telemetry_retraction.retraction_checks(reader: InMemoryMetricReader) -> dict[tuple[str, str, str], float]`,
+    the counter as `{(source, path, outcome): value}`.
 
 - [ ] **Step 1: Teach the fake adapter to serve an item it does not list**
 
@@ -1734,7 +1933,8 @@ In `tests/fakes/source_adapter.py`, at the end of `FakeSourceAdapter.__init__`,
 add:
 
 ```python
-        # Served by id but in no listing: what Emby does with an alternate version.
+        # Served by id but in no item listing, as Emby's full listing leaves out an
+        # alternate version.
         self._unlisted: set[str] = set()
 ```
 
@@ -1742,35 +1942,48 @@ Directly after `forget`, add:
 
 ```python
     def unlist(self, external_id: str) -> None:
-        """Keep serving `external_id` by id, but leave it out of every listing.
+        """Keep serving `external_id` by id, but leave it out of every item listing.
 
         Emby's full listing shows one version of a film while a read by id serves each,
-        so a walk never lists an alternate it can still read.
+        so a full walk never lists an alternate it can still read. A later `place` does
+        not list it again. `watch_state` still lists it. An item delta does not, though Emby's
+        delta listing returns alternates too.
         """
         self._unlisted.add(external_id)
-        for placed in self._libraries.values():
-            if external_id in placed:
-                placed.remove(external_id)
 ```
 
-Make three more changes:
-- In `forget`, add `self._unlisted.discard(external_id)`.
-- In `_walk_items`, skip every id in `self._unlisted`, so the single walk does not
+`unlist` only records the id: every item listing consults `_unlisted`, so it
+does not matter which libraries hold it. Make four more changes:
+- In `forget`, add `self._unlisted.discard(external_id)` after its
+  `self._changed_at.pop(external_id, None)`.
+- In `_walk_items`, open the loop with
+  `if external_id in self._unlisted:` / `continue`, so the single walk does not
   list it.
-- In `plan_walk`, compute `listed = [one for one in self._items if one not in
-  self._unlisted]`. Use `listed` in place of `self._items` in the
+- In `_walk_library`, change `if item is None:` to
+  `if item is None or external_id in self._unlisted:`, so a library unit does
+  not list it either, even after a later `place`.
+- In `plan_walk`, compute
+  `listed = [one for one in self._items if one not in self._unlisted]` before
+  `in_a_library`. Use `listed` in place of `self._items` in the
   `in_a_library.issuperset(...)` check and in both `expected_total=len(...)`
-  arguments.
+  arguments, and count each unit as the walk will list it:
 
-Without that last change, an unlisted item fails the superset check, so a
+  ```python
+                None if name in self._uncounted else len(set(placed) - self._unlisted),
+  ```
+
+Without the `plan_walk` change, an unlisted item fails the superset check, so a
 placed source falls back to one whole-library unit and the planned-walk cases
-stop exercising a plan.
+stop exercising a plan. Without the unit count, a unit holding an unlisted id
+plans one more item than it walks.
 
 - [ ] **Step 2: Write the failing sweep cases**
 
 In `tests/unit/test_services_reconcile.py`:
 - add `Collection` to the `from collections.abc import ...` line;
-- add `NumberDataPoint` to `from opentelemetry.sdk.metrics.export import ...`.
+- add `from tests.unit.test_telemetry_retraction import retraction_checks` after
+  the `tests.fakes.title_repository` import. Step 3 writes that reader, and the
+  sweep's counter case reads the counter through it rather than through a copy.
 
 In `test_a_refused_sweep_fails_the_run_and_changes_nothing`, add as its last
 line:
@@ -1798,7 +2011,7 @@ Directly after `test_a_refused_sweep_keeps_the_upserts_the_walk_made`, add:
 async def test_a_sweep_retracts_what_the_source_confirms_gone_and_stamps_what_it_serves(
     fixture: _Fixture,
 ) -> None:
-    """m9 is gone. m8 is still served by id but in no listing, as an alternate version is."""
+    """m9 is gone. m8 is still served by id but in no full listing, as an alternate version is."""
     for index in range(10):
         fixture.adapter.seed(_item(f"m{index}"), T0)
     await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
@@ -1821,6 +2034,27 @@ async def test_a_sweep_retracts_what_the_source_confirms_gone_and_stamps_what_it
     assert [line.rstrip("\n") for line in lines if "sweep found" in line] == [
         "Living Room Emby's sweep found 2 rows the walk did not list: 1 gone, 1 still served"
     ]
+
+
+async def test_an_unlisted_item_placed_again_stays_out_of_its_library_unit() -> None:
+    """`place` after `unlist` lists m8 in neither the unit nor its count, so the sweep asks."""
+    fixture = _Fixture()
+    _shelve(fixture, "Films", range(10))
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    fixture.adapter.unlist("m8")
+    fixture.adapter.place("m8", "Films")
+    fixture.adapter.unit_starts.clear()
+    second = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    assert fixture.adapter.unit_starts == [("library:Films", 0)], (
+        "the premise: Films walked as a unit of its own"
+    )
+    units = await fixture.runs.units_for(second.id)
+    assert [unit.expected_items for unit in units] == [9]
+    assert second.items_seen == 9
+    assert fixture.adapter.confirm_calls == [frozenset({"m8"})]
+    served = await fixture.media_items.get_by_external_id(fixture.source.id, "m8")
+    assert served is not None
+    assert (served.available, served.last_seen_at) == (True, second.started_at)
 
 
 async def test_a_sweep_with_nothing_unseen_asks_nothing_and_says_so(fixture: _Fixture) -> None:
@@ -1933,28 +2167,14 @@ async def test_the_heartbeat_beats_while_the_source_confirms_removals() -> None:
         run = await walk
     assert run.status is SyncRunStatus.COMPLETED
     assert run.items_retracted == 1
+    assert run.heartbeat_at is not None and run.heartbeat_at >= beats[-1], (
+        "the completing row moved the heartbeat back past a beat"
+    )
 ```
 
 Directly after `_unit_durations`, near the `meter_reader` fixture, add:
 
 ```python
-def _retraction_checks(reader: InMemoryMetricReader) -> dict[tuple[str, str, str], float]:
-    """`usher.sync.retraction.checks` as `{(source, path, outcome): value}`."""
-    found: dict[tuple[str, str, str], float] = {}
-    data = reader.get_metrics_data()
-    for resource in data.resource_metrics if data is not None else []:
-        for scope in resource.scope_metrics:
-            for metric in scope.metrics:
-                if metric.name != "usher.sync.retraction.checks":
-                    continue
-                for point in metric.data.data_points:
-                    assert isinstance(point, NumberDataPoint)
-                    labels = dict(point.attributes or {})
-                    key = (str(labels["source"]), str(labels["path"]), str(labels["outcome"]))
-                    found[key] = float(point.value)
-    return found
-
-
 async def test_a_sweep_counts_each_id_it_asked_about_on_the_sweep_path(
     meter_reader: InMemoryMetricReader,
 ) -> None:
@@ -1965,7 +2185,7 @@ async def test_a_sweep_counts_each_id_it_asked_about_on_the_sweep_path(
     fixture.adapter.forget("m9")
     fixture.adapter.unlist("m8")
     await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
-    assert _retraction_checks(meter_reader) == {
+    assert retraction_checks(meter_reader) == {
         ("Living Room Emby", "sweep", "gone"): 1.0,
         ("Living Room Emby", "sweep", "served"): 1.0,
     }
@@ -2011,8 +2231,12 @@ def meter_reader() -> Iterator[InMemoryMetricReader]:
     yield reader
 
 
-def _checks(reader: InMemoryMetricReader) -> dict[tuple[str, str, str], float]:
-    """`usher.sync.retraction.checks` as `{(source, path, outcome): value}`."""
+def retraction_checks(reader: InMemoryMetricReader) -> dict[tuple[str, str, str], float]:
+    """`usher.sync.retraction.checks` as `{(source, path, outcome): value}`.
+
+    Exported because `tests/unit/test_services_reconcile.py` reads the same counter
+    off a sweep, and a second copy of this reader would stop tracking the first.
+    """
     found: dict[tuple[str, str, str], float] = {}
     data = reader.get_metrics_data()
     for resource in data.resource_metrics if data is not None else []:
@@ -2059,7 +2283,7 @@ async def test_each_asked_id_is_counted_once_by_path_and_outcome(
         adapter, ["kept-1", "gone-1", "gone-2"], source=SOURCE.name, path=path
     )
     assert gone == {"gone-1", "gone-2"}
-    assert _checks(meter_reader) == {
+    assert retraction_checks(meter_reader) == {
         (SOURCE.name, path, "gone"): 2.0,
         (SOURCE.name, path, "served"): 1.0,
     }
@@ -2069,31 +2293,33 @@ async def test_an_id_nobody_asked_about_is_neither_returned_nor_counted(
     meter_reader: InMemoryMetricReader,
 ) -> None:
     """And an outcome with no id adds nothing: no `served` series at all, not a zero."""
-    gone = await confirmed_gone(
-        _StrayAdapter(SOURCE), ["gone-1"], source=SOURCE.name, path="sweep"
-    )
+    gone = await confirmed_gone(_StrayAdapter(SOURCE), ["gone-1"], source=SOURCE.name, path="sweep")
     assert gone == {"gone-1"}
-    assert _checks(meter_reader) == {(SOURCE.name, "sweep", "gone"): 1.0}
+    assert retraction_checks(meter_reader) == {(SOURCE.name, "sweep", "gone"): 1.0}
 
 
 async def test_an_empty_question_asks_nothing_and_counts_nothing(
     meter_reader: InMemoryMetricReader,
 ) -> None:
+    premise = _serving()
+    await premise.confirm_gone([])
+    assert premise.confirm_calls == [frozenset()], "the premise: the fake records an empty question"
     adapter = _serving()
     assert await confirmed_gone(adapter, [], source=SOURCE.name, path="push") == frozenset()
     assert adapter.confirm_calls == []
-    assert _checks(meter_reader) == {}
+    assert retraction_checks(meter_reader) == {}
 ```
 
 - [ ] **Step 4: Run them to see them fail**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest tests/unit/test_services_reconcile.py tests/unit/test_telemetry_retraction.py -p no:randomly`
 
-Expected:
-- `test_telemetry_retraction.py` fails to import `usher.services.retraction`;
-- in `test_services_reconcile.py`, the new sweep cases FAIL, because the old
-  sweep never asks and retracts m8;
-- the re-pointed window case FAILS, because `list_unseen` is never called.
+Expected: FAIL at collection, `ModuleNotFoundError: No module named
+'usher.services.retraction'`, and nothing runs: `test_services_reconcile.py`
+imports `retraction_checks` from `test_telemetry_retraction.py`, which imports
+`confirmed_gone`. Once Step 5 lands, the new sweep cases FAIL because the old
+sweep never asks and retracts m8, and the re-pointed window case FAILS because
+`list_unseen` is never called.
 
 - [ ] **Step 5: Write `confirmed_gone`**
 
@@ -2190,7 +2416,7 @@ Replace the whole of `_sweep` with:
         The rows the walk did not list are the candidates, and the ceiling is applied to
         them before the source is asked anything. Of the rest, those the source no longer
         serves are retracted, and those it still serves -- alternate versions, which
-        Emby's listing never shows -- are stamped as seen at the run's `started_at`. Both
+        Emby's full listing never shows -- are stamped as seen at the run's `started_at`. Both
         writes commit with the run's completing row. A source that cannot answer raises
         before either, so nothing changes and the run fails resumable.
 
@@ -2266,22 +2492,28 @@ Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest tests/unit/test_services_reconcile
 
 Expected: PASS, the existing heartbeat-while-planning cases included.
 
-- [ ] **Step 8: Give the integration duck adapter `confirm_gone`, and add one case**
+- [ ] **Step 8: Give the integration duck adapters `confirm_gone`, and add one case**
 
 In `tests/integration/test_services_reconcile.py`:
 - add `Collection` to the `collections.abc` import;
-- change `_Adapter`'s docstring first line to `"""The smallest `list_items`,
-  `plan_walk`, `list_unit` and `confirm_gone` that satisfy `ReconcileService`.`;
+- change `_Adapter`'s docstring first line to
+  ``"""The smallest `list_items`, `plan_walk`, `list_unit`, `confirm_gone` for `ReconcileService`.``;
 - at the end of `_Adapter.__init__`, add:
 
 ```python
-        # Served by id but in no listing, as Emby serves an alternate version.
+        # Served by id but in no item listing, as Emby's full listing leaves out an
+        # alternate version.
         self.unlisted: set[str] = set()
 ```
 
-- in `_walk`, iterate
-  `[item for item in self.items.values() if item.external_id not in self.unlisted]`
-  in place of `list(self.items.values())`;
+- in `_walk`, change the loop's head to:
+
+```python
+        for index, item in enumerate(
+            [item for item in self.items.values() if item.external_id not in self.unlisted]
+        ):
+```
+
 - after `plan_walk`, add:
 
 ```python
@@ -2309,6 +2541,7 @@ async def test_a_walk_retracts_only_what_the_source_confirms_gone(
     del adapter.items["m6"]
     adapter.unlisted.add("m7")
     second = await service.reconcile(source, SyncRunKind.FULL, adapter)  # type: ignore[arg-type]
+    assert second.items_seen == 8, "the premise: the walk listed neither m6 nor m7"
     assert second.status is SyncRunStatus.COMPLETED
     assert second.items_retracted == 1
     gone = await media_items.get_by_external_id(source.id, "m6")
@@ -2318,11 +2551,32 @@ async def test_a_walk_retracts_only_what_the_source_confirms_gone(
     assert (served.available, served.last_seen_at) == (True, second.started_at)
 ```
 
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest tests/integration/test_services_reconcile.py -p no:randomly`
+`tests/integration/test_pipeline_spans.py` has a duck of the same shape, which a
+full walk now asks too:
+- add `Collection` to its `collections.abc` import;
+- replace its `_Adapter` docstring with:
+
+```python
+    """The smallest `list_items`, `plan_walk`, `list_unit`, `confirm_gone` for `ReconcileService`.
+
+    No network. `tests/integration/test_services_reconcile.py` uses the same shape
+    and for the same reason: `FakeSourceAdapter` carries a session model and a
+    watch-state store, none of which is under test here.
+    """
+```
+
+- after `list_unit`, add:
+
+```python
+    async def confirm_gone(self, external_ids: Collection[str]) -> frozenset[str]:
+        return frozenset(external_ids).difference(item.external_id for item in self._items)
+```
+
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest tests/integration/test_services_reconcile.py tests/integration/test_pipeline_spans.py -p no:randomly`
 
 Expected: PASS (Docker).
 
-- [ ] **Step 9: Plant three guards**
+- [ ] **Step 9: Plant four guards**
 
 Back up first: `cp src/usher/services/reconcile.py /var/tmp/confirmed-retraction-plant.bak`.
 For each plant, run Step 7's command and confirm the named case fails on an `E `
@@ -2335,6 +2589,9 @@ line. Then restore the file and read the restore back with `diff`.
    `last_seen_at`.
 3. Call `confirmed_gone` directly instead of through `self._beating`. Expected:
    `test_the_heartbeat_beats_while_the_source_confirms_removals` fails.
+4. Return `run.evolve(...)` in place of `progress.run.evolve(...)`. Expected:
+   `test_the_heartbeat_beats_while_the_source_confirms_removals` fails, on its
+   last assertion.
 
 - [ ] **Step 10: Update the docstrings that state the old rule**
 
@@ -2388,7 +2645,7 @@ including) the paragraph that begins `Carries the numbers` with:
    each candidate. It marks unavailable those the source confirms gone, and
    records the rest as seen at the walk's start, since the source still serves
    them. If the source cannot answer, the sweep changes nothing and the run
-   fails; the next whole-library walk resumes it and only sweeps.
+   fails; the next full walk resumes it and only sweeps.
    ```
 
 3. In the paragraph that begins `**A source is either a library this deployment
@@ -2400,7 +2657,7 @@ including) the paragraph that begins `Carries the numbers` with:
 availability sweep |`, add:
 
 ```markdown
-| A source cannot confirm a removal | A full walk's sweep retracts **nothing** and stamps nothing, and the run records `FAILED` with the error. It is not the ceiling's `availability_ceiling`, so the next whole-library walk resumes the run, walks no unit again, and only sweeps. The catalog is unaffected |
+| A source cannot confirm a removal | A full walk's sweep retracts **nothing** and stamps nothing, and the run records `FAILED` with the error. It is not the ceiling's `availability_ceiling`, so the next full walk resumes the run, walks no unit again, and only sweeps. The catalog is unaffected |
 ```
 
 `docs/guide/command-line.md`: replace the bullet that begins `- **The retraction
@@ -2410,9 +2667,9 @@ guard** refuses` with:
 - **The retraction guard** refuses a walk that left more than
   `USHER_SYNC_MAX_RETRACT_FRACTION` (25%) of a source's items unlisted, and
   changes nothing. If you really did remove that much, run the walk with
-  `--allow-full-retraction`. Under the guard, a walk marks an item unavailable
-  only once the server confirms it is gone. An item the server still serves
-  but did not list, such as a film's second version, stays available.
+  `--allow-full-retraction`. A walk marks an item unavailable only once the
+  server confirms it is gone. An item the server still serves but did not
+  list, such as a film's second version, stays available.
 ```
 
 `docs/prd/10-telemetry-and-dashboards.md`:
@@ -2434,8 +2691,8 @@ Pins:
 
   ```markdown
   - **A full walk no longer marks items unavailable that the server still
-    serves.** Emby's listing shows one version of a film with several, so every
-    full walk retracted the alternate versions a delta or a push event had
+    serves.** Emby's full listing shows one version of a film with several, so
+    every full walk retracted the alternate versions a delta or a push event had
     stored. The sweep now asks the server about the items the walk did not list,
     retracts only those it confirms gone, and records the rest as seen. If the
     server cannot answer, nothing is retracted, and the next full walk resumes
@@ -2468,7 +2725,7 @@ Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest tests/unit/test_telemetry_metric_n
 Expected: PASS. Then run the full gate. Expected: green.
 
 ```bash
-git add src/usher/services/retraction.py src/usher/services/reconcile.py src/usher/ports/ingest.py tests/fakes/source_adapter.py tests/unit/test_services_reconcile.py tests/unit/test_telemetry_retraction.py tests/integration/test_services_reconcile.py docs/prd/03-sources-and-sync.md docs/prd/08-operations.md docs/guide/command-line.md docs/prd/10-telemetry-and-dashboards.md tests/unit/test_telemetry_metric_names.py tests/unit/test_dashboards.py CHANGELOG.md .claude/rules/emby-push-and-ingest.md CLAUDE.md
+git add src/usher/services/retraction.py src/usher/services/reconcile.py src/usher/ports/ingest.py tests/fakes/source_adapter.py tests/unit/test_services_reconcile.py tests/unit/test_telemetry_retraction.py tests/integration/test_services_reconcile.py tests/integration/test_pipeline_spans.py docs/prd/03-sources-and-sync.md docs/prd/08-operations.md docs/guide/command-line.md docs/prd/10-telemetry-and-dashboards.md tests/unit/test_telemetry_metric_names.py tests/unit/test_dashboards.py CHANGELOG.md .claude/rules/emby-push-and-ingest.md CLAUDE.md
 git commit -m "sync: a full walk's sweep retracts only what the source confirms gone"
 ```
 
@@ -2514,6 +2771,10 @@ begins `Availability is retracted by exactly one method`) with:
     it is a separate call, never a side effect of `upsert_many`.
 ```
 
+In the same class, `count_for_source`'s docstring names the sweep's denominator,
+which nothing reads it for. Replace it with the one line
+`"""How many items this source has, available or not."""`.
+
 - [ ] **Step 2: Move the callers**
 
 Each old call made rows unavailable by sweeping everything unseen before an
@@ -2527,7 +2788,8 @@ instant. Each replacement names those same rows.
 | the same file, the calls near lines 854 and 1001 | `await repository.retract(source_id, ["stale", "fresh"], unseen_since=RUN_AT + timedelta(days=1))` |
 | the same file, the call near line 1277 | `await repository.retract(source_id, ["gone"], unseen_since=RUN_AT)` |
 | `tests/contract/title_repository_contract.py`, line 832 | In the docstring, change `` `mark_unseen_unavailable` sets it false for an item a walk stopped seeing `` to `` `retract` sets it false for an item its source confirmed gone `` |
-| `tests/integration/test_media_item_repository.py`, lines 269–319 | Delete `test_the_sweep_costs_the_same_number_of_statements_however_big_it_is` and `test_a_refused_sweep_issues_no_update_at_all`. Task 4's three cases replace them |
+| `tests/integration/test_media_item_repository.py`, lines 269–319 | Delete `test_the_sweep_costs_the_same_number_of_statements_however_big_it_is` and `test_a_refused_sweep_issues_no_update_at_all`. Task 4's four cases replace them. In `TestPostgresMediaItemRepository`'s docstring, change `the four Postgres-only tests below share them` to `the Postgres-only tests below share them` |
+| `tests/unit/test_ports_repository_ingest.py` | In `test_media_item_repository_surface`, delete `"mark_unseen_unavailable",` from the set |
 | `tests/integration/test_services_titles.py`, line 302 | `await PostgresMediaItemRepository(session).retract(other.id, ["theirs"], unseen_since=datetime(2026, 8, 2, tzinfo=UTC))` |
 | `tests/integration/test_titles_route.py`, line 250 | `await PostgresMediaItemRepository(session).retract(theirs.id, ["theirs-1"], unseen_since=SWEPT_AFTER)`, keeping the `await session.commit()` after it |
 | `tests/unit/test_api_titles.py`, line 983 | `await media_items.retract(source.id, [EXTERNAL_ID], unseen_since=datetime(2026, 8, 2, tzinfo=UTC))` |
@@ -2556,28 +2818,28 @@ In `tests/unit/test_services_playback.py`:
   `` `mark_unseen_unavailable` sets `available = false` `` to
   `` `retract` sets `available = false` ``.
 
-In `tests/unit/test_ports_ingest.py`, import `UnseenRows` in place of
-`SweepResult`. Replace `test_a_sweep_result_reports_the_denominator_as_well_as_the_count`
-with:
-
-```python
-def test_unseen_rows_report_the_denominator_as_well_as_the_candidates() -> None:
-    """A bare "3 unseen" is not actionable on its own.
-
-    "3 of 4" and "3 of a whole library" are different operational events, and the sweep
-    has already counted the denominator to evaluate its own guard.
-    """
-    unseen = UnseenRows(external_ids=frozenset({"a", "b", "c"}), total=94_438)
-    assert (len(unseen.external_ids), unseen.total) == (3, 94_438)
-```
+In `tests/unit/test_ports_ingest.py`:
+- drop `SweepResult` from the `usher.ports.ingest` import;
+- delete `test_a_sweep_result_reports_the_denominator_as_well_as_the_count`. A
+  frozen dataclass built and read back is a case no plant can fail, and the
+  contract's whole-value `UnseenRows` equalities already pin both fields on both
+  arms;
+- in `test_the_sweep_refusal_survives_a_zero_denominator`'s docstring, change
+  `` (`stale > 0` implies `total > 0`) `` to `` (`unseen > 0` implies `total > 0`) ``.
 
 In `tests/integration/test_ingest_end_to_end.py`:
 - drop `SweepResult` from the line-42 import;
 - rename `test_the_availability_sweeps_update_uses_its_index` to
   `test_the_availability_sweeps_unseen_read_uses_its_index`, with the docstring
-  ``"""`ix_media_items_sweep` exists for the sweep's unseen read, and the numbers say exactly that."""``;
-- change the capture predicate to
-  `lambda statement: "SELECT external_id" in statement and "last_seen_at <" in statement`;
+  ``"""`ix_media_items_sweep` exists for the sweep's unseen read; the numbers say exactly that."""``;
+- change the capture to:
+
+```python
+    captured, stop = _capture(
+        lambda statement: "SELECT external_id" in statement and "last_seen_at <" in statement
+    )
+```
+
 - replace the call and its premise with:
 
 ```python
@@ -2602,24 +2864,146 @@ In `scripts/measure_ingest.py` (lines 339–352):
 - change the call to
   `await media_items.list_unseen(source.id, seen_since=datetime.now(UTC), max_retract_fraction=1.0)`.
 
-In `scripts/measure_rows.py`:
+In `scripts/measure_rows.py`, the probe moves to the id read, and its
+`seen_since` must split the seed's stale rows from its fresh ones whenever the
+seed ran, at every scale the script accepts:
+- change `from datetime import UTC, datetime` to
+  `from datetime import UTC, datetime, timedelta`, and add
+  `from dataclasses import dataclass` before it;
 - change line 14's `_SWEEP` to `_UNSEEN`;
-- in the comment above the stale-row `UPDATE`, change `the sweep's UPDATE plans
-  against nothing` to `the sweep's unseen read plans against nothing`;
-- change the tuple `("mark_unseen_unavailable's UPDATE", _SWEEP, ...)` to
-  `("list_unseen's id read", _UNSEEN, ...)`, with the same parameters.
+- directly after `_NARROW`, add the seed's arithmetic, shared by `_seed` and the
+  scale check:
 
-In `src/usher/db/models/source.py`, line 114, change
-`# The availability sweep's `UPDATE`, and nothing else.` to
-`# `list_unseen`'s id read, and nothing else.`
+```python
+# How many rows the seed stamps stale. A seed must hold more, or none is left fresh and
+# the unseen read selects nothing.
+_STALE_ROWS = 200
+
+
+@dataclass(frozen=True, slots=True)
+class _Sizes:
+    """One seed's populations, scaled linearly off one real library's proportions."""
+
+    movies: int
+    series: int
+    regular: int
+    pathological: int
+
+    @property
+    def episodes(self) -> int:
+        """How many episodes the seed inserts.
+
+        Series 0 carries the pathological run and every other series `regular` episodes, so
+        with no series there are none.
+        """
+        return self.pathological + self.regular * (self.series - 1) if self.series else 0
+
+    @property
+    def media_items(self) -> int:
+        """One per title, movies and series alike, and one per episode."""
+        return self.movies + self.series + self.episodes
+
+
+def _sizes(scale: int) -> _Sizes:
+    factor = scale / 1_126_674
+    # No population goes below zero: argparse takes a negative --scale, and `generate_series`
+    # yields no rows for a negative bound, so zero is what the seed would insert.
+    return _Sizes(
+        movies=max(0, int(94_448 * factor)),
+        series=max(0, int(32_409 * factor)),
+        regular=max(1, int(30 * factor)),
+        pathological=max(0, int(20_000 * factor)),
+    )
+
+
+def _smallest_scale() -> int:
+    """The smallest `--scale` whose seed leaves a row fresh beside the stale ones."""
+    scale = 1
+    while _sizes(scale).media_items <= _STALE_ROWS:
+        scale += 1
+    return scale
+```
+
+- in `_seed`, replace the block from `factor = scale / 1_126_674` through the
+  `print(...)` with:
+
+```python
+    sizes = _sizes(scale)
+    print(f"seeding {sizes.movies} movies, {sizes.series} series, {sizes.episodes} episodes")
+```
+
+  and read `movies`, `series`, `pathological` and `regular` off `sizes` in the
+  four statements that bind them (`sizes.movies`, `sizes.series - 1`,
+  `sizes.pathological`, `sizes.regular`);
+- replace the stale-row comment and `UPDATE` with:
+
+```python
+    # `_STALE_ROWS` stale rows, which is the nightly shape `f1a7d3c9e824`'s sweep index
+    # exists for. Without them the sweep's unseen read plans against nothing and this
+    # script's whole reason to run is vacuous.
+    await session.execute(
+        text(
+            "UPDATE media_items SET last_seen_at = now() - interval '3 days' "
+            "WHERE id IN (SELECT id FROM media_items LIMIT :stale)"
+        ),
+        {"stale": _STALE_ROWS},
+    )
+```
+
+- in `_statements`, directly after the `source = ...` line, add:
+
+```python
+    # The seed stamps every row with one instant and `_STALE_ROWS` of them three days
+    # earlier, so a day before the newest stamp splits the two however long ago it ran.
+    seeded_at = (
+        await session.execute(
+            text("SELECT max(last_seen_at) FROM media_items WHERE source_id = :source_id"),
+            {"source_id": source},
+        )
+    ).scalar_one()
+    if seeded_at is None:
+        raise SystemExit(
+            "the measured source holds no media items, so list_unseen's id read would plan "
+            "against nothing: run the seed first, which this script does on an empty database"
+        )
+```
+
+- change the sweep's tuple to:
+
+```python
+        (
+            "list_unseen's id read",
+            _UNSEEN,
+            {"source_id": source, "seen_since": seeded_at - timedelta(days=1)},
+        ),
+```
+
+- at the top of `measure`, before `settings = get_settings()`, add:
+
+```python
+    planned = _sizes(scale).media_items
+    if planned <= _STALE_ROWS:
+        raise SystemExit(
+            f"--scale {scale} seeds {planned} media items and the stale stamp takes "
+            f"{_STALE_ROWS}, so none would be fresh: use --scale {_smallest_scale()} or more"
+        )
+```
+
+In `src/usher/db/models/source.py`, line 114, replace
+`# The availability sweep's `UPDATE`, and nothing else.` with:
+
+```python
+        # Both of `list_unseen`'s reads: the id read seeks on all three columns, and the
+        # count is answered from the index alone.
+```
 
 - [ ] **Step 3: Check nothing still names the old method**
 
 ```bash
-grep -rnE "mark_unseen_unavailable|SweepResult|_SWEEP\b|_SWEEP_COUNTS" src tests scripts
+grep -rnE "mark_unseen_unavailable|SweepResult|\b_SWEEP\b|_SWEEP_COUNTS" src tests scripts
 ```
 
-Expected: no output.
+Expected: no output. The leading `\b` keeps the unrelated `_PADDING_SWEEP` out.
 
 - [ ] **Step 4: Run the gate, then commit**
 
@@ -2675,7 +3059,9 @@ In `tests/unit/test_services_push.py`, make these import changes:
   `from collections.abc import AsyncIterator, Callable, Collection, Iterator`;
 - add `from loguru import logger` after `import pytest`;
 - `from usher.ports.events import ClientEventKind` becomes
-  `from usher.ports.events import ClientEvent, ClientEventKind`.
+  `from usher.ports.events import ClientEvent, ClientEventKind`;
+- `from usher.ports.ingest import MediaItemUpsert` becomes
+  `from usher.ports.ingest import MediaItemUpsert, Retraction`.
 
 In `_Fixture.__init__`, add `media_items=self.media_items,` to the
 `PushApplyService(...)` call, directly after `self._commit,`.
@@ -2756,6 +3142,48 @@ async def test_a_confirmed_removal_retracts_and_publishes_after_its_commit(
     for external_id in removed:
         stored = await fixture.media_items.get_by_external_id(fixture.source.id, external_id)
         assert stored is not None and stored.available is False, external_id
+
+
+async def test_a_removal_publishes_in_sorted_order_whatever_order_its_targets_iterate(
+    fixture: _Fixture,
+) -> None:
+    """Sorted by title id, so the order a client hears does not follow set iteration.
+
+    Literal ids, because a `UUID`'s hash and `None`'s, unlike a `str`'s, are the same on
+    every run. That is not enough on its own: the fake adds the targets in the order of a
+    set of `str` ids, which moves with the seed, and where two targets share a slot of the
+    set's table, the one added first takes it. These three take three of the eight slots a
+    three-entry set has (`hash(target) % 8` is 7, 3 and 0 for `first`, `second` and
+    `third`), so they iterate in one order whatever order they arrive in, and the premise
+    shows it is not the sorted one. New ids need distinct slots too: with ids ending in 0, 1
+    and 6, two share slot 7 and the premise fails under some seeds. The rows are stored, and
+    the event names them, in two orders that are not sorted either, so neither can stand in
+    for the sort.
+    """
+    first, second, third = (uuid.UUID(f"00000000-0000-7000-8000-00000000000{n}") for n in "124")
+    rows = {"gone-a": second, "gone-b": third, "gone-c": first}
+    for external_id, title_id in rows.items():
+        await fixture.given_row(external_id, title_id=title_id)
+        fixture.adapter.forget(external_id)
+    retract = fixture.media_items.retract
+    returned: list[Retraction] = []
+
+    async def _spying(
+        source_id: uuid.UUID, external_ids: Collection[str], *, unseen_since: AwareDatetime
+    ) -> Retraction:
+        retraction = await retract(source_id, external_ids, unseen_since=unseen_since)
+        returned.append(retraction)
+        return retraction
+
+    fixture.media_items.retract = _spying  # type: ignore[method-assign]
+    await fixture.apply(
+        SourceEvent(kind=SourceEventKind.ITEM_REMOVED, external_ids=("gone-b", "gone-c", "gone-a"))
+    )
+    (retraction,) = returned
+    assert [target.title_id for target in retraction.targets] != [first, second, third], (
+        "the premise: the targets iterate out of sorted order"
+    )
+    assert [event.title_id for event in fixture.events.published] == [first, second, third]
 
 
 async def test_a_removal_the_source_still_serves_changes_nothing(fixture: _Fixture) -> None:
@@ -2894,8 +3322,14 @@ In `tests/unit/test_telemetry_push.py`:
 - add `T0 = datetime(2026, 7, 1, tzinfo=UTC)` directly above `SOURCE = Source(`.
 
 Change `_applier`:
-- its signature becomes
-  `def _applier(events: FakeEventPublisher, media_items: FakeMediaItemRepository | None = None) -> PushApplyService:`;
+- its signature becomes:
+
+```python
+def _applier(
+    events: FakeEventPublisher, media_items: FakeMediaItemRepository | None = None
+) -> PushApplyService:
+```
+
 - `media_items = FakeMediaItemRepository()` becomes
   `if media_items is None:` / `media_items = FakeMediaItemRepository()`;
 - add `media_items=media_items,` as the last argument of `PushApplyService(...)`,
@@ -2957,8 +3391,9 @@ async def test_a_removal_counts_each_held_id_it_asked_about_once(
     )
     checks = _recorded(meter_reader)["usher.sync.retraction.checks"]
     assert sorted(
-        (str(labels["path"]), str(labels["outcome"]), value) for labels, value in checks
-    ) == [("push", "gone", 1.0), ("push", "served", 1.0)]
+        (str(labels["source"]), str(labels["path"]), str(labels["outcome"]), value)
+        for labels, value in checks
+    ) == [("Living Room Emby", "push", "gone", 1.0), ("Living Room Emby", "push", "served", 1.0)]
 ```
 
 - [ ] **Step 3: Run them to see them fail**
@@ -3117,6 +3552,26 @@ async def test_a_removal_the_source_still_serves_leaves_the_row_available(
     assert events.published == []
 ```
 
+The file now holds five cases, so its two descriptions of them change. Replace
+the module docstring with:
+
+```python
+"""`PushApplyService` against real Postgres, where three cases need what no port fake can express.
+
+The two removal cases repeat unit cases against the table that holds the `available` flag.
+"""
+```
+
+and the comment above `from tests.fakes.job_queue import FakeJobQueue` with:
+
+```python
+# The queue is a fake here deliberately: `PostgresJobQueue` has its own
+# contract run against real Postgres, and no case reads what is queued. Each
+# is about what the real tables do: the `watch_states` merge and its trigger,
+# the foreign keys a pushed item's rows must satisfy, or the `available` flag
+# a removal may clear.
+```
+
 - [ ] **Step 7: Run them to see them pass**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest tests/unit/test_services_push.py tests/unit/test_telemetry_push.py tests/unit/test_services_watch_sync.py -p no:randomly`
@@ -3125,7 +3580,7 @@ Expected: PASS. Then run
 `PYTHONDONTWRITEBYTECODE=1 uv run pytest tests/integration/test_services_push.py tests/integration/test_push_lane_end_to_end.py -p no:randomly`.
 Expected: PASS (Docker).
 
-- [ ] **Step 8: Plant three guards**
+- [ ] **Step 8: Plant five guards**
 
 Back up first: `cp src/usher/services/push.py /var/tmp/confirmed-retraction-plant.bak`.
 For each plant, run Step 7's unit command and confirm the named case fails on
@@ -3139,6 +3594,11 @@ an `E ` line. Then restore the file and read the restore back with `diff`.
 3. Pass `unseen_since=datetime.now(UTC)` to `retract` in place of `asked_at`.
    Expected: `test_a_row_read_since_the_removal_arrived_survives_a_gone_answer`
    fails.
+4. Iterate `retraction.targets` directly in place of `sorted(...)`. Expected:
+   `test_a_removal_publishes_in_sorted_order_whatever_order_its_targets_iterate`
+   fails on its last assertion.
+5. Pass `source="push"` to `confirmed_gone` in place of `source.name`. Expected:
+   `test_a_removal_counts_each_held_id_it_asked_about_once` fails.
 
 - [ ] **Step 9: Update the PRD, the guide, the rules and the changelog**
 
@@ -3169,9 +3629,11 @@ an `E ` line. Then restore the file and read the restore back with `diff`.
    not retract the items; the next full walk's sweep does.
    ```
 
-`docs/prd/08-operations.md`: append this sentence to the end of the last cell of
-the `| A source cannot confirm a removal |` row Task 5 added:
-` A push removal the source cannot confirm fails its event like any failed read in the lane and changes nothing; the gap-closing delta after the reconnect never retracts, so the removal waits for the next full walk's sweep.`
+`docs/prd/08-operations.md`: in the last cell of the
+`| A source cannot confirm a removal |` row Task 5 added, end
+`The catalog is unaffected` with a period, then append this sentence, with no
+period of its own, as no cell in that table ends with one:
+` A push removal the source cannot confirm fails its event like any failed read in the lane and changes nothing; the gap-closing delta after the reconnect never retracts, so the removal waits for the next full walk's sweep`
 
 `docs/guide/command-line.md`: directly after the `- **The retraction guard**`
 bullet, add:
@@ -3205,9 +3667,10 @@ anything is retracted, observed`.
 - **A push removal now retracts what the server confirms gone.** When Emby
   reports items removed, Usher asks it about each one it holds, and marks
   unavailable those it no longer serves, publishing `title.updated` for each
-  title or episode. Before, a removal changed nothing until a full walk. Items
-  Emby still serves, which a library refresh also reports removed, are left
-  alone.
+  title or episode. `USHER_SYNC_MAX_RETRACT_FRACTION` does not limit it: a
+  removal the server confirms is applied however many items it names. Before, a
+  removal changed nothing until a full walk. Items Emby still serves, which a
+  library refresh also reports removed, are left alone.
 ```
 
 - [ ] **Step 10: Run the gate, then commit**
@@ -3228,7 +3691,7 @@ git commit -m "push: a removal retracts what the source confirms gone"
 - Modify: `dashboards/03-pipeline.json`, which gains panel 12; its description
   changes from `Eleven panels` to `Twelve panels`
 - Modify: `dashboards/README.md`: the count (line 789), and a section 12 placed
-  before the heading `## ⚠️ Three Dashboard 3 panels plot a mean` (line 1241)
+  before the heading `## ⚠️ Three Dashboard 3 panels plot a mean` (line 1253)
 - Modify: `docs/prd/10-telemetry-and-dashboards.md`, Dashboard 3 (lines 341–354)
 - Modify: `CHANGELOG.md`
 - Test: `tests/unit/test_dashboards.py` and `tests/unit/test_alerts.py`
@@ -3317,12 +3780,15 @@ panel["description"] = (
     "usher.sync.retraction.checks, as usher_sync_retraction_checks_total, labelled source, "
     "path and outcome: every item a full walk's sweep (path sweep) or a push removal (path "
     "push) asked the source about before retracting it. Outcome gone is what the source "
-    "confirmed gone and Usher retracted; outcome served is what it still serves and Usher "
-    "left available -- on the sweep path, the rows a sweep that did not ask would have "
-    "retracted. The cumulative counter is plotted rather than its rate, so a flat line is "
-    "legible as a quiet source.\n\n**There is no series until a sweep or a push removal has "
-    "asked a source something**, so an empty panel on a fresh deployment means nothing has "
-    "been asked yet."
+    "confirmed gone; Usher then retracts it unless the row was seen since the sweep's run "
+    "began, or since Usher took up the push removal. A sweep resumed after a failed commit "
+    "or a cancel asks again and counts again, so gone can exceed what was retracted. "
+    "Outcome served is what the source still serves and Usher left available -- on the "
+    "sweep path, the rows a sweep that did not ask would have retracted. The cumulative "
+    "counter is plotted rather than its rate, so a flat line means nothing was asked of any "
+    "source. It restarts from zero when Usher restarts.\n\n**There is no series until a "
+    "sweep or a push removal has asked a source something**, so an empty panel on a fresh "
+    "deployment means nothing has been asked yet."
 )
 panel["gridPos"] = {"h": 8, "w": 24, "x": 0, "y": 40}
 [target] = panel["targets"]
@@ -3371,10 +3837,10 @@ source since this panel was committed, so there is no reading to record.
   the listing limit and the mean unit duration, by stage** · **retraction
   checks, by path and outcome**.`;
 - change the bolded backing claim to `✅ **Every panel here is backed by real
-  data as of M9, except the whole-library walk panel, which is unbacked until a
-  planned walk runs against a real source, and the retraction-checks panel,
-  unbacked until a sweep or a push removal asks a real source.**`. Leave the
-  `⚠️` sentence after it unchanged.
+  data as of M9, and the whole-library walk panel as of the fast first sync's
+  acceptance walk, except the retraction-checks panel, which is unbacked until a
+  sweep or a push removal asks a real source.**`. Leave the `⚠️` sentence after
+  it unchanged.
 
 `CHANGELOG.md`: append ` Dashboard 3 draws it.` to the end of the
 `usher.sync.retraction.checks` bullet Task 5 added under `### Added`.
