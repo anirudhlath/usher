@@ -11,9 +11,10 @@ these ids do you no longer serve?". Emby answers it with `Ids` listings in round
 because one listing names only one version of a version group. The sweep reads
 the rows a walk did not list, applying the ceiling first. It asks the source,
 retracts the confirmed rows and stamps the rest, all in the run's completing
-transaction. The push lane asks about the removed rows it holds, retracts,
-commits and publishes. Four repository methods replace `mark_unseen_unavailable`,
-and one counter, `usher.sync.retraction.checks`, counts every id asked.
+transaction. The push lane asks about the removed rows it holds, and about a
+removed series' episodes, then retracts, commits and publishes. Four repository
+methods replace `mark_unseen_unavailable`, a fifth finds a series' episodes, and
+one counter, `usher.sync.retraction.checks`, counts every id asked.
 
 **Tech Stack:** Python 3.13, asyncio, SQLAlchemy 2 async with asyncpg (`text()`
 statements), PostgreSQL 17, httpx, OpenTelemetry, pytest with testcontainers,
@@ -46,8 +47,8 @@ The spec leaves these open. Each is settled here so that no task has to settle i
 9. **`PushApplyService` takes `media_items` as a required keyword argument.**
 10. **Five contract cases are shared by both adapters**, so the Emby contract's
     pinned case count goes from 55 to 60. The wire-level cases (rounds, `Limit`,
-    a malformed body or entry, a stray id, spans) are Emby-only, in a new
-    `tests/unit/test_adapters_emby_confirm.py`.
+    a malformed body or entry, stray ids alone and beside an asked one, spans) are
+    Emby-only, in a new `tests/unit/test_adapters_emby_confirm.py`.
 11. **The recorded fixture uses two invented `Id`s:**
     `0000000000000000000000000000e001` is the version the request lists, and
     `0000000000000000000000000000e002` is the other.
@@ -85,12 +86,14 @@ The spec leaves these open. Each is settled here so that no task has to settle i
 - **The sweep's INFO line:** `"{source}'s sweep found {candidates} rows the walk
   did not list: {gone} gone, {served} still served"`
 - **The push removal's INFO line:** `"{source} reported {count} items removed:
-  {held} held, {retracted} retracted, {served} still served"`
+  {held} held, {gone} gone, {retracted} retracted, {served} still served"`
 - **The fake adapter's failure:** `PortUnavailable("source went away while
   confirming removals")`
 - **Emby's malformed body:** `PortDataMalformed("Emby's Ids listing carried no
-  Items array")`, and for an entry with no string `Id`,
-  `PortDataMalformed("Emby's Ids listing carried an entry with no string Id")`
+  Items array")`; for an entry with no string `Id`,
+  `PortDataMalformed("Emby's Ids listing carried an entry with no string Id")`;
+  and for a listing that names only ids nobody asked for,
+  `PortDataMalformed("Emby's Ids listing named none of the ids it was asked for")`
 
 **Scope and safety**
 
@@ -135,9 +138,9 @@ The spec leaves these open. Each is settled here so that no task has to settle i
 1. **A body without `Items` is never read as "nothing listed".** It must raise
    `PortDataMalformed`. Read as an empty listing, it would mark every asked id
    gone. (Task 3, `test_a_body_without_items_raises_rather_than_reading_as_gone`.)
-2. **101 ids go as two requests, with `Limit` 100 and 1.** A `Limit` left at the
-   default page size would cut a full chunk short, and the rounds would take
-   extra requests to re-ask its tail.
+2. **101 ids go as two requests, with `Limit` 100 and 1.** `Limit` bounds what a
+   server that ignores `Ids` sends back, so each request carries its own chunk's
+   length rather than leaving the server's default to decide.
    (Task 3, `test_a_hundred_and_one_ids_go_as_two_requests_each_limited_to_its_chunk`.)
 3. **A push event naming the same id twice handles it once.** It is asked,
    retracted and counted once, and published once. (Task 7,
@@ -152,13 +155,13 @@ The spec leaves these open. Each is settled here so that no task has to settle i
 
 These are known and accepted. None blocks this slice.
 
-- **PR #98 conflicts with this branch.** It edits `docs/plans/progress.md`,
-  `docs/prd/README.md`, PRD 10's Dashboard 3 and the dashboards README's panel 11.
-  Whichever PR merges second rebases.
-- **A server that ignored `Ids` would list unrelated items**, none of them asked
-  for, so every asked id would read as gone. The ceiling bounds that on walks, and
-  the event's own ids bound it on push. Acceptance check 1 reads every retraction
-  back by id.
+- **A server that ignored `Ids` is refused, not believed.** A listing that names
+  only ids nobody asked for raises `PortDataMalformed`, on walks and on push
+  alike. One that names an asked id beside strays is read for the asked id.
+  Acceptance check 1 reads every retraction back by id.
+- **A push removal expands only a series Usher holds as a matched row.** A
+  removed season, folder or library has no row, and an unmatched series' rows
+  share no `title_id`, so what they held waits for the next full walk's sweep.
 - **The rounds rest on one Emby behaviour**, which Task 1's fixture records.
 - **Confirmation scales with the unseen count.** About 290,000 unseen ids on
   Shared Emby take roughly two hours a round at 0.4 requests per second. Slice 2
@@ -189,12 +192,12 @@ These are known and accepted. None blocks this slice.
 | `tests/unit/test_adapters_emby_confirm.py` | 3 | new: the wire cases |
 | `tests/unit/test_ports_source.py` | 3 | `confirm_gone` is abstract |
 | `src/usher/ports/ingest.py` | 4, 5, 6 | `UnseenRows` and `Retraction` (4); two docstrings (5); `SweepResult` goes (6) |
-| `src/usher/ports/repository/media_item.py` | 4, 6, 7 | four abstract methods (4); the old method goes and the class docstring changes (6, 7) |
-| `src/usher/db/repositories/media_item.py` | 4, 6 | four methods and five statements (4); the old method and its statements go (6) |
-| `tests/fakes/media_item_repository.py` | 4, 6 | four methods (4); the old one goes (6) |
-| `tests/contract/media_item_repository_contract.py` | 4, 6 | thirteen cases (4); the old cases go or are re-pointed (6) |
-| `tests/integration/test_media_item_repository.py` | 4, 6 | four statement-count cases (4); two old ones go (6) |
-| `tests/unit/test_ports_repository_ingest.py` | 4, 6 | the surface set |
+| `src/usher/ports/repository/media_item.py` | 4, 6, 7 | four abstract methods (4); the old method goes and the class docstring changes (6, 7); `available_episodes_of` (7) |
+| `src/usher/db/repositories/media_item.py` | 4, 6, 7 | four methods and five statements (4); the old method and its statements go (6); `available_episodes_of` and its statement (7) |
+| `tests/fakes/media_item_repository.py` | 4, 6, 7 | four methods (4); the old one goes (6); `available_episodes_of` (7) |
+| `tests/contract/media_item_repository_contract.py` | 4, 6, 7 | thirteen cases (4); the old cases go or are re-pointed (6); three cases (7) |
+| `tests/integration/test_media_item_repository.py` | 4, 6, 7 | four statement-count cases (4); two old ones go (6); one statement-count case (7) |
+| `tests/unit/test_ports_repository_ingest.py` | 4, 6, 7 | the surface set |
 | `src/usher/services/retraction.py` | 5 | new: `confirmed_gone` and the counter |
 | `src/usher/services/reconcile.py` | 5 | `_beating`, and the sweep |
 | `tests/unit/test_services_reconcile.py` | 5 | the sweep cases, with the window case re-pointed |
@@ -862,25 +865,39 @@ async def test_a_served_version_its_sibling_hid_is_asked_again_and_kept() -> Non
     assert _asked(seen) == ["v0,v1", "v1"]
 
 
-async def test_an_id_nobody_asked_for_is_never_read_as_listed() -> None:
-    """A listing naming only a stray id lists none of what was asked, so the asked id is gone.
+async def test_a_listing_of_only_ids_nobody_asked_for_raises_rather_than_reading_as_gone() -> None:
+    """A correct server never lists an id it was not asked for, so this one cannot decide.
 
-    Counted as listed, the stray would keep every round non-empty, and the rounds would
+    It is what a server ignoring `Ids` sends. Read as "none listed", it would condemn every
+    asked id; counted as listed, it would keep every round non-empty, and the rounds would
     never end: hence the deadline.
     """
     stray = {"Items": [{"Id": "stray-1"}], "TotalRecordCount": 1}
     adapter, seen = _adapter(FakeEmbyServer(), answer=stray)
     try:
         async with asyncio.timeout(5):
-            gone = await adapter.confirm_gone(["gone-1"])
+            with pytest.raises(PortDataMalformed, match="none of the ids it was asked for"):
+                await adapter.confirm_gone(["gone-1"])
     finally:
         await adapter.aclose()
-    assert gone == {"gone-1"}
     assert _asked(seen) == ["gone-1"]
 
 
+async def test_a_stray_id_beside_an_asked_one_is_skipped() -> None:
+    """The listing names an asked id, so it decided; the stray beside it is not counted."""
+    answer = {"Items": [{"Id": "kept-1"}, {"Id": "stray-1"}], "TotalRecordCount": 2}
+    adapter, seen = _adapter(FakeEmbyServer(), answer=answer)
+    try:
+        async with asyncio.timeout(5):
+            gone = await adapter.confirm_gone(["kept-1"])
+    finally:
+        await adapter.aclose()
+    assert gone == frozenset()
+    assert _asked(seen) == ["kept-1"]
+
+
 async def test_a_hundred_and_one_ids_go_as_two_requests_each_limited_to_its_chunk() -> None:
-    """`Limit` is each chunk's own length: a default page would cut a full chunk short."""
+    """`Limit` is each chunk's own length, so a server that ignores `Ids` sends back no more."""
     asked = [f"gone-{index:03d}" for index in range(IDS_PER_REQUEST + 1)]
     adapter, seen = _adapter(FakeEmbyServer())
     try:
@@ -1078,7 +1095,7 @@ Directly after `get_item`, add:
         """The asked ids Emby no longer lists for this account, read by `Ids` in rounds.
 
         An `Ids` listing names one member of a version group per request, so an id a round
-        does not list is asked again in the next. A round that lists none of what it asked
+        does not list is asked again in the next. A round whose listings are all empty
         proves the rest gone: it would have listed a member of every group with one still
         served. Only an id that was asked for counts.
         """
@@ -1100,7 +1117,9 @@ Directly after `get_item`, add:
         """Which of `chunk` one `Ids` listing names; `Limit` is the chunk's length.
 
         An entry with no string `Id` raises, because it may be one of `chunk`. A string
-        `Id` nobody asked for is skipped.
+        `Id` nobody asked for is skipped beside one that was asked for. A listing of only
+        such ids raises: a server that answers `Ids` never sends one, so a server that
+        does cannot say what is gone.
         """
         params = {"Ids": ",".join(chunk), "Limit": str(len(chunk))}
         body = await self._page(await self._items_path(), params, 0, op="confirm")
@@ -1115,6 +1134,8 @@ Directly after `get_item`, add:
                 raise PortDataMalformed("Emby's Ids listing carried an entry with no string Id")
             if listed_id in asked:
                 listed.add(listed_id)
+        if entries and not listed:
+            raise PortDataMalformed("Emby's Ids listing named none of the ids it was asked for")
         return listed
 ```
 
@@ -1127,7 +1148,7 @@ Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest tests/unit/test_adapters_emby_conf
 
 Expected: PASS.
 
-- [ ] **Step 10: Plant the Review Focus guards and the two `_listed_of` guards**
+- [ ] **Step 10: Plant the Review Focus guards and the `_listed_of` guards**
 
 For each plant below:
 - back up the adapter first:
@@ -1150,9 +1171,13 @@ The plants:
    with `DID NOT RAISE`.
 4. In `_listed_of`, add every string `Id` to `listed`, dropping
    `if listed_id in asked:`. Expected:
-   `test_an_id_nobody_asked_for_is_never_read_as_listed` fails on its
-   `TimeoutError` after five seconds. Bound the run from outside with
-   `timeout -s KILL 60`.
+   `test_a_listing_of_only_ids_nobody_asked_for_raises_rather_than_reading_as_gone`
+   fails on its `TimeoutError` after five seconds. Bound the run from outside
+   with `timeout -s KILL 60`.
+5. In `_listed_of`, change `if entries and not listed:` to `if False:`.
+   Expected: the same case fails with `DID NOT RAISE`.
+6. In `_listed_of`, raise for any `Id` nobody asked for, in place of skipping
+   it. Expected: `test_a_stray_id_beside_an_asked_one_is_skipped` fails.
 
 - [ ] **Step 11: Run the gate, then commit**
 
@@ -3030,7 +3055,13 @@ git commit -m "db: retire mark_unseen_unavailable"
   - `apply`'s removal branch (line 93);
   - `_ignore_removal` (lines 226–246), which becomes `_apply_removal`.
 - Modify: `src/usher/composition.py`, the `PushApplyService(...)` call (line 570)
-- Modify: `src/usher/ports/repository/media_item.py`, the class docstring
+- Modify: `src/usher/ports/repository/media_item.py`, the class docstring and
+  a new abstract `available_episodes_of` after `available_among`
+- Modify: `src/usher/db/repositories/media_item.py` and
+  `tests/fakes/media_item_repository.py`: `available_episodes_of`
+- Test: `tests/contract/media_item_repository_contract.py` (three cases),
+  `tests/integration/test_media_item_repository.py` (one statement-count case)
+  and `tests/unit/test_ports_repository_ingest.py` (the surface set)
 - Test: `tests/unit/test_services_push.py`
 - Test: `tests/unit/test_telemetry_push.py`
 - Test: `tests/integration/test_services_push.py`
@@ -3048,6 +3079,8 @@ git commit -m "db: retire mark_unseen_unavailable"
   - `MediaItemRepository.available_among` and `retract`, and `Retraction` (Task 4);
   - `FakeSourceAdapter.confirm_calls` and `fail_confirm()` (Task 3).
 - Produces:
+  - `MediaItemRepository.available_episodes_of(source_id: uuid.UUID, external_ids: Collection[str]) -> frozenset[str]`,
+    abstract: the available episode rows of the series among `external_ids`.
   - `PushApplyService(ingest, watch, events, commit, *, media_items: MediaItemRepository, cache: RowCache | None = None, max_items_per_event: int = 50)`.
     `media_items` is required.
   - `PushOutcome.items_retracted: int = 0`, which replaces `ignored`.
@@ -3070,7 +3103,12 @@ Replace `given_matched` with these two methods:
 
 ```python
     async def given_row(
-        self, external_id: str, *, title_id: uuid.UUID | None, changed_at: AwareDatetime = T0
+        self,
+        external_id: str,
+        *,
+        title_id: uuid.UUID | None,
+        episode_id: uuid.UUID | None = None,
+        changed_at: AwareDatetime = T0,
     ) -> None:
         """A stored, available row for `external_id`, which the source also serves."""
         self.adapter.seed(_item(external_id), changed_at)
@@ -3080,7 +3118,7 @@ Replace `given_matched` with these two methods:
                     source_id=self.source.id,
                     external_id=external_id,
                     title_id=title_id,
-                    episode_id=None,
+                    episode_id=episode_id,
                     container="mkv",
                     video_codec=None,
                     audio_codec=None,
@@ -3130,8 +3168,8 @@ async def test_a_confirmed_removal_retracts_and_publishes_after_its_commit(
         SourceEvent(kind=SourceEventKind.ITEM_REMOVED, external_ids=removed)
     )
     assert outcome == PushOutcome(items_retracted=4)
-    assert fixture.commits == 1
-    assert commits_at_publish == [1, 1], "a client heard of a retraction before its commit"
+    assert fixture.commits == 2, "the read's commit before asking, then the retraction's"
+    assert commits_at_publish == [2, 2], "a client heard of a retraction before its commit"
     published = fixture.events.published
     assert len(published) == 2
     assert {(event.kind, event.title_id, event.episode_id) for event in published} == {
@@ -3194,7 +3232,7 @@ async def test_a_removal_the_source_still_serves_changes_nothing(fixture: _Fixtu
     )
     assert fixture.adapter.confirm_calls == [frozenset({"kept-1"})]
     assert outcome == PushOutcome()
-    assert fixture.commits == 0
+    assert fixture.commits == 1, "only the read's transaction, ended before asking"
     assert fixture.events.published == []
     stored = await fixture.media_items.get_by_external_id(fixture.source.id, "kept-1")
     assert stored is not None and stored.available is True
@@ -3235,7 +3273,7 @@ async def test_a_removal_the_source_cannot_confirm_raises_and_changes_nothing(
         )
     stored = await fixture.media_items.get_by_external_id(fixture.source.id, "gone-1")
     assert stored is not None and stored.available is True
-    assert fixture.commits == 0
+    assert fixture.commits == 1, "only the read's transaction, ended before asking"
     assert fixture.events.published == []
 
 
@@ -3280,14 +3318,17 @@ async def test_a_removal_says_what_it_asked_and_what_it_retracted(fixture: _Fixt
     finally:
         logger.remove(sink)
     assert [line.rstrip("\n") for line in lines if "items removed" in line] == [
-        "Living Room Emby reported 3 items removed: 2 held, 1 retracted, 1 still served"
+        "Living Room Emby reported 3 items removed: 2 held, 1 gone, 1 retracted, 1 still served"
     ]
 
 
 async def test_a_row_read_since_the_removal_arrived_survives_a_gone_answer(
     fixture: _Fixture,
 ) -> None:
-    """The guard is the instant the removal began, so a read after it wins over the answer."""
+    """The guard is the instant the removal began, so a read after it wins over the answer.
+
+    The log line counts the row gone and not retracted, so its numbers still add up.
+    """
     await fixture.given_matched("back-1")
     fixture.adapter.forget("back-1")
     original = fixture.adapter.confirm_gone
@@ -3300,15 +3341,117 @@ async def test_a_row_read_since_the_removal_arrived_survives_a_gone_answer(
 
     fixture.adapter.confirm_gone = _read_back_first  # type: ignore[method-assign]
     before = datetime.now(UTC)
-    outcome = await fixture.apply(
-        SourceEvent(kind=SourceEventKind.ITEM_REMOVED, external_ids=("back-1",))
-    )
+    lines: list[str] = []
+    sink = logger.add(lines.append, level="INFO", format="{message}")
+    try:
+        outcome = await fixture.apply(
+            SourceEvent(kind=SourceEventKind.ITEM_REMOVED, external_ids=("back-1",))
+        )
+    finally:
+        logger.remove(sink)
     stored = await fixture.media_items.get_by_external_id(fixture.source.id, "back-1")
     assert stored is not None
     assert stored.last_seen_at >= before, "the premise: read after the removal began"
     assert stored.available is True
     assert outcome == PushOutcome()
     assert fixture.events.published == []
+    assert [line.rstrip("\n") for line in lines if "items removed" in line] == [
+        "Living Room Emby reported 1 items removed: 1 held, 1 gone, 0 retracted, 0 still served"
+    ]
+
+
+async def _given_a_series(fixture: _Fixture) -> tuple[uuid.UUID, dict[str, uuid.UUID]]:
+    """`series-1` with episodes `ep-1` to `ep-3`, plus `ep-other` of another series.
+
+    The source no longer serves `series-1`, `ep-1` or `ep-2`; it still serves `ep-3`.
+    """
+    series = new_id()
+    await fixture.given_row("series-1", title_id=series)
+    episodes = {f"ep-{number}": new_id() for number in (1, 2, 3)}
+    for external_id, episode_id in episodes.items():
+        await fixture.given_row(external_id, title_id=series, episode_id=episode_id)
+    await fixture.given_row("ep-other", title_id=new_id(), episode_id=new_id())
+    for external_id in ("series-1", "ep-1", "ep-2"):
+        fixture.adapter.forget(external_id)
+    return series, episodes
+
+
+async def test_a_removed_series_retracts_its_episodes_asking_about_each_once(
+    fixture: _Fixture,
+) -> None:
+    """Emby named `ep-1` beside the series and not `ep-2`; both go, and `ep-3` stays.
+
+    `ep-1` was asked about with the series, so it is not asked again or counted twice.
+    """
+    series, episodes = await _given_a_series(fixture)
+    lines: list[str] = []
+    sink = logger.add(lines.append, level="INFO", format="{message}")
+    try:
+        outcome = await fixture.apply(
+            SourceEvent(kind=SourceEventKind.ITEM_REMOVED, external_ids=("series-1", "ep-1"))
+        )
+    finally:
+        logger.remove(sink)
+    assert fixture.adapter.confirm_calls == [
+        frozenset({"series-1", "ep-1"}),
+        frozenset({"ep-2", "ep-3"}),
+    ]
+    assert outcome == PushOutcome(items_retracted=3)
+    expected = sorted(
+        [(series, None), (series, episodes["ep-1"]), (series, episodes["ep-2"])],
+        key=lambda pair: (str(pair[0]), str(pair[1])),
+    )
+    assert [(event.title_id, event.episode_id) for event in fixture.events.published] == expected
+    for external_id, available in (
+        ("series-1", False),
+        ("ep-1", False),
+        ("ep-2", False),
+        ("ep-3", True),
+        ("ep-other", True),
+    ):
+        stored = await fixture.media_items.get_by_external_id(fixture.source.id, external_id)
+        assert stored is not None and stored.available is available, external_id
+    assert [line.rstrip("\n") for line in lines if "items removed" in line] == [
+        "Living Room Emby reported 2 items removed: 4 held, 3 gone, 3 retracted, 1 still served"
+    ]
+
+
+async def test_a_removal_ends_each_reads_transaction_before_asking_the_source(
+    fixture: _Fixture,
+) -> None:
+    """Nothing is written before an answer, so no connection waits on one inside a transaction.
+
+    The named rows are read, then the series' episodes; each read is committed before its
+    question goes out, and the retraction after both is committed once more.
+    """
+    await _given_a_series(fixture)
+    commits_at_ask: list[int] = []
+    original = fixture.adapter.confirm_gone
+
+    async def _recording(external_ids: Collection[str]) -> frozenset[str]:
+        commits_at_ask.append(fixture.commits)
+        return await original(external_ids)
+
+    fixture.adapter.confirm_gone = _recording  # type: ignore[method-assign]
+    outcome = await fixture.apply(
+        SourceEvent(kind=SourceEventKind.ITEM_REMOVED, external_ids=("series-1",))
+    )
+    assert outcome == PushOutcome(items_retracted=3), "the premise: both questions were asked"
+    assert commits_at_ask == [1, 2]
+    assert fixture.commits == 3
+
+
+async def test_a_served_series_does_not_ask_about_its_episodes(fixture: _Fixture) -> None:
+    """Only a series the source confirms gone takes its episodes with it, even a gone one."""
+    series = new_id()
+    await fixture.given_row("series-1", title_id=series)
+    await fixture.given_row("ep-1", title_id=series, episode_id=new_id())
+    fixture.adapter.forget("ep-1")
+    outcome = await fixture.apply(
+        SourceEvent(kind=SourceEventKind.ITEM_REMOVED, external_ids=("series-1",))
+    )
+    assert fixture.adapter.confirm_calls == [frozenset({"series-1"})]
+    assert outcome == PushOutcome()
 ```
 
 - [ ] **Step 2: Write the failing counter case**
@@ -3428,15 +3571,15 @@ Replace the whole of `_ignore_removal` with:
     async def _apply_removal(
         self, source: Source, adapter: SourceAdapter, event: SourceEvent
     ) -> PushOutcome:
-        """Retract what the source confirms gone, among the rows Usher holds available.
+        """Retract the named rows the source confirms gone, and a gone series' episodes.
 
         Emby sends `ItemsRemoved` during an ordinary library refresh for items that have
-        not gone anywhere, so a removal is asked about before anything changes, and only
-        an id the source no longer serves is retracted. No ceiling and no
-        `max_items_per_event` deferral: the source is asked a hundred ids a request, so a
-        whole library's removal is applied here, before the lane reads its next event.
-        Ids Usher holds no available row for -- folders, seasons, extras -- are never
-        asked about.
+        not gone anywhere, so only an available row the event names is asked about, and
+        only one the source no longer serves is retracted. A named series confirmed gone
+        brings its available episodes into the same removal, each asked about once. No
+        ceiling and no `max_items_per_event` deferral: the source is asked a hundred ids
+        a request. Ids Usher holds no row for -- seasons, folders, libraries -- change
+        nothing here; the next full walk's sweep retracts what they held.
 
         The guard is `asked_at`, taken before anything is read, so a row a read has
         stamped since -- the item came back -- is spared. A failed confirmation raises,
@@ -3445,14 +3588,18 @@ Replace the whole of `_ignore_removal` with:
         asked_at = datetime.now(UTC)
         named = frozenset(event.external_ids)
         held = await self._media_items.available_among(source.id, named)
-        gone = await confirmed_gone(adapter, held, source=source.name, path="push")
+        gone = await self._confirm(source, adapter, held)
+        episodes = await self._media_items.available_episodes_of(source.id, gone) - held
+        gone |= await self._confirm(source, adapter, episodes)
+        held |= episodes
         retraction = await self._media_items.retract(source.id, gone, unseen_since=asked_at)
         logger.info(
-            "{source} reported {count} items removed: {held} held, {retracted} retracted, "
-            "{served} still served",
+            "{source} reported {count} items removed: {held} held, {gone} gone, "
+            "{retracted} retracted, {served} still served",
             source=source.name,
             count=len(named),
             held=len(held),
+            gone=len(gone),
             retracted=retraction.retracted,
             served=len(held) - len(gone),
         )
@@ -3473,14 +3620,211 @@ Replace the whole of `_ignore_removal` with:
                     )
                 )
         return PushOutcome(items_retracted=retraction.retracted)
+
+    async def _confirm(
+        self, source: Source, adapter: SourceAdapter, external_ids: frozenset[str]
+    ) -> frozenset[str]:
+        """The ids among `external_ids` the source confirms gone, asked outside a transaction.
+
+        The commit ends the transaction the caller's read opened. Nothing has been written
+        yet, so it commits nothing; it keeps the connection from sitting idle in a
+        transaction for as long as the source takes to answer.
+        """
+        if not external_ids:
+            return frozenset()
+        await self._commit()
+        return await confirmed_gone(adapter, external_ids, source=source.name, path="push")
 ```
+
+`_confirm` commits before it asks: `available_among` and
+`available_episodes_of` each open a transaction, nothing has been written when
+the question goes out, and the commit keeps the connection from idling in a
+transaction while the source answers. The INFO line counts `gone` beside
+`retracted`, so a row the `asked_at` guard spared still adds up.
 
 In `src/usher/composition.py`, add `media_items=pipeline.media_items,` to the
 `PushApplyService(...)` call, directly after `pipeline.commit,`.
 
 In `src/usher/ports/repository/media_item.py`, add this sentence to the end of
 the class docstring's second paragraph (the one Task 6 wrote):
-`A push removal asks about the removed rows it holds available.`
+`A push removal asks about the removed rows it holds available, and about a removed series' episodes.`
+Directly after `available_among`, add:
+
+```python
+    @abstractmethod
+    async def available_episodes_of(
+        self, source_id: uuid.UUID, external_ids: Collection[str]
+    ) -> frozenset[str]:
+        """The available episode rows this source holds for the series among `external_ids`.
+
+        A series' own row carries its `title_id` and no `episode_id`, and each episode's
+        row carries that `title_id` beside its own `episode_id`. So a named episode, a
+        film and a row matched to nothing name no episodes. A named row need not be
+        available. An empty input asks nothing.
+        """
+```
+
+In `src/usher/db/repositories/media_item.py`, add this statement after
+`_AVAILABLE_AMONG`:
+
+```python
+# A series' own row is the one with no `episode_id`; its episodes share its `title_id`.
+_AVAILABLE_EPISODES_OF = """
+SELECT episode.external_id FROM media_items AS series
+JOIN media_items AS episode
+  ON episode.source_id = series.source_id AND episode.title_id = series.title_id
+WHERE series.source_id = :source_id
+  AND series.external_id = ANY(:external_ids)
+  AND series.episode_id IS NULL
+  AND episode.episode_id IS NOT NULL
+  AND episode.available
+"""
+```
+
+and this method after `available_among`:
+
+```python
+    async def available_episodes_of(
+        self, source_id: uuid.UUID, external_ids: Collection[str]
+    ) -> frozenset[str]:
+        if not external_ids:
+            return frozenset()
+        with self._session.no_autoflush:
+            rows = (
+                (
+                    await self._session.execute(
+                        text(_AVAILABLE_EPISODES_OF),
+                        {"source_id": source_id, "external_ids": list(set(external_ids))},
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        return frozenset(rows)
+```
+
+In `tests/fakes/media_item_repository.py`, after `available_among`, add:
+
+```python
+    async def available_episodes_of(
+        self, source_id: uuid.UUID, external_ids: Collection[str]
+    ) -> frozenset[str]:
+        series = {
+            entry.title_id
+            for external_id in set(external_ids)
+            if (entry := self._items.get((source_id, external_id))) is not None
+            and entry.title_id is not None
+            and entry.episode_id is None
+        }
+        return frozenset(
+            entry.external_id
+            for entry in self._items.values()
+            if entry.source_id == source_id
+            and entry.available
+            and entry.episode_id is not None
+            and entry.title_id in series
+        )
+```
+
+In `tests/unit/test_ports_repository_ingest.py`, add `"available_episodes_of"`
+to the surface set after `"available_among"`, under the comment
+`# The push lane's expansion from a removed series to its episodes.`
+
+In `tests/contract/media_item_repository_contract.py`, add before
+`test_retract_changes_only_available_rows_unseen_since_the_instant`:
+
+```python
+    async def test_available_episodes_of_names_a_series_available_episodes_on_this_source(
+        self,
+        repository: MediaItemRepository,
+        source_id: uuid.UUID,
+        other_source_id: uuid.UUID,
+        title_id: uuid.UUID,
+        series_title_id: uuid.UUID,
+        episode_ids: list[uuid.UUID],
+    ) -> None:
+        """A film, an episode and an unmatched row name no episodes; a series names its own."""
+        series, film = series_title_id, title_id
+        await repository.upsert_many(
+            [
+                item(source_id, "series", title_id=series),
+                item(source_id, "ep-0", title_id=series, episode_id=episode_ids[0]),
+                item(source_id, "ep-1", title_id=series, episode_id=episode_ids[1]),
+                item(
+                    source_id,
+                    "ep-retracted",
+                    title_id=series,
+                    episode_id=episode_ids[2],
+                    last_seen_at=EARLIER,
+                ),
+                item(other_source_id, "their-ep", title_id=series, episode_id=episode_ids[3]),
+                item(source_id, "film", title_id=film),
+                item(source_id, "unmatched"),
+            ]
+        )
+        premise = await repository.retract(source_id, ["ep-retracted"], unseen_since=RUN_AT)
+        assert premise.retracted == 1
+        assert await repository.available_episodes_of(
+            source_id, ["series", "series", "film", "unmatched", "never-stored"]
+        ) == {"ep-0", "ep-1"}
+        assert await repository.available_episodes_of(source_id, ["ep-0"]) == frozenset()
+        assert await repository.available_episodes_of(other_source_id, ["series"]) == frozenset()
+
+    async def test_available_episodes_of_reads_a_retracted_series_row(
+        self,
+        repository: MediaItemRepository,
+        source_id: uuid.UUID,
+        series_title_id: uuid.UUID,
+        episode_ids: list[uuid.UUID],
+    ) -> None:
+        """The named row need not be available: its availability is not what is asked."""
+        await repository.upsert_many(
+            [
+                item(source_id, "series", title_id=series_title_id, last_seen_at=EARLIER),
+                item(source_id, "ep-0", title_id=series_title_id, episode_id=episode_ids[0]),
+            ]
+        )
+        premise = await repository.retract(source_id, ["series"], unseen_since=RUN_AT)
+        assert premise.retracted == 1
+        assert await repository.available_episodes_of(source_id, ["series"]) == {"ep-0"}
+
+    async def test_available_episodes_of_nothing_is_nothing(
+        self, repository: MediaItemRepository, source_id: uuid.UUID
+    ) -> None:
+        await repository.upsert_many([item(source_id, "held")])
+        assert await repository.available_episodes_of(source_id, []) == frozenset()
+```
+
+In `tests/integration/test_media_item_repository.py`, add before
+`_seed_a_series_with_episodes`:
+
+```python
+async def test_available_episodes_of_costs_one_statement_and_none_for_nothing(
+    repository: PostgresMediaItemRepository,
+    source_id: uuid.UUID,
+    series_title_id: uuid.UUID,
+    episode_ids: list[uuid.UUID],
+    statement_counter: list[str],
+) -> None:
+    """One join, however many series are named; never one read per series."""
+    await repository.upsert_many(
+        [item(source_id, "series", title_id=series_title_id)]
+        + [
+            item(source_id, f"ep-{index}", title_id=series_title_id, episode_id=episode_id)
+            for index, episode_id in enumerate(episode_ids)
+        ]
+    )
+    statement_counter.clear()
+    episodes = await repository.available_episodes_of(source_id, ["series", "never-stored"])
+    statements = len(statement_counter)
+    statement_counter.clear()
+    await repository.available_episodes_of(source_id, [])
+    nothing_statements = len(statement_counter)
+    assert episodes == {f"ep-{index}" for index in range(len(episode_ids))}, (
+        "the premise: every episode was named"
+    )
+    assert (statements, nothing_statements) == (1, 0)
+```
 
 - [ ] **Step 5: Update the other construction sites**
 
@@ -3491,7 +3835,7 @@ the class docstring's second paragraph (the one Task 6 wrote):
 - In `tests/unit/test_services_watch_sync.py`, line 1172, add
   `media_items=fixture.media_items,` after `commit=fixture._commit,`.
 
-- [ ] **Step 6: Flip the integration removal case, and add its served twin**
+- [ ] **Step 6: Flip the integration removal case, and add its served twin and the series case**
 
 In `tests/integration/test_services_push.py`, replace
 `test_a_removal_leaves_every_row_available` with:
@@ -3552,13 +3896,100 @@ async def test_a_removal_the_source_still_serves_leaves_the_row_available(
     assert events.published == []
 ```
 
-The file now holds five cases, so its two descriptions of them change. Replace
+Append the series case, which repeats the unit series case against real
+episodes and the real join:
+
+```python
+async def _given_a_series_with_episodes(
+    session: AsyncSession, source: Source, episodes: int
+) -> tuple[uuid.UUID, list[uuid.UUID]]:
+    """`series-1`, one season, and `ep-0` onward, each with its `media_items` row."""
+    series = Title(kind=TitleKind.SERIES, name="Pushed Series", sort_name="Pushed Series")
+    await PostgresTitleRepository(session).add(series)
+    season, episode_ids = new_id(), [new_id() for _ in range(episodes)]
+    await session.execute(
+        text("INSERT INTO seasons (id, title_id, season_number) VALUES (:id, :title_id, 1)"),
+        {"id": season, "title_id": series.id},
+    )
+    for number, episode_id in enumerate(episode_ids, start=1):
+        await session.execute(
+            text(
+                "INSERT INTO episodes (id, title_id, season_id, season_number, episode_number) "
+                "VALUES (:id, :title_id, :season_id, 1, :number)"
+            ),
+            {"id": episode_id, "title_id": series.id, "season_id": season, "number": number},
+        )
+    rows = [("series-1", None)] + [(f"ep-{index}", one) for index, one in enumerate(episode_ids)]
+    await PostgresMediaItemRepository(session).upsert_many(
+        [
+            MediaItemUpsert(
+                source_id=source.id,
+                external_id=external_id,
+                title_id=series.id,
+                episode_id=episode_id,
+                container=None if episode_id is None else "mkv",
+                video_codec=None,
+                audio_codec=None,
+                width=None,
+                height=None,
+                hdr_format=None,
+                audio_channels=None,
+                file_size_bytes=None,
+                runtime_seconds=None,
+                added_at=None,
+                last_seen_at=SEEN_AT,
+            )
+            for external_id, episode_id in rows
+        ]
+    )
+    return series.id, episode_ids
+
+
+async def test_a_removed_series_retracts_its_episodes_the_source_confirms_gone(
+    session: AsyncSession,
+    applier: PushApplyService,
+    events: FakeEventPublisher,
+    source: Source,
+    user_id: uuid.UUID,
+) -> None:
+    """Emby names the series alone; `ep-0` and `ep-1` go with it, and the served `ep-2` stays."""
+    series, episode_ids = await _given_a_series_with_episodes(session, source, episodes=3)
+    adapter = FakeSourceAdapter(source)
+    adapter.seed(
+        SourceItem(external_id="ep-2", name="Episode 3", kind=SourceItemKind.EPISODE),
+        SEEN_AT,
+    )
+    outcome = await applier.apply(
+        source,
+        adapter,
+        SourceEvent(kind=SourceEventKind.ITEM_REMOVED, external_ids=("series-1",)),
+        user_id=user_id,
+    )
+    assert adapter.confirm_calls == [frozenset({"series-1"}), frozenset({"ep-0", "ep-1", "ep-2"})]
+    assert outcome.items_retracted == 3
+    repository = PostgresMediaItemRepository(session)
+    for external_id, available in (
+        ("series-1", False),
+        ("ep-0", False),
+        ("ep-1", False),
+        ("ep-2", True),
+    ):
+        stored = await repository.get_by_external_id(source.id, external_id)
+        assert stored is not None and stored.available is available, external_id
+    assert {(event.title_id, event.episode_id) for event in events.published} == {
+        (series, None),
+        (series, episode_ids[0]),
+        (series, episode_ids[1]),
+    }
+```
+
+The file now holds six cases, so its two descriptions of them change. Replace
 the module docstring with:
 
 ```python
 """`PushApplyService` against real Postgres, where three cases need what no port fake can express.
 
-The two removal cases repeat unit cases against the table that holds the `available` flag.
+The three removal cases repeat unit cases against the table that holds the `available` flag.
 """
 ```
 
@@ -3577,18 +4008,18 @@ and the comment above `from tests.fakes.job_queue import FakeJobQueue` with:
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest tests/unit/test_services_push.py tests/unit/test_telemetry_push.py tests/unit/test_services_watch_sync.py -p no:randomly`
 
 Expected: PASS. Then run
-`PYTHONDONTWRITEBYTECODE=1 uv run pytest tests/integration/test_services_push.py tests/integration/test_push_lane_end_to_end.py -p no:randomly`.
+`PYTHONDONTWRITEBYTECODE=1 uv run pytest tests/unit/test_media_item_repository_contract.py tests/unit/test_ports_repository_ingest.py tests/integration/test_media_item_repository.py tests/integration/test_services_push.py tests/integration/test_push_lane_end_to_end.py -p no:randomly`.
 Expected: PASS (Docker).
 
-- [ ] **Step 8: Plant five guards**
+- [ ] **Step 8: Plant seven guards**
 
 Back up first: `cp src/usher/services/push.py /var/tmp/confirmed-retraction-plant.bak`.
 For each plant, run Step 7's unit command and confirm the named case fails on
 an `E ` line. Then restore the file and read the restore back with `diff`.
 
-1. Pass `named` to `confirmed_gone` in place of `held`. Expected:
+1. Pass `named` to the first `_confirm` in place of `held`. Expected:
    `test_a_removal_of_ids_usher_does_not_hold_asks_nothing` fails.
-2. Move `await self._commit()` below the publish loop. Expected:
+2. Move `_apply_removal`'s own `await self._commit()` below the publish loop. Expected:
    `test_a_confirmed_removal_retracts_and_publishes_after_its_commit` fails, on
    `commits_at_publish`.
 3. Pass `unseen_since=datetime.now(UTC)` to `retract` in place of `asked_at`.
@@ -3599,6 +4030,13 @@ an `E ` line. Then restore the file and read the restore back with `diff`.
    fails on its last assertion.
 5. Pass `source="push"` to `confirmed_gone` in place of `source.name`. Expected:
    `test_a_removal_counts_each_held_id_it_asked_about_once` fails.
+6. Replace the `available_episodes_of` line with
+   `episodes: frozenset[str] = frozenset()`. Expected:
+   `test_a_removed_series_retracts_its_episodes_asking_about_each_once` fails on
+   `confirm_calls`, its second question missing.
+7. Delete `await self._commit()` from `_confirm`. Expected:
+   `test_a_removal_ends_each_reads_transaction_before_asking_the_source` fails
+   on `assert [0, 0] == [1, 2]`.
 
 - [ ] **Step 9: Update the PRD, the guide, the rules and the changelog**
 
@@ -3620,14 +4058,21 @@ an `E ` line. Then restore the file and read the restore back with `diff`.
    **A push `ITEM_REMOVED` retracts only what the source confirms gone.** Emby
    sends `ItemsRemoved` during an ordinary library refresh for items that are
    still there. So the lane asks the source about each removed item it holds
-   available, and retracts those the source no longer serves. It then publishes
-   one `title.updated` for each title or episode it retracted. A confirmed
-   removal is applied at once, whatever its size: there is no retraction
-   ceiling and no `push_max_items_per_event` deferral. Items Usher does not
-   hold are not asked about. If the source cannot answer, the event fails like
-   any failed read in the lane. The gap-closing delta after the reconnect does
-   not retract the items; the next full walk's sweep does.
+   available, and retracts those the source no longer serves. When one of those
+   is a series, the lane also asks about the series' available episodes, and
+   retracts in the same removal those the source no longer serves. It then
+   publishes one `title.updated` for each title or episode it retracted. A
+   confirmed removal is applied at once, whatever its size: there is no
+   retraction ceiling and no `push_max_items_per_event` deferral. Items Usher
+   does not hold are not asked about, so a removed season, folder or library
+   changes nothing here: the next full walk's sweep retracts what it held. If
+   the source cannot answer, the event fails like any failed read in the lane.
+   The gap-closing delta after the reconnect does not retract the items; the
+   next full walk's sweep does.
    ```
+5. At the end of the paragraph that begins `**Retraction is a separate step**`,
+   after `the next full walk resumes it and only sweeps.`, add
+   `On either path, an Emby listing that names only items Usher did not ask about counts as no answer.`
 
 `docs/prd/08-operations.md`: in the last cell of the
 `| A source cannot confirm a removal |` row Task 5 added, end
@@ -3639,11 +4084,13 @@ period of its own, as no cell in that table ends with one:
 bullet, add:
 
 ```markdown
-- **Removals reach Usher as they happen.** When the server reports items
-  removed, Usher asks the server about each one it holds, and marks
-  unavailable those the server confirms gone, however many there are. A
+- **Removed films, series and episodes reach Usher as they happen.** When the
+  server reports items removed, Usher asks it about each one it holds, and
+  marks unavailable those it confirms gone, however many there are. A removed
+  series takes its episodes with it, once the server confirms each gone. A
   library refresh also reports removals for files that are still there; those
-  are left alone.
+  are left alone. A removed season, folder or library is caught by the next
+  full sync instead.
 ```
 
 `.claude/rules/emby-push-and-ingest.md`: replace the bullet that begins
@@ -3667,10 +4114,12 @@ anything is retracted, observed`.
 - **A push removal now retracts what the server confirms gone.** When Emby
   reports items removed, Usher asks it about each one it holds, and marks
   unavailable those it no longer serves, publishing `title.updated` for each
-  title or episode. `USHER_SYNC_MAX_RETRACT_FRACTION` does not limit it: a
-  removal the server confirms is applied however many items it names. Before, a
-  removal changed nothing until a full walk. Items Emby still serves, which a
-  library refresh also reports removed, are left alone.
+  title or episode. A removed series' episodes are asked about and retracted
+  with it. `USHER_SYNC_MAX_RETRACT_FRACTION` does not limit it: a removal the
+  server confirms is applied however many items it names. Before, a removal
+  changed nothing until a full walk. Items Emby still serves, which a library
+  refresh also reports removed, are left alone. A removed season, folder or
+  library still waits for the next full walk's sweep.
 ```
 
 - [ ] **Step 10: Run the gate, then commit**
@@ -3679,7 +4128,7 @@ Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest tests/unit/test_docs_pointers.py -
 Expected: PASS. Then run the full gate. Expected: green.
 
 ```bash
-git add src/usher/services/push.py src/usher/composition.py src/usher/ports/repository/media_item.py tests/unit/test_services_push.py tests/unit/test_telemetry_push.py tests/unit/test_services_watch_sync.py tests/integration/test_services_push.py tests/integration/test_push_lane_end_to_end.py docs/prd/03-sources-and-sync.md docs/prd/08-operations.md docs/guide/command-line.md CHANGELOG.md .claude/rules/emby-push-and-ingest.md tests/fixtures/emby/README.md
+git add src/usher/services/push.py src/usher/composition.py src/usher/ports/repository/media_item.py src/usher/db/repositories/media_item.py tests/fakes/media_item_repository.py tests/contract/media_item_repository_contract.py tests/integration/test_media_item_repository.py tests/unit/test_ports_repository_ingest.py tests/unit/test_services_push.py tests/unit/test_telemetry_push.py tests/unit/test_services_watch_sync.py tests/integration/test_services_push.py tests/integration/test_push_lane_end_to_end.py docs/prd/03-sources-and-sync.md docs/prd/08-operations.md docs/guide/command-line.md CHANGELOG.md .claude/rules/emby-push-and-ingest.md tests/fixtures/emby/README.md
 git commit -m "push: a removal retracts what the source confirms gone"
 ```
 
