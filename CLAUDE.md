@@ -253,8 +253,9 @@ uv sync --extra embedding                       # optional: fastembed, 167 MiB, 
 ### Scripts that are not tests, and live runs
 
 `scripts/measure_*.py`, `capture_*.py` and `enqueue_tier_enrichment.py` write to
-a real database or open real sockets. Each says so in its own module docstring —
-read it before running; flags differ per script. Source credentials with
+a real database or open real sockets. Their module docstrings say what they
+measure, not what they touch, so read each script's flags and connection setup
+before running it; flags differ per script. Source credentials with
 `set -a; . ./.env; set +a`, never a literal.
 
 - **`/tmp` here is tmpfs, so a pre-registered bar never goes there.** Anything
