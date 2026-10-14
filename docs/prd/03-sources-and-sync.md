@@ -275,13 +275,17 @@ watch lane owns its own cursor and still walks whole.
 **A push `ITEM_REMOVED` retracts only what the source confirms gone.** Emby
 sends `ItemsRemoved` during an ordinary library refresh for items that are
 still there. So the lane asks the source about each removed item it holds
-available, and retracts those the source no longer serves. It then publishes
-one `title.updated` for each title or episode it retracted. A confirmed
-removal is applied at once, whatever its size: there is no retraction
-ceiling and no `push_max_items_per_event` deferral. Items Usher does not
-hold are not asked about. If the source cannot answer, the event fails like
-any failed read in the lane. The gap-closing delta after the reconnect does
-not retract the items; the next full walk's sweep does.
+available, and retracts those the source no longer serves. When one of those
+is a series, the lane also asks about the series' available episodes, and
+retracts in the same removal those the source no longer serves. It then
+publishes one `title.updated` for each title or episode it retracted. A
+confirmed removal is applied at once, whatever its size: there is no
+retraction ceiling and no `push_max_items_per_event` deferral. Items Usher
+does not hold are not asked about, so a removed season, folder or library
+changes nothing here: the next full walk's sweep retracts what it held. If
+the source cannot answer, the event fails like any failed read in the lane.
+The gap-closing delta after the reconnect does not retract the items; the
+next full walk's sweep does.
 
 **Retraction is a separate step, and it can decline.** It runs only after a
 walk returns normally — after a whole-library walk, once every unit has

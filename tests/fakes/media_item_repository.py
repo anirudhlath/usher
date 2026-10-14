@@ -152,6 +152,25 @@ class FakeMediaItemRepository(MediaItemRepository):
             if (entry := self._items.get((source_id, external_id))) is not None and entry.available
         )
 
+    async def available_episodes_of(
+        self, source_id: uuid.UUID, external_ids: Collection[str]
+    ) -> frozenset[str]:
+        series = {
+            entry.title_id
+            for external_id in set(external_ids)
+            if (entry := self._items.get((source_id, external_id))) is not None
+            and entry.title_id is not None
+            and entry.episode_id is None
+        }
+        return frozenset(
+            entry.external_id
+            for entry in self._items.values()
+            if entry.source_id == source_id
+            and entry.available
+            and entry.episode_id is not None
+            and entry.title_id in series
+        )
+
     async def retract(
         self, source_id: uuid.UUID, external_ids: Collection[str], *, unseen_since: AwareDatetime
     ) -> Retraction:

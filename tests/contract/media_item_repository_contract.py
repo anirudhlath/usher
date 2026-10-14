@@ -291,6 +291,66 @@ class MediaItemRepositoryContract:
         await repository.upsert_many([item(source_id, "held")])
         assert await repository.available_among(source_id, []) == frozenset()
 
+    async def test_available_episodes_of_names_a_series_available_episodes_on_this_source(
+        self,
+        repository: MediaItemRepository,
+        source_id: uuid.UUID,
+        other_source_id: uuid.UUID,
+        title_id: uuid.UUID,
+        series_title_id: uuid.UUID,
+        episode_ids: list[uuid.UUID],
+    ) -> None:
+        """A film, an episode and an unmatched row name no episodes; a series names its own."""
+        series, film = series_title_id, title_id
+        await repository.upsert_many(
+            [
+                item(source_id, "series", title_id=series),
+                item(source_id, "ep-0", title_id=series, episode_id=episode_ids[0]),
+                item(source_id, "ep-1", title_id=series, episode_id=episode_ids[1]),
+                item(
+                    source_id,
+                    "ep-retracted",
+                    title_id=series,
+                    episode_id=episode_ids[2],
+                    last_seen_at=EARLIER,
+                ),
+                item(other_source_id, "their-ep", title_id=series, episode_id=episode_ids[3]),
+                item(source_id, "film", title_id=film),
+                item(source_id, "unmatched"),
+            ]
+        )
+        premise = await repository.retract(source_id, ["ep-retracted"], unseen_since=RUN_AT)
+        assert premise.retracted == 1
+        assert await repository.available_episodes_of(
+            source_id, ["series", "series", "film", "unmatched", "never-stored"]
+        ) == {"ep-0", "ep-1"}
+        assert await repository.available_episodes_of(source_id, ["ep-0"]) == frozenset()
+        assert await repository.available_episodes_of(other_source_id, ["series"]) == frozenset()
+
+    async def test_available_episodes_of_reads_a_retracted_series_row(
+        self,
+        repository: MediaItemRepository,
+        source_id: uuid.UUID,
+        series_title_id: uuid.UUID,
+        episode_ids: list[uuid.UUID],
+    ) -> None:
+        """The named row need not be available: its availability is not what is asked."""
+        await repository.upsert_many(
+            [
+                item(source_id, "series", title_id=series_title_id, last_seen_at=EARLIER),
+                item(source_id, "ep-0", title_id=series_title_id, episode_id=episode_ids[0]),
+            ]
+        )
+        premise = await repository.retract(source_id, ["series"], unseen_since=RUN_AT)
+        assert premise.retracted == 1
+        assert await repository.available_episodes_of(source_id, ["series"]) == {"ep-0"}
+
+    async def test_available_episodes_of_nothing_is_nothing(
+        self, repository: MediaItemRepository, source_id: uuid.UUID
+    ) -> None:
+        await repository.upsert_many([item(source_id, "held")])
+        assert await repository.available_episodes_of(source_id, []) == frozenset()
+
     async def test_retract_changes_only_available_rows_unseen_since_the_instant(
         self, repository: MediaItemRepository, source_id: uuid.UUID, other_source_id: uuid.UUID
     ) -> None:

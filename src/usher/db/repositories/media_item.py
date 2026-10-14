@@ -122,6 +122,18 @@ SELECT external_id FROM media_items
 WHERE source_id = :source_id AND external_id = ANY(:external_ids) AND available
 """
 
+# A series' own row is the one with no `episode_id`; its episodes share its `title_id`.
+_AVAILABLE_EPISODES_OF = """
+SELECT episode.external_id FROM media_items AS series
+JOIN media_items AS episode
+  ON episode.source_id = series.source_id AND episode.title_id = series.title_id
+WHERE series.source_id = :source_id
+  AND series.external_id = ANY(:external_ids)
+  AND series.episode_id IS NULL
+  AND episode.episode_id IS NOT NULL
+  AND episode.available
+"""
+
 # The guard is the caller's instant: a row any read has stamped since then is spared.
 _RETRACT = """
 UPDATE media_items SET available = false
@@ -327,6 +339,24 @@ class PostgresMediaItemRepository(MediaItemRepository):
                 (
                     await self._session.execute(
                         text(_AVAILABLE_AMONG),
+                        {"source_id": source_id, "external_ids": list(set(external_ids))},
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        return frozenset(rows)
+
+    async def available_episodes_of(
+        self, source_id: uuid.UUID, external_ids: Collection[str]
+    ) -> frozenset[str]:
+        if not external_ids:
+            return frozenset()
+        with self._session.no_autoflush:
+            rows = (
+                (
+                    await self._session.execute(
+                        text(_AVAILABLE_EPISODES_OF),
                         {"source_id": source_id, "external_ids": list(set(external_ids))},
                     )
                 )

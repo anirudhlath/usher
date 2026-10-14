@@ -21,6 +21,8 @@ def test_media_item_repository_surface() -> None:
             "upsert_many",
             "list_unseen",
             "available_among",
+            # The push lane's expansion from a removed series to its episodes.
+            "available_episodes_of",
             "retract",
             "mark_seen",
             "get_by_external_id",

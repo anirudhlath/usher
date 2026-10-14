@@ -144,11 +144,13 @@ usher sync-status                       # recent walks and their plans, queue de
   `--allow-full-retraction`. A walk marks an item unavailable only once the
   server confirms it is gone. An item the server still serves but did not
   list, such as a film's second version, stays available.
-- **Removals reach Usher as they happen.** When the server reports items
-  removed, Usher asks the server about each one it holds, and marks
-  unavailable those the server confirms gone, however many there are. A
+- **Removed films, series and episodes reach Usher as they happen.** When the
+  server reports items removed, Usher asks it about each one it holds, and
+  marks unavailable those it confirms gone, however many there are. A removed
+  series takes its episodes with it, once the server confirms each gone. A
   library refresh also reports removals for files that are still there; those
-  are left alone.
+  are left alone. A removed season, folder or library is caught by the next
+  full sync instead.
 - **You don't have to own the server.** Pointing Usher at a server you don't
   administer is supported. Marking a title played writes to your account on
   that server.

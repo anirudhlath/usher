@@ -145,7 +145,12 @@ class _Fixture:
         return None
 
     async def given_row(
-        self, external_id: str, *, title_id: uuid.UUID | None, changed_at: AwareDatetime = T0
+        self,
+        external_id: str,
+        *,
+        title_id: uuid.UUID | None,
+        episode_id: uuid.UUID | None = None,
+        changed_at: AwareDatetime = T0,
     ) -> None:
         """A stored, available row for `external_id`, which the source also serves."""
         self.adapter.seed(_item(external_id), changed_at)
@@ -155,7 +160,7 @@ class _Fixture:
                     source_id=self.source.id,
                     external_id=external_id,
                     title_id=title_id,
-                    episode_id=None,
+                    episode_id=episode_id,
                     container="mkv",
                     video_codec=None,
                     audio_codec=None,
@@ -465,8 +470,8 @@ async def test_a_confirmed_removal_retracts_and_publishes_after_its_commit(
         SourceEvent(kind=SourceEventKind.ITEM_REMOVED, external_ids=removed)
     )
     assert outcome == PushOutcome(items_retracted=4)
-    assert fixture.commits == 1
-    assert commits_at_publish == [1, 1], "a client heard of a retraction before its commit"
+    assert fixture.commits == 2, "the read's commit before asking, then the retraction's"
+    assert commits_at_publish == [2, 2], "a client heard of a retraction before its commit"
     published = fixture.events.published
     assert len(published) == 2
     assert {(event.kind, event.title_id, event.episode_id) for event in published} == {
@@ -529,7 +534,7 @@ async def test_a_removal_the_source_still_serves_changes_nothing(fixture: _Fixtu
     )
     assert fixture.adapter.confirm_calls == [frozenset({"kept-1"})]
     assert outcome == PushOutcome()
-    assert fixture.commits == 0
+    assert fixture.commits == 1, "only the read's transaction, ended before asking"
     assert fixture.events.published == []
     stored = await fixture.media_items.get_by_external_id(fixture.source.id, "kept-1")
     assert stored is not None and stored.available is True
@@ -570,7 +575,7 @@ async def test_a_removal_the_source_cannot_confirm_raises_and_changes_nothing(
         )
     stored = await fixture.media_items.get_by_external_id(fixture.source.id, "gone-1")
     assert stored is not None and stored.available is True
-    assert fixture.commits == 0
+    assert fixture.commits == 1, "only the read's transaction, ended before asking"
     assert fixture.events.published == []
 
 
@@ -615,14 +620,17 @@ async def test_a_removal_says_what_it_asked_and_what_it_retracted(fixture: _Fixt
     finally:
         logger.remove(sink)
     assert [line.rstrip("\n") for line in lines if "items removed" in line] == [
-        "Living Room Emby reported 3 items removed: 2 held, 1 retracted, 1 still served"
+        "Living Room Emby reported 3 items removed: 2 held, 1 gone, 1 retracted, 1 still served"
     ]
 
 
 async def test_a_row_read_since_the_removal_arrived_survives_a_gone_answer(
     fixture: _Fixture,
 ) -> None:
-    """The guard is the instant the removal began, so a read after it wins over the answer."""
+    """The guard is the instant the removal began, so a read after it wins over the answer.
+
+    The log line counts the row gone and not retracted, so its numbers still add up.
+    """
     await fixture.given_matched("back-1")
     fixture.adapter.forget("back-1")
     original = fixture.adapter.confirm_gone
@@ -635,15 +643,117 @@ async def test_a_row_read_since_the_removal_arrived_survives_a_gone_answer(
 
     fixture.adapter.confirm_gone = _read_back_first  # type: ignore[method-assign]
     before = datetime.now(UTC)
-    outcome = await fixture.apply(
-        SourceEvent(kind=SourceEventKind.ITEM_REMOVED, external_ids=("back-1",))
-    )
+    lines: list[str] = []
+    sink = logger.add(lines.append, level="INFO", format="{message}")
+    try:
+        outcome = await fixture.apply(
+            SourceEvent(kind=SourceEventKind.ITEM_REMOVED, external_ids=("back-1",))
+        )
+    finally:
+        logger.remove(sink)
     stored = await fixture.media_items.get_by_external_id(fixture.source.id, "back-1")
     assert stored is not None
     assert stored.last_seen_at >= before, "the premise: read after the removal began"
     assert stored.available is True
     assert outcome == PushOutcome()
     assert fixture.events.published == []
+    assert [line.rstrip("\n") for line in lines if "items removed" in line] == [
+        "Living Room Emby reported 1 items removed: 1 held, 1 gone, 0 retracted, 0 still served"
+    ]
+
+
+async def _given_a_series(fixture: _Fixture) -> tuple[uuid.UUID, dict[str, uuid.UUID]]:
+    """`series-1` with episodes `ep-1` to `ep-3`, plus `ep-other` of another series.
+
+    The source no longer serves `series-1`, `ep-1` or `ep-2`; it still serves `ep-3`.
+    """
+    series = new_id()
+    await fixture.given_row("series-1", title_id=series)
+    episodes = {f"ep-{number}": new_id() for number in (1, 2, 3)}
+    for external_id, episode_id in episodes.items():
+        await fixture.given_row(external_id, title_id=series, episode_id=episode_id)
+    await fixture.given_row("ep-other", title_id=new_id(), episode_id=new_id())
+    for external_id in ("series-1", "ep-1", "ep-2"):
+        fixture.adapter.forget(external_id)
+    return series, episodes
+
+
+async def test_a_removed_series_retracts_its_episodes_asking_about_each_once(
+    fixture: _Fixture,
+) -> None:
+    """Emby named `ep-1` beside the series and not `ep-2`; both go, and `ep-3` stays.
+
+    `ep-1` was asked about with the series, so it is not asked again or counted twice.
+    """
+    series, episodes = await _given_a_series(fixture)
+    lines: list[str] = []
+    sink = logger.add(lines.append, level="INFO", format="{message}")
+    try:
+        outcome = await fixture.apply(
+            SourceEvent(kind=SourceEventKind.ITEM_REMOVED, external_ids=("series-1", "ep-1"))
+        )
+    finally:
+        logger.remove(sink)
+    assert fixture.adapter.confirm_calls == [
+        frozenset({"series-1", "ep-1"}),
+        frozenset({"ep-2", "ep-3"}),
+    ]
+    assert outcome == PushOutcome(items_retracted=3)
+    expected = sorted(
+        [(series, None), (series, episodes["ep-1"]), (series, episodes["ep-2"])],
+        key=lambda pair: (str(pair[0]), str(pair[1])),
+    )
+    assert [(event.title_id, event.episode_id) for event in fixture.events.published] == expected
+    for external_id, available in (
+        ("series-1", False),
+        ("ep-1", False),
+        ("ep-2", False),
+        ("ep-3", True),
+        ("ep-other", True),
+    ):
+        stored = await fixture.media_items.get_by_external_id(fixture.source.id, external_id)
+        assert stored is not None and stored.available is available, external_id
+    assert [line.rstrip("\n") for line in lines if "items removed" in line] == [
+        "Living Room Emby reported 2 items removed: 4 held, 3 gone, 3 retracted, 1 still served"
+    ]
+
+
+async def test_a_removal_ends_each_reads_transaction_before_asking_the_source(
+    fixture: _Fixture,
+) -> None:
+    """Nothing is written before an answer, so no connection waits on one inside a transaction.
+
+    The named rows are read, then the series' episodes; each read is committed before its
+    question goes out, and the retraction after both is committed once more.
+    """
+    await _given_a_series(fixture)
+    commits_at_ask: list[int] = []
+    original = fixture.adapter.confirm_gone
+
+    async def _recording(external_ids: Collection[str]) -> frozenset[str]:
+        commits_at_ask.append(fixture.commits)
+        return await original(external_ids)
+
+    fixture.adapter.confirm_gone = _recording  # type: ignore[method-assign]
+    outcome = await fixture.apply(
+        SourceEvent(kind=SourceEventKind.ITEM_REMOVED, external_ids=("series-1",))
+    )
+    assert outcome == PushOutcome(items_retracted=3), "the premise: both questions were asked"
+    assert commits_at_ask == [1, 2]
+    assert fixture.commits == 3
+
+
+async def test_a_served_series_does_not_ask_about_its_episodes(fixture: _Fixture) -> None:
+    """Only a series the source confirms gone takes its episodes with it, even a gone one."""
+    series = new_id()
+    await fixture.given_row("series-1", title_id=series)
+    await fixture.given_row("ep-1", title_id=series, episode_id=new_id())
+    fixture.adapter.forget("ep-1")
+    outcome = await fixture.apply(
+        SourceEvent(kind=SourceEventKind.ITEM_REMOVED, external_ids=("series-1",))
+    )
+    assert fixture.adapter.confirm_calls == [frozenset({"series-1"})]
+    assert outcome == PushOutcome()
 
 
 # -- the unit of work -------------------------------------------------------

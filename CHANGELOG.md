@@ -70,10 +70,12 @@ Versioning is `0.x` while the wire contract may still move —
 - **A push removal now retracts what the server confirms gone.** When Emby
   reports items removed, Usher asks it about each one it holds, and marks
   unavailable those it no longer serves, publishing `title.updated` for each
-  title or episode. `USHER_SYNC_MAX_RETRACT_FRACTION` does not limit it: a
-  removal the server confirms is applied however many items it names. Before, a
-  removal changed nothing until a full walk. Items Emby still serves, which a
-  library refresh also reports removed, are left alone.
+  title or episode. A removed series' episodes are asked about and retracted
+  with it. `USHER_SYNC_MAX_RETRACT_FRACTION` does not limit it: a removal the
+  server confirms is applied however many items it names. Before, a removal
+  changed nothing until a full walk. Items Emby still serves, which a library
+  refresh also reports removed, are left alone. A removed season, folder or
+  library still waits for the next full walk's sweep.
 - **`USHER_SOURCE_PAGE_SIZE` defaults to 1,000, up from 200.** A page of 1,000
   costs a source little more than a page of 200, so a walk makes a fifth of the
   requests. A `.env` copied from an earlier `.env.example` still sets

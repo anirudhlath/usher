@@ -52,7 +52,7 @@ class MediaItemRepository(ABC):
     normally -- `SourceAdapter.list_items` guarantees a walk raises rather than
     truncating, and that guarantee is worth nothing if the sweep runs either way -- so
     it is a separate call, never a side effect of `upsert_many`. A push removal asks
-    about the removed rows it holds available.
+    about the removed rows it holds available, and about a removed series' episodes.
     """
 
     @abstractmethod
@@ -80,6 +80,18 @@ class MediaItemRepository(ABC):
         """The ids among `external_ids` this source holds available.
 
         An empty input asks nothing.
+        """
+
+    @abstractmethod
+    async def available_episodes_of(
+        self, source_id: uuid.UUID, external_ids: Collection[str]
+    ) -> frozenset[str]:
+        """The available episode rows this source holds for the series among `external_ids`.
+
+        A series' own row carries its `title_id` and no `episode_id`, and each episode's
+        row carries that `title_id` beside its own `episode_id`. So a named episode, a
+        film and a row matched to nothing name no episodes. A named row need not be
+        available. An empty input asks nothing.
         """
 
     @abstractmethod

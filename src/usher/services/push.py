@@ -230,15 +230,15 @@ class PushApplyService:
     async def _apply_removal(
         self, source: Source, adapter: SourceAdapter, event: SourceEvent
     ) -> PushOutcome:
-        """Retract what the source confirms gone, among the rows Usher holds available.
+        """Retract the named rows the source confirms gone, and a gone series' episodes.
 
         Emby sends `ItemsRemoved` during an ordinary library refresh for items that have
-        not gone anywhere, so a removal is asked about before anything changes, and only
-        an id the source no longer serves is retracted. No ceiling and no
-        `max_items_per_event` deferral: the source is asked a hundred ids a request, so a
-        whole library's removal is applied here, before the lane reads its next event.
-        Ids Usher holds no available row for -- folders, seasons, extras -- are never
-        asked about.
+        not gone anywhere, so only an available row the event names is asked about, and
+        only one the source no longer serves is retracted. A named series confirmed gone
+        brings its available episodes into the same removal, each asked about once. No
+        ceiling and no `max_items_per_event` deferral: the source is asked a hundred ids
+        a request. Ids Usher holds no row for -- seasons, folders, libraries -- change
+        nothing here; the next full walk's sweep retracts what they held.
 
         The guard is `asked_at`, taken before anything is read, so a row a read has
         stamped since -- the item came back -- is spared. A failed confirmation raises,
@@ -247,14 +247,18 @@ class PushApplyService:
         asked_at = datetime.now(UTC)
         named = frozenset(event.external_ids)
         held = await self._media_items.available_among(source.id, named)
-        gone = await confirmed_gone(adapter, held, source=source.name, path="push")
+        gone = await self._confirm(source, adapter, held)
+        episodes = await self._media_items.available_episodes_of(source.id, gone) - held
+        gone |= await self._confirm(source, adapter, episodes)
+        held |= episodes
         retraction = await self._media_items.retract(source.id, gone, unseen_since=asked_at)
         logger.info(
-            "{source} reported {count} items removed: {held} held, {retracted} retracted, "
-            "{served} still served",
+            "{source} reported {count} items removed: {held} held, {gone} gone, "
+            "{retracted} retracted, {served} still served",
             source=source.name,
             count=len(named),
             held=len(held),
+            gone=len(gone),
             retracted=retraction.retracted,
             served=len(held) - len(gone),
         )
@@ -275,6 +279,20 @@ class PushApplyService:
                     )
                 )
         return PushOutcome(items_retracted=retraction.retracted)
+
+    async def _confirm(
+        self, source: Source, adapter: SourceAdapter, external_ids: frozenset[str]
+    ) -> frozenset[str]:
+        """The ids among `external_ids` the source confirms gone, asked outside a transaction.
+
+        The commit ends the transaction the caller's read opened. Nothing has been written
+        yet, so it commits nothing; it keeps the connection from sitting idle in a
+        transaction for as long as the source takes to answer.
+        """
+        if not external_ids:
+            return frozenset()
+        await self._commit()
+        return await confirmed_gone(adapter, external_ids, source=source.name, path="push")
 
 
 # The three units of work a lane needs, each opening its own session.

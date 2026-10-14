@@ -365,6 +365,33 @@ async def test_the_three_keyed_methods_cost_one_statement_each_and_none_for_noth
     )
 
 
+async def test_available_episodes_of_costs_one_statement_and_none_for_nothing(
+    repository: PostgresMediaItemRepository,
+    source_id: uuid.UUID,
+    series_title_id: uuid.UUID,
+    episode_ids: list[uuid.UUID],
+    statement_counter: list[str],
+) -> None:
+    """One join, however many series are named; never one read per series."""
+    await repository.upsert_many(
+        [item(source_id, "series", title_id=series_title_id)]
+        + [
+            item(source_id, f"ep-{index}", title_id=series_title_id, episode_id=episode_id)
+            for index, episode_id in enumerate(episode_ids)
+        ]
+    )
+    statement_counter.clear()
+    episodes = await repository.available_episodes_of(source_id, ["series", "never-stored"])
+    statements = len(statement_counter)
+    statement_counter.clear()
+    await repository.available_episodes_of(source_id, [])
+    nothing_statements = len(statement_counter)
+    assert episodes == {f"ep-{index}" for index in range(len(episode_ids))}, (
+        "the premise: every episode was named"
+    )
+    assert (statements, nothing_statements) == (1, 0)
+
+
 async def _seed_a_series_with_episodes(
     session: AsyncSession, source_id: uuid.UUID, *, episodes: int
 ) -> uuid.UUID:
