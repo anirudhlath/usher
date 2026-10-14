@@ -20,7 +20,7 @@ from tests.fakes.house import APPLE_TV, this_house
 from usher.domain.house import DeviceRole
 
 _ROWS = rows_of(this_house(shield=DeviceRole.IGNORE), labels={APPLE_TV: ("favourite",)})
-_RECORDED_KINDS = ("areas", "devices", "entities", "entity", "states")
+_RECORDED_KINDS = ("areas", "devices", "entities", "entity", "labels", "states")
 _TYPE_NAMES = {"NoneType", "bool", "dict", "float", "int", "list", "str"}
 _MAC = re.compile(r"\b(?:[0-9a-f]{2}:){5}[0-9a-f]{2}\b", re.IGNORECASE)
 _IPV4 = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
@@ -95,13 +95,6 @@ def test_the_rows_carry_both_roles_a_foreign_label_and_a_player_with_no_area() -
     assert {type(row["area_id"]) for row in _ROWS.devices} == {str, type(None)}
     attributes = {key for row in _ROWS.states for key in row["attributes"]}
     assert {"media_title", "media_position", "media_position_updated_at"} <= attributes
-
-
-def test_the_label_registry_is_unrecorded_until_the_house_has_labels() -> None:
-    """Task 17 records it; then this case and `_PENDING` go and `labels` joins `_RECORDED_KINDS`."""
-    assert recorded()["labels"] == {}
-    assert [kind for kind in ("entities", "entity") if "labels[]" in recorded()[kind]] == []
-    assert {row["label_id"] for row in _ROWS.labels} == {"favourite", "usher", "usher_ignore"}
 
 
 def test_the_recorded_shape_holds_type_names_and_no_entity() -> None:

@@ -193,6 +193,9 @@
     "labels": [
       "list"
     ],
+    "labels[]": [
+      "str"
+    ],
     "modified_at": [
       "float"
     ],
@@ -279,6 +282,9 @@
     ],
     "labels": [
       "list"
+    ],
+    "labels[]": [
+      "str"
     ],
     "modified_at": [
       "float"
@@ -399,7 +405,29 @@
       "str"
     ]
   },
-  "labels": {},
+  "labels": {
+    "color": [
+      "NoneType"
+    ],
+    "created_at": [
+      "float"
+    ],
+    "description": [
+      "NoneType"
+    ],
+    "icon": [
+      "NoneType"
+    ],
+    "label_id": [
+      "str"
+    ],
+    "modified_at": [
+      "float"
+    ],
+    "name": [
+      "str"
+    ]
+  },
   "refusal": {
     "error": [
       "dict"
@@ -481,6 +509,9 @@
     "attributes.mass_player_type": [
       "str"
     ],
+    "attributes.media_album_artist": [
+      "str"
+    ],
     "attributes.media_album_name": [
       "str"
     ],
@@ -545,7 +576,8 @@
       "NoneType"
     ],
     "context.user_id": [
-      "NoneType"
+      "NoneType",
+      "str"
     ],
     "entity_id": [
       "str"

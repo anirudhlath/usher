@@ -30,8 +30,6 @@ _MODIFIED: Final = 1_790_000_600.0
 _CHANGED: Final = "2026-10-06T19:00:00.000000+00:00"
 _ROLE_LABELS: Final = {DeviceRole.USE: "usher", DeviceRole.IGNORE: "usher_ignore"}
 LABEL_NAMES: Final = {"usher": "Usher", "usher_ignore": "Usher ignore", "favourite": "Favourite"}
-#: No capture can record a label until the house has one; Task 17's capture does.
-_PENDING: Final = frozenset({"labels[]: str"})
 
 
 @cache
@@ -49,17 +47,16 @@ def recorded() -> dict[str, dict[str, list[str]]]:
 
 
 def unrecorded_paths(kind: str, rows: Sequence[object]) -> list[str]:
-    """Every `path: type` in `rows` the recorded shape of `kind` never saw, `_PENDING` aside."""
+    """Every `path: type` in `rows` the recorded shape of `kind` never saw."""
     script = _script()
     seen: dict[str, list[str]] = script.merged(rows, script.DEPTHS[kind])
     shape = recorded()[kind]
-    unseen = [
+    return [
         f"{path}: {name}"
         for path, names in seen.items()
         for name in names
         if name not in shape.get(path, ())
     ]
-    return [found for found in unseen if found not in _PENDING]
 
 
 def missing_keys(kind: str, rows: Sequence[Mapping[str, object]]) -> list[str]:
@@ -188,7 +185,7 @@ def state_row(state: HouseState) -> dict[str, Any]:
 
 
 def label_row(label_id: str, name: str) -> dict[str, Any]:
-    """HA core's label keys, unrecorded until a house has a label (see the README)."""
+    """HA core's label keys, as the shape records them."""
     return {
         "color": None,
         "created_at": _CREATED,

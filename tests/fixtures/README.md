@@ -115,11 +115,6 @@ id is not), or if a path contains a player's entity id. MACs are under
 `02:00:00` and hosts in `192.0.2.0/24`, in the rows, and in the text of the
 fixture, fakes and script the scan derives.
 
-The label registry is unrecorded: the house had no labels when it was
-captured, so `label_row` carries HA core's keys, the shape's `labels` entry is
-empty, and an entity row's `labels[]` items are exempted by name (`_PENDING`)
-until a capture after the first confirm fills both.
-
 To capture again, start something playing on a player first: the `media_*`
 attribute paths exist only while one plays. Merge over the committed shape so
 no path is lost, and check that no value leaked before copying it into place.
