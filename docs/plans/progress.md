@@ -137,12 +137,12 @@ heading false. Slices 2–4 get plans of their own and rows here.
 ## Confirmed retraction (from docs/specs/2026-10-07-confirmed-retraction-design.md)
 | Task | What it delivers | Plan file | Status |
 |---|---|---|---|
-| 1–2 | How an `Ids` listing answers two versions of one item, recorded, and the fake Emby server taught it | docs/plans/2026-10-07-confirmed-retraction.md | 🔨 in review (PR #100) |
-| 3–4 | `confirm_gone` on the port and both adapters, and the repository's four new methods | docs/plans/2026-10-07-confirmed-retraction.md | 🔨 in review (PR #100) |
-| 5–6 | A full walk's sweep retracts only what the source confirms gone, and `mark_unseen_unavailable` is retired | docs/plans/2026-10-07-confirmed-retraction.md | 🔨 in review (PR #100) |
-| 7–8 | A push removal retracts what the source confirms gone, and dashboard 3 draws the checks | docs/plans/2026-10-07-confirmed-retraction.md | 🔨 in review (PR #100) |
-| 9 | Status rows: this plan in review | docs/plans/2026-10-07-confirmed-retraction.md | 🔨 in review (PR #100) |
-| 10 | Live acceptance: every retraction from a full walk and a day of push removals is absent on Emby — owner-gated | docs/plans/2026-10-07-confirmed-retraction.md | 📋 planned |
+| 1–2 | How an `Ids` listing answers two versions of one item, recorded, and the fake Emby server taught it | docs/plans/2026-10-07-confirmed-retraction.md | ✅ landed (PR #100) |
+| 3–4 | `confirm_gone` on the port and both adapters, and the repository's four new methods | docs/plans/2026-10-07-confirmed-retraction.md | ✅ landed (PR #100) |
+| 5–6 | A full walk's sweep retracts only what the source confirms gone, and `mark_unseen_unavailable` is retired | docs/plans/2026-10-07-confirmed-retraction.md | ✅ landed (PR #100) |
+| 7–8 | A push removal retracts what the source confirms gone, and dashboard 3 draws the checks | docs/plans/2026-10-07-confirmed-retraction.md | ✅ landed (PR #100) |
+| 9 | Status rows: this plan in review | docs/plans/2026-10-07-confirmed-retraction.md | ✅ landed (PR #100) |
+| 10 | Live acceptance: every retraction from a full walk and a day of push removals is absent on Emby — owner-gated | docs/plans/2026-10-07-confirmed-retraction.md | 🔨 Steps 1–3 passed on production (PR #100's comment): all 10,746 retractions gone on Emby; Step 4, a day of push removals, runs 2026-10-15 |
 
 **An eighth table, for the seventh's reason.** Confirmed retraction has its own
 spec and is not a milestone, so a row under any heading above would make that

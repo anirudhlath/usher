@@ -149,9 +149,11 @@ order; until then a piece of episodes on it can stop at its first page whose
 last item was created after the next piece's first item, leaving the rest of it
 unread. At a page size of 1 no page holds two items, so no WARNING ever comes.
 
-Every request is work for the media server. If you don't administer it, or a
-sync slows down somebody's playback, set `USHER_SYNC_WALKERS=1` for one request
-at a time.
+Nothing else slows a sync down by default. Every request is work for the media
+server, though. If you don't administer it, or a sync slows down somebody's
+playback, set `USHER_SYNC_WALKERS=1` for one request at a time, or
+`USHER_SOURCE_REQUESTS_PER_SECOND` to space every request Usher makes to it,
+such as `0.4` for one every 2.5 seconds.
 
 ## Semantic search
 

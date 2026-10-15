@@ -67,6 +67,13 @@ Versioning is `0.x` while the wire contract may still move —
 
 ### Changed
 
+- **`USHER_SOURCE_REQUESTS_PER_SECOND` now defaults to 0, no gate.** Out of the
+  box, listings to a source are throttled only by the adaptive limiter
+  `USHER_SYNC_WALKERS` caps, which backs off on an outage or a 429, so a sync
+  and every single-item read run at the server's pace rather than one request
+  every 2.5 seconds. Set a rate, such as `0.4`, to cap every request to a server
+  you do not administer.
+
 - **A push removal now retracts what the server confirms gone.** When Emby
   reports items removed, Usher asks it about each one it holds, and marks
   unavailable those it no longer serves, publishing `title.updated` for each

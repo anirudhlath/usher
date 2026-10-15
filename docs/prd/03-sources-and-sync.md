@@ -33,11 +33,13 @@ Authenticated requests carry the same identity header plus the session token in
   username, the password nor the ref is ever returned by any endpoint,
   including admin. **The session token minted from them is the one documented
   exception**: it reaches a client inside a `direct` playback target's URL.
-- **Outbound calls to one source are paced.** A minimum-interval gate spaces
-  every outbound call at least `1/rate` seconds apart, where `rate` is
-  `USHER_SOURCE_REQUESTS_PER_SECOND` (default **0.4**; 0 disables it). It is
-  one gate per source per process, shared by the push lane, the worker lane and
-  every request; a second process is a second gate, spending `2 × rate`. The
+- **Outbound calls to one source may be capped.** By default nothing paces a
+  call except the adaptive listing limiter below, which backs off on an outage
+  or a 429. Setting `USHER_SOURCE_REQUESTS_PER_SECOND` (default **0**, no gate)
+  adds a minimum-interval gate that spaces every outbound call at least
+  `1/rate` seconds apart. It is one gate per source per process, shared by the
+  push lane, the worker lane and every request; a second process is a second
+  gate, spending `2 × rate`. The
   seconds spent waiting are the `usher.source.throttle.wait` histogram
   ([10](10-telemetry-and-dashboards.md)).
 

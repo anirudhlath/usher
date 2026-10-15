@@ -171,8 +171,9 @@ own bound, so a slow upstream cannot starve the API.
 | **Row build** | **1, sequential — not a setting** | `AsyncSession` |
 | **Screen refresh** | **1 lane, 1 refresh in flight, ≤ 32 keys queued** | `REFRESH_QUEUE_SIZE`; full means dropped |
 
-A concurrency entry is a slot count, not a request rate: the per-source gate
-`USHER_SOURCE_REQUESTS_PER_SECOND` (default 0.4) bounds the wire. `Settings`
+A concurrency entry is a slot count, not a request rate. The wire is bounded by
+the adaptive listing limiter `USHER_SYNC_WALKERS` caps, and by the per-source
+gate `USHER_SOURCE_REQUESTS_PER_SECOND` when one is set (default 0, no gate). `Settings`
 refuses a `job_concurrency` the `USHER_DB_POOL_SIZE` pool cannot serve: each job
 in flight, the claim and the heartbeat take a connection, and the running
 bootstrap two more — its hold and its reads. `curate`
