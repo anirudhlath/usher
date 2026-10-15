@@ -175,9 +175,10 @@ class Settings(BaseSettings):
     # wrong password turns every request into two (the call, then a doomed
     # re-authentication) for as long as it stays wrong.
     source_reauth_cooldown_seconds: float = Field(default=60.0, ge=0)
-    # The proactive outbound ceiling: calls to one source are spaced at least
-    # `1/rate` seconds apart.
-    source_requests_per_second: float = Field(default=0.4, ge=0)
+    # An optional outbound ceiling: calls to one source are spaced at least `1/rate`
+    # seconds apart. 0, the default, is no gate: listings are throttled by the adaptive
+    # limiter `sync_walkers` caps, which backs off on an outage or a 429.
+    source_requests_per_second: float = Field(default=0.0, ge=0)
 
     # The ingest pipeline (PRD 03). Same reasoning as the bulk and source
     # settings above: PRD 08's TOML config layer does not exist yet.

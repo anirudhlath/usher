@@ -194,11 +194,11 @@ export const CONFIG: readonly SettingRow[] = [
   {
     key: 'USHER_SOURCE_REQUESTS_PER_SECOND',
     group: 'sources',
-    def: '0.4',
+    def: '0.0',
     about:
-      'The proactive outbound gate: one request per source per process, spaced 1/rate apart, never a burst. Zero is unlimited. The default is derived rather than picked — a household media server is a machine somebody is watching something on, and 0.4 rps is a courtesy margin under the rate this project measured against a real Emby 4.9.5.0.',
+      'An optional outbound ceiling: one request per source per process, spaced 1/rate apart, never a burst. Zero, the default, is no gate — listings are throttled by the adaptive limiter USHER_SYNC_WALKERS caps, which drops to one request on an outage or a 429. Set a rate, such as 0.4, to space every request to a server you do not administer.',
     secret: false,
-    measured: true,
+    measured: false,
   },
   {
     key: 'USHER_SOURCE_REAUTH_COOLDOWN_SECONDS',

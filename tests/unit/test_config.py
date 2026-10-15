@@ -660,25 +660,22 @@ def test_every_setting_is_read_by_something(monkeypatch: pytest.MonkeyPatch) -> 
     assert unread == []
 
 
-def test_the_source_rate_default_is_the_courtesy_margin_derived_from_s1(
+def test_the_source_rate_gate_is_off_by_default_so_the_adaptive_limiter_governs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`source_requests_per_second` is a *derived* default, not a chosen one.
+    """`source_requests_per_second` ships at `0`, no fixed gate.
 
-    It sits a courtesy margin below the rate the source will actually serve. Two
-    properties beyond the number: `ge=0`, not `ge=1`, because `0` is unlimited -- the
-    shape `push_gap_min_interval_seconds` uses and a size does not -- and the shipped
-    default is genuinely below the rate it was derived from, which is the whole of
-    "courtesy margin rather than a re-statement of the server's own speed".
+    The adaptive listing limiter (`sync_walkers`, backing off on an outage or a 429) is
+    then the only throttle out of the box. A rate stays settable as an operator's
+    ceiling, and `ge=0` keeps `0` a value rather than an error, the shape
+    `push_gap_min_interval_seconds` uses.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
-    assert Settings().source_requests_per_second == 0.4
-    # Below the rate it is derived from, so it is a margin and not the speed.
-    assert Settings().source_requests_per_second < 4 / 9.1713
+    assert Settings().source_requests_per_second == 0.0
 
-    monkeypatch.setenv("USHER_SOURCE_REQUESTS_PER_SECOND", "0")
-    assert Settings().source_requests_per_second == 0.0  # unlimited is a value, not an error
+    monkeypatch.setenv("USHER_SOURCE_REQUESTS_PER_SECOND", "0.4")
+    assert Settings().source_requests_per_second == 0.4  # a ceiling is still a value
     monkeypatch.setenv("USHER_SOURCE_REQUESTS_PER_SECOND", "-1")
     with pytest.raises(ValidationError):
         Settings()

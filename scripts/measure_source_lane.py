@@ -50,11 +50,9 @@ DEFAULT_SOURCE_LABEL = "s7-probe"
 #: and 1 is S1's sequential control.
 LADDER: tuple[int, ...] = (1, 2, 4)
 
-#: `Settings.source_requests_per_second`'s shipped default. Not imported from
-#: `usher.config` on purpose: arm C's whole claim is about the value an
-#: operator gets without configuring anything, so a drift between this number
-#: and the shipped one must show up as a *disagreement* to be reconciled, not
-#: as two names for one constant that silently move together.
+#: The gate arm C prices: the ceiling an operator may set through
+#: `USHER_SOURCE_REQUESTS_PER_SECOND`, which shipped as the default when this
+#: arm was written. The default is now 0, no gate, so arm C prices an opt-in.
 SHIPPED_RATE = 0.4
 
 WARMUP_REQUESTS = 2
