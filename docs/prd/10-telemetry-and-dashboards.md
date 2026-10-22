@@ -106,7 +106,7 @@ control that does nothing.
 
 ### Metrics — OpenTelemetry → Prometheus
 
-**Every row is emitted today. 45 rows: 44 instruments Usher declares, plus one
+**Every row is emitted today. 46 rows: 45 instruments Usher declares, plus one
 `FastAPIInstrumentor` supplies.**
 
 | Metric | Type | Labels | Emitted |
@@ -136,6 +136,7 @@ control that does nothing.
 | `usher.source.request.duration` | histogram | source, op | ✅ M3 |
 | `usher.source.throttle.wait` | histogram | source | ✅ M10 |
 | `usher.source.listing.concurrency` | gauge | source | ✅ fast first sync |
+| `usher.source.listing.page_size` | gauge | source | ✅ adaptive page size |
 | `usher.source.push.connected` | gauge | source | ✅ M5 |
 | `usher.source.push.reconnects` | counter | source | ✅ M5 |
 | `usher.source.push.events` | counter | source, kind | ✅ M5 |
