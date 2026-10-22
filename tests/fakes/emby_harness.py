@@ -15,7 +15,7 @@ from tests.fakes.emby_server import FakeEmbyServer
 from tests.fakes.push_connection import FakePushConnection, FakePushConnector
 from tests.fakes.slow_transport import SlowTransport
 from usher.adapters.emby.adapter import EmbyAdapter
-from usher.adapters.emby.sizer import TRIAL_HANDOFFS, PageSizer
+from usher.adapters.emby.sizer import REPROBE_AFTER, TRIAL_HANDOFFS, PageSizer
 from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
 from usher.domain.source import Source
@@ -42,8 +42,9 @@ async def instant_sleep(seconds: float) -> None:
     """
 
 
-# More rounds than any climb takes, even one that waits out a settled size's re-probe.
-_CLIMB_ROUNDS = 100
+# Rounds `climb` allows: a settled size's wait to re-probe, plus 32 rounds that hold the
+# doublings to any ceiling below 2**29 with a few to spare.
+_CLIMB_ROUNDS = REPROBE_AFTER // TRIAL_HANDOFFS + 32
 
 
 def climb(sizer: PageSizer, size: int) -> None:
