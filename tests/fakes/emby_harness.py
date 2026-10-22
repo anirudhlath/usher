@@ -1,6 +1,6 @@
 """Binds a real `EmbyAdapter` to `FakeEmbyServer` for the contract suite.
 
-Also the page sizer's helpers: `climb`, the `ticking` clock, and `page_sizes` for its gauge.
+Also `climb`, `ticking` and `page_sizes` for the page sizer, and `gauge_readings` for any gauge.
 """
 
 import itertools
@@ -42,17 +42,25 @@ async def instant_sleep(seconds: float) -> None:
     """
 
 
+# More rounds than any climb takes, even one that waits out a settled size's re-probe.
+_CLIMB_ROUNDS = 100
+
+
 def climb(sizer: PageSizer, size: int) -> None:
     """Climb `sizer` to `size` through its public methods.
 
     Each round hands off `TRIAL_HANDOFFS` pages of the current size a second apart, so
     a size's rate is the size itself and every doubling doubles it. A `size` above the
-    ceiling, or off the doubling path, fails here instead of looping.
+    ceiling, off the doubling path, or still out of reach after `_CLIMB_ROUNDS` rounds
+    fails here instead of looping.
     """
     assert size <= sizer.ceiling, f"{size} is above the sizer's ceiling, {sizer.ceiling}"
+    rounds = 0
     while sizer.size < size:
+        assert rounds < _CLIMB_ROUNDS, f"the climb to {size} stalled at {sizer.size}"
         for _ in range(TRIAL_HANDOFFS):
             sizer.handed_off(sizer.size, 1.0, trial=sizer.trial, concurrency=1)
+        rounds += 1
     assert sizer.size == size, f"the climb passed {size} and stopped at {sizer.size}"
 
 
@@ -62,23 +70,28 @@ def ticking(start: float = 1_000.0) -> Callable[[], float]:
     return lambda: next(ticks)
 
 
-def page_sizes(reader: InMemoryMetricReader) -> list[tuple[float, dict[str, str]]]:
-    """Every `usher.source.listing.page_size` point the reader collects, as (value, labels)."""
+def gauge_readings(reader: InMemoryMetricReader, name: str) -> list[tuple[float, dict[str, str]]]:
+    """Every point of the gauge `name` the reader collects, as (value, labels)."""
     data = reader.get_metrics_data()
     points = [
         point
         for resource in (data.resource_metrics if data else ())
         for scope in resource.scope_metrics
         for metric in scope.metrics
-        if metric.name == "usher.source.listing.page_size"
+        if metric.name == name
         for point in metric.data.data_points
     ]
     readings: list[tuple[float, dict[str, str]]] = []
     for point in points:
-        assert isinstance(point, NumberDataPoint), "the page size is a gauge reading"
+        assert isinstance(point, NumberDataPoint), f"each {name} point is a gauge reading"
         attributes = {str(key): str(value) for key, value in dict(point.attributes or {}).items()}
         readings.append((point.value, attributes))
     return readings
+
+
+def page_sizes(reader: InMemoryMetricReader) -> list[tuple[float, dict[str, str]]]:
+    """Every `usher.source.listing.page_size` point the reader collects, as (value, labels)."""
+    return gauge_readings(reader, "usher.source.listing.page_size")
 
 
 class EmbyHarness(SourceHarness):

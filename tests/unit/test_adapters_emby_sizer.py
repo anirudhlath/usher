@@ -272,3 +272,28 @@ def test_a_sizer_refuses_a_floor_below_one_or_a_ceiling_below_its_floor(
     with pytest.raises(ValueError) as caught:
         PageSizer(floor, ceiling, source=SOURCE_NAME)
     assert str(caught.value) == message
+
+
+def _no_op_hand_off(items: int, seconds: float, *, trial: int, concurrency: int) -> None:
+    """A `handed_off` that counts nothing, so no climb can move the size."""
+
+
+@pytest.mark.parametrize(
+    ("size", "counts_nothing", "message"),
+    [
+        (20_000, False, "20000 is above the sizer's ceiling, 10000"),
+        (3_000, False, "the climb passed 3000 and stopped at 4000"),
+        (2_000, True, "the climb to 2000 stalled at 1000"),
+    ],
+    ids=["above-the-ceiling", "off-the-doubling-path", "counting-nothing"],
+)
+def test_climb_fails_instead_of_looping_on_a_size_it_cannot_reach(
+    monkeypatch: pytest.MonkeyPatch, size: int, counts_nothing: bool, message: str
+) -> None:
+    """Each of `climb`'s three guards raises on its own message."""
+    sizer = _sizer()
+    if counts_nothing:
+        monkeypatch.setattr(sizer, "handed_off", _no_op_hand_off)
+    with pytest.raises(AssertionError) as caught:
+        climb(sizer, size)
+    assert str(caught.value) == message

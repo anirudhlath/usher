@@ -5,8 +5,9 @@ import asyncio
 import pytest
 from opentelemetry import metrics
 from opentelemetry.sdk.metrics import MeterProvider
-from opentelemetry.sdk.metrics.export import InMemoryMetricReader, NumberDataPoint
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
+from tests.fakes.emby_harness import gauge_readings
 from usher.adapters.emby.limit import ListingLimit
 
 SOURCE_NAME = "Shared Emby"
@@ -53,21 +54,7 @@ class _Holders:
 
 
 def _caps(reader: InMemoryMetricReader) -> list[tuple[float, dict[str, str]]]:
-    data = reader.get_metrics_data()
-    points = [
-        point
-        for resource in (data.resource_metrics if data else ())
-        for scope in resource.scope_metrics
-        for metric in scope.metrics
-        if metric.name == "usher.source.listing.concurrency"
-        for point in metric.data.data_points
-    ]
-    readings: list[tuple[float, dict[str, str]]] = []
-    for point in points:
-        assert isinstance(point, NumberDataPoint), "the cap is a gauge reading"
-        attributes = {str(key): str(value) for key, value in dict(point.attributes or {}).items()}
-        readings.append((point.value, attributes))
-    return readings
+    return gauge_readings(reader, "usher.source.listing.concurrency")
 
 
 async def test_a_new_limit_lets_its_ceiling_in_and_holds_the_next_until_one_leaves() -> None:
