@@ -42,8 +42,10 @@ async def instant_sleep(seconds: float) -> None:
     """
 
 
-# Rounds `climb` allows: a settled size's wait to re-probe, plus 32 rounds that hold the
-# doublings to any ceiling below 2**29 with a few to spare.
+# Rounds `climb` allows: a settled size's wait to re-probe, rounded down, plus 32. The 32
+# cover up to 29 doublings, enough for any ceiling below 2**29, and the rounds that a
+# settle-back trial or a concurrency switch's uncounted hand-off, and the rounding down of
+# the wait, can add.
 _CLIMB_ROUNDS = REPROBE_AFTER // TRIAL_HANDOFFS + 32
 
 
