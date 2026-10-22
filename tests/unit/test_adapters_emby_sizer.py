@@ -9,7 +9,8 @@ from opentelemetry import metrics
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
-from tests.fakes.emby_harness import climb, page_sizes
+from tests.fakes.emby_harness import climb, gauge_readings, page_sizes
+from usher.adapters.emby.limit import ListingLimit
 from usher.adapters.emby.sizer import REPROBE_AFTER, TRIAL_HANDOFFS, PageSizer
 
 SOURCE_NAME = "Shared Emby"
@@ -257,6 +258,25 @@ def test_only_report_writes_the_gauge_labelled_by_source() -> None:
     assert page_sizes(reader) == [], "a failure writes nothing"
     sizer.report()
     assert page_sizes(reader) == [(4_000, {"source": SOURCE_NAME})]
+
+
+def test_each_gauge_read_returns_only_the_gauge_it_names() -> None:
+    """One reader holds both listing gauges, so each read must leave the other one out.
+
+    A collect consumes every gauge's reading, so both are written again before each read,
+    and each read is the other's premise: it shows the gauge the other left out was there.
+    """
+    reader = InMemoryMetricReader()
+    metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
+    limit = ListingLimit(3, source=SOURCE_NAME)
+    sizer = _sizer()
+    labels = {"source": SOURCE_NAME}
+    limit.succeeded()
+    sizer.report()
+    assert page_sizes(reader) == [(1_000, labels)]
+    limit.succeeded()
+    sizer.report()
+    assert gauge_readings(reader, "usher.source.listing.concurrency") == [(3, labels)]
 
 
 @pytest.mark.parametrize(
