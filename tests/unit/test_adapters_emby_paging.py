@@ -116,7 +116,7 @@ def test_a_server_serving_fewer_than_asked_at_every_size_reads_past_a_stale_tota
         "the premise: every page held fewer than asked"
     )
     assert handed == library
-    assert served[-1] < 150, "the walk ended on its partial last page"
+    assert page.ended, "the walk ended on its partial last page"
 
 
 def test_a_walk_with_no_total_does_not_end_on_a_short_page_alone() -> None:
