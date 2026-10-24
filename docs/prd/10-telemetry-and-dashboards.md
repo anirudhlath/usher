@@ -359,14 +359,15 @@ and duration · **push connection uptime and reconnect count** · **push events
 applied, by kind**, which separates "the lane is up" from "the lane is doing
 anything" · Emby request latency · TMDb requests/sec against the
 `USHER_TMDB_REQUESTS_PER_SECOND` ceiling, with 429 count · **whole-library
-walks: the listing limit and the mean unit duration, by stage** · **retraction
-checks, by path and outcome**.
+walks: the listing limit and the mean unit duration, by stage** · **listing
+page size, by source** · **retraction checks, by path and outcome**.
 
 ✅ **Every panel here is backed by real data as of M9, and the whole-library
-walk panel as of the fast first sync's acceptance walk, except the
+walk panel as of the fast first sync's acceptance walk, except two: the
 retraction-checks panel, which is unbacked until a sweep or a push removal asks
-a real source.** ⚠️ A panel that drains the whole unmatched queue should page
-with the keyset cursor; the `OFFSET` form is quadratic in queue depth.
+a real source, and the listing-page-size panel, which is unbacked until a real
+source is listed.** ⚠️ A panel that drains the whole unmatched queue should
+page with the keyset cursor; the `OFFSET` form is quadratic in queue depth.
 
 ### 4 — Performance
 

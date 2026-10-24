@@ -786,8 +786,8 @@ renderer.
 
 # Dashboard 3 — Pipeline
 
-Twelve panels, and the mixed one: Prometheus for rates and depths, Postgres for
-the queue's and the reconciler's own breakdowns. Dashboard 1's principle
+Thirteen panels, and the mixed one: Prometheus for rates and depths, Postgres
+for the queue's and the reconciler's own breakdowns. Dashboard 1's principle
 ("the catalog *is* the record") does not decide this dashboard on its own,
 because half of what a pipeline does leaves no row behind — a completed job is
 **deleted**, and a request that TMDb refused exists only as a counter.
@@ -1261,6 +1261,30 @@ sum by (path, outcome) (usher_sync_retraction_checks_total)
 **Not yet observed.** The counter is first written when a full walk's sweep or
 a push removal asks a source about an item. Neither has run against a real
 source since this panel was committed, so there is no reading to record.
+
+### 13 — Listing page size, by source
+
+`timeseries`, Prometheus, beside panel 11.
+
+```
+max by (source) (usher_source_listing_page_size_ratio)
+```
+
+`usher.source.listing.page_size`, labelled `source`: the items that source's
+adapter asks for in its next listing request. It starts at
+`USHER_SOURCE_PAGE_SIZE` and moves up to `USHER_SOURCE_PAGE_SIZE_MAX`, doubling
+while a doubling hands the writer at least 10% more items a second per walker,
+and settles a step back after the first doubling that does not. A listing page
+that fails as unreachable halves it, never below `USHER_SOURCE_PAGE_SIZE`, and
+settles it there, and a 429 leaves it alone. A size settled below
+`USHER_SOURCE_PAGE_SIZE_MAX` tries the next doubling again after 100 more
+pages. **A line pinned at `USHER_SOURCE_PAGE_SIZE_MAX` means fetching is still
+the bottleneck**, unless the two settings are equal, which turns adaptation off
+and holds the line flat.
+
+**Not yet observed.** The gauge is first written when a listing page arrives,
+and no process carrying it has listed a real source since this panel was
+committed, so there is no reading to record.
 
 ## ⚠️ Three Dashboard 3 panels plot a mean, not a quantile, and the reason is an instrument
 
