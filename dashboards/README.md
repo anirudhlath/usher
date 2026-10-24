@@ -1298,9 +1298,16 @@ adaptation off and holds the line flat. **The line ends shortly after listing
 stops**, because only a listing page writes the gauge and the SDK clears it
 after each collection.
 
-**Not yet observed.** The gauge is first written when a listing page arrives,
-and no process carrying it has listed a real source since this panel was
-committed, so there is no reading to record.
+**Returned** 1 frame over adaptive page size's acceptance walk, 2026-10-24
+22:20–22:30 UTC, read at 30 s steps: **1,000** to 22:23:21, **8,000** at
+22:23:51 and 22:24:21, **10,000** at 22:24:51 and 22:25:21, and **8,000** from
+22:25:51 to 22:30:21, just after the walk ended. The walk's INFO lines put the
+climb from 1,000 at 22:22:39–22:23:51 and the settle at 8,000 at 22:24:31.
+
+**The line shows only the size held when the process exports, once a minute.**
+So it trails a change by up to a minute, and a size held for less than a minute
+can vanish: this walk's 2,000 and 4,000 never drew, nor its first trial's
+2,000 at 22:20:52. The INFO lines are the record of a climb.
 
 ## ⚠️ Three Dashboard 3 panels plot a mean, not a quantile, and the reason is an instrument
 

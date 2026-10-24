@@ -365,9 +365,9 @@ walks: the listing limit and the mean unit duration, by stage** · **listing
 page size, by source** · **retraction checks, by path and outcome**.
 
 ✅ **Every panel here is backed by real data as of M9, the whole-library walk
-panel as of the fast first sync's acceptance walk, and the retraction-checks
-panel as of confirmed retraction's acceptance, except the listing-page-size
-panel, which is unbacked until a real source is listed.** ⚠️ A panel that
+panel as of the fast first sync's acceptance walk, the retraction-checks panel
+as of confirmed retraction's acceptance, and the listing-page-size panel as of
+adaptive page size's acceptance walk.** ⚠️ A panel that
 drains the whole unmatched queue should page with the keyset cursor; the
 `OFFSET` form is quadratic in queue depth.
 
