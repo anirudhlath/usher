@@ -72,7 +72,7 @@ async def test_the_deployment_tuning_reaches_the_adapter() -> None:
     adapter = factory.build(SOURCE, CREDENTIALS)
     try:
         assert isinstance(adapter, EmbyAdapter)
-        assert adapter._page_size == 17
+        assert adapter._sizer.floor == 17
         assert adapter._listing_limit.limit == 3
         assert adapter._unit_max_items == 5_000
         assert adapter._client.timeout.read == 3.5
@@ -100,7 +100,7 @@ async def test_an_unconfigured_factory_pages_at_the_settings_default() -> None:
     adapter = ConfiguredSourceAdapterFactory().build(SOURCE, CREDENTIALS)
     try:
         assert isinstance(adapter, EmbyAdapter)
-        assert adapter._page_size == Settings.model_fields["source_page_size"].default == 1000, (
+        assert adapter._sizer.floor == Settings.model_fields["source_page_size"].default == 1000, (
             "an unconfigured factory pages differently from USHER_SOURCE_PAGE_SIZE's default, "
             "or that default is no longer 1,000"
         )

@@ -55,6 +55,7 @@ from usher.adapters.emby.session import (
     decode_json,
     redact_path,
 )
+from usher.adapters.emby.sizer import PageSizer
 from usher.adapters.http import SourceGate
 from usher.domain.source import Source
 from usher.domain.sync import WalkStage
@@ -239,6 +240,7 @@ class EmbyAdapter(SourceAdapter):
         *,
         client: httpx.AsyncClient | None = None,
         page_size: int = 1000,
+        page_size_max: int | None = None,
         max_pages: int = MAX_PAGES,
         unit_max_items: int = 100_000,
         listing_concurrency: int = 4,
@@ -253,7 +255,9 @@ class EmbyAdapter(SourceAdapter):
     ) -> None:
         self._source = source
         self._sleep = sleep
-        self._page_size = page_size
+        self._sizer = PageSizer(
+            page_size, page_size if page_size_max is None else page_size_max, source=source.name
+        )
         self._max_pages = max_pages
         self._unit_max_items = unit_max_items
         # The library ids, read by the plan or by the first unit a resumed walk asks for.
@@ -416,6 +420,10 @@ class EmbyAdapter(SourceAdapter):
         sorted by `SORT_BY` is keyed: `after` is the anchor a resumed walk judges its first
         page by, and `until` ends the walk on the page whose last key passes it. A page that
         moved is logged and not yielded. `start_index` is the resume point, never defaulted.
+
+        Each request asks for the page sizer's size when it goes out, each page is judged
+        short against the size its own request asked for, and each hand-off is timed for
+        the sizer against this listing's last.
         """
         if path is None:
             path = await self._items_path()
@@ -426,13 +434,23 @@ class EmbyAdapter(SourceAdapter):
             after=after if keyed else None,
             until=until,
         )
-        pending = self._read(path, query, window.start, self._page_size, count=True)
+
+        def ask(start: int, *, count: bool) -> tuple[asyncio.Task[dict[str, Any]], int, int]:
+            """The request for the page at `start`, with the size and trial it went out at."""
+            size, trial = self._sizer.size, self._sizer.trial
+            return self._read(path, query, start, size, count=count, trial=trial), size, trial
+
+        pending = ask(window.start, count=True)
+        # When this listing last handed off a page, and the trial that page was asked in.
+        last: tuple[float, int] | None = None
         warned = False
         try:
             # `for`, not `while True`: the bound is part of the loop, and the raise
             # below is reachable only by a walk that never ended.
             for number in range(1, self._max_pages + 1):
-                body = await pending
+                task, asked, trial = pending
+                body = await task
+                self._sizer.report()
                 entries = body.get("Items")
                 if not isinstance(entries, list):
                     # Not a truncation: a caller must be able to tell "the library
@@ -441,8 +459,8 @@ class EmbyAdapter(SourceAdapter):
                         "Emby's item listing carried no Items array",
                         detail=f"StartIndex={window.start}",
                     )
-                asked = window.start
-                page = window.receive(entries, body.get("TotalRecordCount"), asked=self._page_size)
+                at = window.start
+                page = window.receive(entries, body.get("TotalRecordCount"), asked=asked)
                 if window.unsorted and not warned:
                     warned = True
                     logger.warning(
@@ -454,23 +472,37 @@ class EmbyAdapter(SourceAdapter):
                 more = not page.ended and number < self._max_pages
                 if more:
                     resume_at = window.advance()
-                    pending = self._read(path, query, resume_at, self._page_size, count=False)
+                    pending = ask(resume_at, count=False)
                 if page.shifted:
+                    last = None
                     # The last request allowed asks for nothing again; the raise below says so.
                     if more:
                         logger.warning(
                             "{source}'s listing moved past the overlap before StartIndex={start}; "
                             "reading again from StartIndex={again}",
                             source=self._source.name,
-                            start=asked,
+                            start=at,
                             again=resume_at,
                         )
                     continue
+                now = self._clock()
+                # Timed from this listing's last hand-off, with the trial that page was asked
+                # in. Not reported: the first page, with nothing to time from; the page after
+                # a moved one, whose time includes the moved page's; and the ending page,
+                # usually short of a full one.
+                if last is not None and not page.ended:
+                    self._sizer.handed_off(
+                        len(page.fresh),
+                        now - last[0],
+                        trial=last[1],
+                        concurrency=self._listing_limit.limit,
+                    )
+                last = (now, trial)
                 yield page.fresh, resume_at, window.anchor
                 if page.ended:
                     return
         finally:
-            await _settle(pending)
+            await _settle(pending[0])
         raise PortDataMalformed(
             "Emby's item listing never ended; the server appears to ignore StartIndex "
             "or to cap Limit far below the page size",
@@ -478,7 +510,14 @@ class EmbyAdapter(SourceAdapter):
         )
 
     def _read(
-        self, path: str, query: Mapping[str, str], start: int, limit: int, *, count: bool
+        self,
+        path: str,
+        query: Mapping[str, str],
+        start: int,
+        limit: int,
+        *,
+        count: bool,
+        trial: int,
     ) -> asyncio.Task[dict[str, Any]]:
         """One page's request, started now and awaited when the walk reaches it."""
         params = {
@@ -487,7 +526,7 @@ class EmbyAdapter(SourceAdapter):
             "Limit": str(limit),
             "EnableTotalRecordCount": "true" if count else "false",
         }
-        return asyncio.create_task(self._page(path, params, start))
+        return asyncio.create_task(self._page(path, params, start, trial=trial))
 
     async def _items_path(self) -> str:
         return f"/Users/{_segment(await self._session.user_id())}/Items"
@@ -512,7 +551,13 @@ class EmbyAdapter(SourceAdapter):
                     yield UnitPage(items, resume_at, None if anchor is None else str(anchor))
 
     async def _page(
-        self, path: str, params: Mapping[str, str], start: int, *, op: str = "list"
+        self,
+        path: str,
+        params: Mapping[str, str],
+        start: int,
+        *,
+        op: str = "list",
+        trial: int | None = None,
     ) -> dict[str, Any]:
         """One page of a walk, asked for again while its failure is one a wait can fix.
 
@@ -525,7 +570,8 @@ class EmbyAdapter(SourceAdapter):
 
         Each attempt holds one of the listing limit's slots, and the wait between
         attempts holds none. A failure of the kind asked again drops the limit to
-        one; a success counts towards raising it.
+        one; a success counts towards raising it. An outage on a listing page, which
+        names its `trial`, also halves the page size.
 
         Giving up raises `PortUnavailable` naming the attempts, whatever the last
         failure was. `op` labels the request's span and duration, so a count, a views
@@ -547,6 +593,8 @@ class EmbyAdapter(SourceAdapter):
                 if self._closed:
                     raise
                 self._listing_limit.failed()
+                if trial is not None and isinstance(exc, PortUnavailable):
+                    self._sizer.failed(trial)
                 if first_failure is None:
                     first_failure = self._clock()
                 if attempt == attempts:
