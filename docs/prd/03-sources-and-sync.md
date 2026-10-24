@@ -103,12 +103,13 @@ when the walk stops:
   it alone. The halving reaches only later requests: the failed page's own
   retries ask for the size it was asked at. Each size is judged over a trial,
   which starts again whenever the size changes, a page asked for in the trial
-  fails as unreachable, or a page of the trial is timed at a listing
-  concurrency other than the trial's. Only a failure of a page asked for in the
-  current trial halves the size, so a burst of such failures halves it at most
-  once, whether several walkers' pages fail or one page fails its retries. A
-  size settled below `USHER_SOURCE_PAGE_SIZE_MAX` tries the next doubling again
-  after 100 more pages. Setting the two equal turns adaptation off.
+  fails as unreachable, or a page is timed at a listing concurrency other than
+  the trial's when it and the page before it in its listing were both asked for
+  in the trial. Only a failure of a page asked for in the current trial halves
+  the size, so a burst of such failures halves it at most once, whether several
+  walkers' pages fail or one page fails its retries. A size settled below
+  `USHER_SOURCE_PAGE_SIZE_MAX` tries the next doubling again after 100 more
+  pages. Setting the two equal turns adaptation off.
 - **Items are walked in ascending creation order**, so items added during a
   walk land at the end. Each page after the first re-reads the last 50 items of
   the page before (half the page, if it held fewer than 100). A page that holds
