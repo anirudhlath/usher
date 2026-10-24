@@ -2435,8 +2435,9 @@ def _titles_asked(seen: Sequence[httpx.Request]) -> list[int]:
 async def test_a_whole_library_walk_whose_pages_grow_commits_every_item() -> None:
     """Pages of 2 grow to the ceiling of 16 within one unit, and every film is committed.
 
-    A full page of 16 brings at least 8 new items, more than a batch of 4, and is
-    committed whole. The clock moves a second a read, so each doubling doubles the rate.
+    The first page of 16 follows one of 8 and reads half of it again, so it brings 12
+    new items, three batches of 4, and one commit holds all 12. The clock moves a second
+    a read, so each doubling doubles the rate.
     """
     batch, floor, ceiling = 4, 2, 16
     fixture = _Fixture(batch_size=batch, walkers=1)
@@ -2453,12 +2454,16 @@ async def test_a_whole_library_walk_whose_pages_grow_commits_every_item() -> Non
     # `items_seen` is the run's running total, read back at every commit, so each step
     # is what one commit held, whichever unit made it; a beat adds nothing.
     largest = max(after - before for (before, _), (after, _) in pairwise(fixture.checkpoints))
+    # Each page after a listing's first reads half the page before it again, so none
+    # brings a whole ceiling of new items. The first page at the ceiling follows one at
+    # half the ceiling, so it brings this many, more than any other page.
+    first_at_ceiling = ceiling - ceiling // 2 // 2
     assert run.status is SyncRunStatus.COMPLETED
-    assert (titles[0], max(titles)) == (floor, ceiling), (
+    assert (titles[:1], max(titles, default=0)) == ([floor], ceiling), (
         "the premise: the pages grew to the ceiling mid-unit"
     )
     assert missing == []
-    assert largest > batch, "no commit held more than a batch: a larger page was split"
+    assert largest >= first_at_ceiling, "the first page at the ceiling was split across commits"
 
 
 async def test_a_walk_killed_mid_unit_resumes_at_its_committed_offset_under_another_page_size() -> (
