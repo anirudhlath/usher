@@ -421,13 +421,12 @@ class EmbyAdapter(SourceAdapter):
             path = await self._items_path()
         keyed = query.get("SortBy") == SORT_BY
         window = OffsetWindow(
-            limit=self._page_size,
             start=start_index,
             keyed=keyed,
             after=after if keyed else None,
             until=until,
         )
-        pending = self._read(path, query, window.start, window.limit, count=True)
+        pending = self._read(path, query, window.start, self._page_size, count=True)
         warned = False
         try:
             # `for`, not `while True`: the bound is part of the loop, and the raise
@@ -443,7 +442,7 @@ class EmbyAdapter(SourceAdapter):
                         detail=f"StartIndex={window.start}",
                     )
                 asked = window.start
-                page = window.receive(entries, body.get("TotalRecordCount"))
+                page = window.receive(entries, body.get("TotalRecordCount"), asked=self._page_size)
                 if window.unsorted and not warned:
                     warned = True
                     logger.warning(
@@ -455,7 +454,7 @@ class EmbyAdapter(SourceAdapter):
                 more = not page.ended and number < self._max_pages
                 if more:
                     resume_at = window.advance()
-                    pending = self._read(path, query, resume_at, window.limit, count=False)
+                    pending = self._read(path, query, resume_at, self._page_size, count=False)
                 if page.shifted:
                     # The last request allowed asks for nothing again; the raise below says so.
                     if more:
