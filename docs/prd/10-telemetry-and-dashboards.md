@@ -364,12 +364,12 @@ anything" · Emby request latency · TMDb requests/sec against the
 walks: the listing limit and the mean unit duration, by stage** · **listing
 page size, by source** · **retraction checks, by path and outcome**.
 
-✅ **Every panel here is backed by real data as of M9, and the whole-library
-walk panel as of the fast first sync's acceptance walk, except two: the
-retraction-checks panel, which is unbacked until a sweep or a push removal asks
-a real source, and the listing-page-size panel, which is unbacked until a real
-source is listed.** ⚠️ A panel that drains the whole unmatched queue should
-page with the keyset cursor; the `OFFSET` form is quadratic in queue depth.
+✅ **Every panel here is backed by real data as of M9, the whole-library walk
+panel as of the fast first sync's acceptance walk, and the retraction-checks
+panel as of confirmed retraction's acceptance, except the listing-page-size
+panel, which is unbacked until a real source is listed.** ⚠️ A panel that
+drains the whole unmatched queue should page with the keyset cursor; the
+`OFFSET` form is quadratic in queue depth.
 
 ### 4 — Performance
 

@@ -1261,9 +1261,20 @@ unit per walk, so its series is always `NaN`. The episodes line starts at
 sum by (path, outcome) (usher_sync_retraction_checks_total)
 ```
 
-**Not yet observed.** The counter is first written when a full walk's sweep or
-a push removal asks a source about an item. Neither has run against a real
-source since this panel was committed, so there is no reading to record.
+**Returned** 3 frames over each of confirmed retraction's two acceptance walks.
+For the first, 2026-10-14 03:53–05:01 UTC, `sweep`/`gone` read **10,743** and
+`sweep`/`served` **65**, with `push`/`gone` at 1 to 3 beside them. For the
+second, 2026-10-15 05:23–05:53 UTC, they read **101** and **75**, with
+`push`/`gone` at 1 to 2. By 2026-10-24 the push removals had reached **1,563**
+`gone` and **150** `served`, summed over the three processes that reported them.
+
+**A sweep's lines draw for about five minutes, then disappear** (#104). The
+sweep runs in the `usher sync` process, which exits when the walk ends, so its
+series shows only briefly after that: 05:01–05:05 and 05:53–05:57 on those two
+walks. Read a sweep's numbers with `max_over_time` over the walk's window. **The
+push lines start again from zero at every deploy or restart**, because each app
+process has its own series. To count across them, sum each process's
+`max_over_time`.
 
 ### 13 — Listing page size, by source
 
