@@ -105,11 +105,15 @@ when the walk stops:
   which starts again whenever the size changes, a page asked for in the trial
   fails as unreachable, or a page is timed at a listing concurrency other than
   the trial's when it and the page before it in its listing were both asked for
-  in the trial. Only a failure of a page asked for in the current trial halves
-  the size, so a burst of such failures halves it at most once, whether several
-  walkers' pages fail or one page fails its retries. A size settled below
-  `USHER_SOURCE_PAGE_SIZE_MAX` tries the next doubling again after 100 more
-  pages. Setting the two equal turns adaptation off.
+  in the trial. A trial started by such a page takes that page's concurrency,
+  and any other trial keeps the concurrency of the trial before it. An adapter's
+  trials have no concurrency until it first times a page that, like the page
+  before it in its listing, was asked for in the trial, and the trial that page
+  is timed in takes the page's. Only a failure of a page asked for in the
+  current trial halves the size, so a burst of such failures halves it at most
+  once, whether several walkers' pages fail or one page fails its retries. A
+  size settled below `USHER_SOURCE_PAGE_SIZE_MAX` tries the next doubling again
+  after 100 more pages. Setting the two equal turns adaptation off.
 - **Items are walked in ascending creation order**, so items added during a
   walk land at the end. Each page after the first re-reads the last 50 items of
   the page before (half the page, if it held fewer than 100). A page that holds

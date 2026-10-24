@@ -32,8 +32,10 @@ class PageSizer:
 
     Measurements run in trials, numbered by `trial`. A climb, a settle to another size
     and a failure each start a new one, and so does a hand-off at a concurrency other
-    than its trial's, which is not counted. A hand-off or a failure of a request made
-    in an earlier trial is ignored.
+    than its trial's, which is not counted. The trial that hand-off starts takes the
+    hand-off's concurrency and any other keeps its predecessor's. There is none until
+    the sizer counts its first hand-off, which sets it. A hand-off or a failure of a
+    request made in an earlier trial is ignored.
     """
 
     def __init__(self, floor: int, ceiling: int, *, source: str) -> None:
@@ -181,7 +183,8 @@ class PageSizer:
         self._trial += 1
         self._kept.clear()
         self._counted = 0
-        self._concurrency = concurrency
+        if concurrency is not None:
+            self._concurrency = concurrency
 
     def _rate(self) -> float:
         """Items per second over the kept hand-offs."""

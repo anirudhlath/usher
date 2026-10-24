@@ -152,9 +152,9 @@ def test_failed_halves_it_never_below_the_floor_and_nothing_climbs_until_the_nex
             sizes.append(sizer.size)
         assert sizes == [4_000, 2_000, 1_000, 1_000]
         assert sizer.trial == first + 4, "every failure starts a trial, even one at the floor"
-        _measure(sizer, 50_000, 1.0, times=99)
+        _measure(sizer, 50_000, 1.0, times=99, concurrency=1)  # climb's, which a failure keeps
         assert sizer.size == 1_000, "a failure settles the size, so only a re-probe climbs"
-        _measure(sizer, 50_000, 1.0, times=1)
+        _measure(sizer, 50_000, 1.0, times=1, concurrency=1)
     assert sizer.size == 2_000
     assert [line.rstrip("\n") for line in lines] == [
         "Shared Emby's listing pages drop from 8,000 to 4,000 items after a failed listing",
@@ -204,6 +204,18 @@ def test_a_concurrency_change_forgets_the_rate_the_next_decision_would_compare()
     _measure(sizer, 1_050, 1.0, times=1, concurrency=3)
     _measure(sizer, 1_050, 1.0, concurrency=3)  # short of 1,100, with nothing to compare
     assert sizer.size == 4_000
+
+
+def test_a_hand_off_at_another_concurrency_first_in_a_climbed_trial_starts_a_new_trial() -> None:
+    """The trial a climb starts keeps the concurrency the size climbed at."""
+    sizer = _sizer()
+    _measure(sizer, 1_000, 1.0)
+    assert sizer.size == 2_000, "the premise: it climbed at concurrency 4"
+    climbed = sizer.trial
+    _measure(sizer, 2_000, 4.0, times=1, concurrency=1)
+    assert sizer.trial == climbed + 1, "a hand-off at another concurrency starts a new trial"
+    _measure(sizer, 2_000, 4.0, times=TRIAL_HANDOFFS - 1, concurrency=1)
+    assert sizer.size == 2_000, "500 items/s at 1 was compared against 1,000 at 4"
 
 
 @pytest.mark.parametrize(("behind", "seconds"), [(1, 1.0), (0, 0.0)])
