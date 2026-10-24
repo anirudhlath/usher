@@ -224,6 +224,7 @@ def test_a_hand_off_at_another_concurrency_first_after_a_failure_starts_a_new_tr
     _measure(sizer, 1_000, 1.0)
     assert sizer.size == 2_000, "the premise: it counted at concurrency 4"
     sizer.failed(sizer.trial)
+    assert sizer.size == sizer.floor, "the premise: the failure halved it to the floor"
     failed = sizer.trial
     _measure(sizer, 1_000, 1.0, times=1, concurrency=1)  # an outage drops the limit to 1
     assert sizer.trial == failed + 1, "a hand-off at another concurrency starts a new trial"
