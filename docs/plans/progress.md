@@ -142,7 +142,7 @@ heading false. Slices 2–4 get plans of their own and rows here.
 | 5–6 | A full walk's sweep retracts only what the source confirms gone, and `mark_unseen_unavailable` is retired | docs/plans/2026-10-07-confirmed-retraction.md | ✅ landed (PR #100) |
 | 7–8 | A push removal retracts what the source confirms gone, and dashboard 3 draws the checks | docs/plans/2026-10-07-confirmed-retraction.md | ✅ landed (PR #100) |
 | 9 | Status rows: this plan in review | docs/plans/2026-10-07-confirmed-retraction.md | ✅ landed (PR #100) |
-| 10 | Live acceptance: every retraction from a full walk and a day of push removals is absent on Emby — owner-gated | docs/plans/2026-10-07-confirmed-retraction.md | 🔨 Steps 1–3 passed on production (PR #100's comment): all 10,746 retractions gone on Emby; Step 4, a day of push removals, runs 2026-10-15 |
+| 10 | Live acceptance: every retraction from a full walk and a day of push removals is absent on Emby — owner-gated | docs/plans/2026-10-07-confirmed-retraction.md | ✅ passed on production (PR #100's comments): all 10,746 of the first full walk's retractions gone on Emby, and all 1,661 retracted since, by a second walk's sweep and push removals through 2026-10-24 |
 
 **An eighth table, for the seventh's reason.** Confirmed retraction has its own
 spec and is not a milestone, so a row under any heading above would make that
