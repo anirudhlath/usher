@@ -2390,16 +2390,20 @@ def _recorded_emby(
     page_size: int,
     page_size_max: int | None = None,
     clock: Callable[[], float],
-) -> tuple[EmbyAdapter, list[httpx.Request]]:
+) -> tuple[EmbyAdapter, list[httpx.Request], list[tuple[httpx.Request, httpx.Response]]]:
     """An adapter over `server` that takes its retry waits at once, and every request it sends.
 
-    Left out, `page_size_max` is the adapter's own default, a ceiling of `page_size`.
+    Each request the server answered is also kept with its answer. Left out,
+    `page_size_max` is the adapter's own default, a ceiling of `page_size`.
     """
     seen: list[httpx.Request] = []
+    answered: list[tuple[httpx.Request, httpx.Response]] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
         seen.append(request)
-        return server.handle(request)
+        response = server.handle(request)
+        answered.append((request, response))
+        return response
 
     emby = EmbyAdapter(
         source,
@@ -2410,7 +2414,7 @@ def _recorded_emby(
         sleep=instant_sleep,
         clock=clock,
     )
-    return emby, seen
+    return emby, seen, answered
 
 
 def _limits(seen: Sequence[httpx.Request]) -> set[int]:
@@ -2421,12 +2425,18 @@ def _limits(seen: Sequence[httpx.Request]) -> set[int]:
     return {limit for limit in asked if limit >= 2}
 
 
-def _titles_asked(seen: Sequence[httpx.Request]) -> list[tuple[int, int]]:
-    """Each `StartIndex` and `Limit` the titles listing of `films` asked for, in order."""
+def _titles_pages(
+    answered: Sequence[tuple[httpx.Request, httpx.Response]],
+) -> list[tuple[int, int, int]]:
+    """Each page of the titles listing of `films`, in order: `StartIndex`, `Limit`, items served."""
     films = LibraryUnit(WalkStage.TITLES, "films")
     return [
-        (int(request.url.params["StartIndex"]), int(request.url.params["Limit"]))
-        for request in seen
+        (
+            int(request.url.params["StartIndex"]),
+            int(request.url.params["Limit"]),
+            len(response.json()["Items"]),
+        )
+        for request, response in answered
         if request.url.params.get("ParentId") == films.view_id
         and request.url.params.get("IncludeItemTypes") == films.item_types
     ]
@@ -2442,24 +2452,28 @@ async def test_a_whole_library_walk_whose_pages_grow_commits_every_item() -> Non
     batch, floor, ceiling = 4, 2, 16
     fixture = _Fixture(batch_size=batch, walkers=1)
     server = _films_server()
-    emby, seen = _recorded_emby(
+    emby, _, answered = _recorded_emby(
         fixture.source, server, page_size=floor, page_size_max=ceiling, clock=ticking()
     )
     try:
         run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, emby)
     finally:
         await emby.aclose()
-    titles = _titles_asked(seen)
-    sizes = [limit for _, limit in titles]
+    titles = _titles_pages(answered)
+    sizes = [limit for _, limit, _ in titles]
     missing = await _missing(fixture, range(300))
+    seen_by_unit = {unit.unit_key: unit.items_seen for unit in await fixture.runs.units_for(run.id)}
     # `items_seen` is the run's running total, read back at every commit, so each step
-    # is what one commit held, whichever unit made it; a beat adds nothing.
-    largest = max(after - before for (before, _), (after, _) in pairwise(fixture.checkpoints))
+    # is what one commit held, whichever unit made it; a beat adds nothing. The steps add
+    # up to the titles unit's own `items_seen` only if no other unit's commit held an item.
+    commits = [after - before for (before, _), (after, _) in pairwise(fixture.checkpoints)]
+    largest = max(commits)
     # A titles page's new items are how far it moved the end of what the listing had
-    # asked for, a short last page counted as full. The writer commits once its held
-    # pages reach a batch, so a commit without a given page holds fewer than a batch
-    # before its last page, and that last page is another one.
-    ends = list(accumulate((start + limit for start, limit in titles), max, initial=0))
+    # served, so a page whose request runs past the listing's end counts only what it
+    # was served. The writer commits once its held pages reach a batch, so a commit
+    # without a given page holds fewer than a batch before its last page, and that last
+    # page is another one.
+    ends = list(accumulate((start + served for start, _, served in titles), max, initial=0))
     brought = [after - before for before, after in pairwise(ends)]
     assert run.status is SyncRunStatus.COMPLETED
     assert (sizes[:1], max(sizes, default=0)) == ([floor], ceiling), (
@@ -2469,6 +2483,9 @@ async def test_a_whole_library_walk_whose_pages_grow_commits_every_item() -> Non
     others = brought[:first] + brought[first + 1 :]
     assert brought[first] > batch - 1 + max(others, default=0), (
         "the premise: the first page at the ceiling brings more than a commit without it can hold"
+    )
+    assert sum(commits) == seen_by_unit.get("titles:films"), (
+        "the premise: only the titles unit's commits held items"
     )
     assert missing == []
     assert largest >= brought[first], "the first page at the ceiling was split across commits"
@@ -2485,7 +2502,7 @@ async def test_a_walk_killed_mid_unit_resumes_at_its_committed_offset_under_anot
     """
     fixture = _Fixture(batch_size=100, walkers=1)
     server = _films_server()
-    first_emby, first_seen = _recorded_emby(
+    first_emby, first_seen, _ = _recorded_emby(
         fixture.source, server, page_size=100, page_size_max=400, clock=lambda: 1_000.0
     )
     try:
@@ -2500,7 +2517,7 @@ async def test_a_walk_killed_mid_unit_resumes_at_its_committed_offset_under_anot
     for index in range(80):
         server.remove_item(f"m{index:03d}")
     server.fail_after = None
-    second_emby, second_seen = _recorded_emby(
+    second_emby, second_seen, _ = _recorded_emby(
         fixture.source, server, page_size=50, page_size_max=200, clock=lambda: 1_000.0
     )
     climb(second_emby._sizer, 200)
