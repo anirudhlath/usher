@@ -2003,12 +2003,13 @@ async def test_without_a_ceiling_every_request_asks_for_page_size() -> None:
     ids=["bad-gateway", "request-timeout", "refused", "timed-out", "rate-limited"],
 )
 async def test_a_listing_failure_halves_the_size_only_when_it_is_an_outage(
-    fail: Callable[[], httpx.Response], halves: bool
+    fail: Callable[[], httpx.Response], halves: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An outage on a listing page halves the size from the next request on; a 429 does not.
 
     The size is climbed to 8 first, so a halving cannot be mistaken for the floor, and the
     frozen clock holds it there otherwise. The failed page is asked for again as it was.
+    Either failure drops the listing limit to one before that page is handed off.
     """
     server = FakeEmbyServer()
     library = _dated(40)
@@ -2022,6 +2023,7 @@ async def test_a_listing_failure_halves_the_size_only_when_it_is_an_outage(
         page_size_max=16,
     )
     climb(adapter._sizer, 8)
+    calls = _hand_offs(monkeypatch, adapter)
     try:
         ids = [item.external_id async for item in adapter.list_items()]
     finally:
@@ -2030,6 +2032,8 @@ async def test_a_listing_failure_halves_the_size_only_when_it_is_an_outage(
     starts = [int(request.url.params["StartIndex"]) for request in _listings(seen)]
     assert starts[1] == starts[2], "the retry asked for the same page"
     assert limits[:4] == ([8, 8, 8, 4] if halves else [8, 8, 8, 8])
+    # The first hand-off reported is the failed page's, read after the limit dropped.
+    assert calls[0].concurrency == 1
     assert sorted(ids) == [item.external_id for item in library]
 
 
@@ -2148,11 +2152,12 @@ async def test_a_page_asked_before_a_climb_is_judged_by_its_own_size() -> None:
     finally:
         await adapter.aclose()
     limits = [int(request.url.params["Limit"]) for request in _listings(seen)]
-    # Ahead of the premise: a page judged by the size the sizer holds when it arrives
-    # ends the walk before the re-probe's first request goes out, falsifying both.
+    # The re-probe is read off the sizer, not the requests: a page judged by the size the
+    # sizer holds when it arrives ends the walk before the re-probe's first request goes out.
+    assert adapter._sizer.size == 8 and 4 in limits[limits.index(8) :], (
+        "the premise: a drop from 8, then a re-probe back to 8"
+    )
     assert sorted(ids) == [item.external_id for item in library]
-    drop = limits.index(4, limits.index(8))
-    assert 8 in limits[drop:], "the premise: a re-probe climbed back after the drop"
 
 
 async def test_pages_reports_hand_offs_with_the_earlier_requests_trial_and_never_the_first_or_last_page(  # noqa: E501
@@ -2161,7 +2166,8 @@ async def test_pages_reports_hand_offs_with_the_earlier_requests_trial_and_never
     """The climbing case's hand-offs, as `_pages` reports them to the sizer.
 
     Each carries the trial of the request for the page handed off before it, so the first
-    two after each climb still carry the trial before and are not counted.
+    two after each climb still carry the trial before and are not counted. Each also
+    carries the new items its own page brought.
     """
     server = FakeEmbyServer()
     for item in _dated(60):
@@ -2176,6 +2182,9 @@ async def test_pages_reports_hand_offs_with_the_earlier_requests_trial_and_never
     assert len(calls) == len(limits) - 2
     assert [c.trial for c in calls][:12] == [0] * 6 + [1] * 6
     assert {c.trial for c in calls[12:]} == {2}
+    # A page reaches back over half the page before it, so pages of 2 bring 1 new item,
+    # the first of 4 brings 3, later 4s bring 2, the first of 8 brings 6 and later 8s 4.
+    assert [c.items for c in calls] == [1] * 5 + [3] + [2] * 5 + [6] + [4] * 8
 
 
 async def test_the_hand_off_after_a_moved_page_is_not_reported(
@@ -2225,7 +2234,8 @@ async def test_each_listing_times_its_own_hand_offs(monkeypatch: pytest.MonkeyPa
     adapter = _adapter(server, page_size=2, clock=ticking())
     calls = _hand_offs(monkeypatch, adapter)
     query = _listing_query(LIBRARY_SINCE_PARAM, None)
-    listings = [adapter._pages(query, start_index=0) for _ in range(2)]
+    listings = [adapter._pages(query, start_index=0), adapter._pages(query, start_index=0)]
+    pages = dict.fromkeys(listings, 0)
     try:
         live = list(listings)
         while live:
@@ -2234,11 +2244,19 @@ async def test_each_listing_times_its_own_hand_offs(monkeypatch: pytest.MonkeyPa
                     await anext(listing)
                 except StopAsyncIteration:
                     live.remove(listing)
+                else:
+                    pages[listing] += 1
     finally:
         for listing in listings:
             await listing.aclose()
         await adapter.aclose()
-    assert len(calls) >= 4, "the premise: both listings reported"
+    first, second = pages.values()
+    # Each listing reports every page it yielded but its first and its ending one. At
+    # least, not exactly: hand-offs timed against whichever listing handed off last also
+    # report the second listing's first page, and that defect is the next line's to catch.
+    assert first > 2 and second > 2 and len(calls) >= (first - 2) + (second - 2), (
+        "the premise: both listings reported"
+    )
     assert {c.seconds for c in calls} == {2.0}
 
 
@@ -2248,7 +2266,8 @@ async def test_the_gauge_reads_the_size_after_a_listing_page_and_an_adapter_that
     """Only a listing page's arrival writes the gauge; a climb and an `Ids` read write nothing.
 
     A collect consumes every gauge reading, so the adapter that never lists is read first
-    and the one that lists writes after that read.
+    and the one that lists writes after that read. A third climbs from 2 to 8 while it
+    lists, so only a reading taken at a page after its first can say 8.
     """
     reader = InMemoryMetricReader()
     metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
@@ -2269,6 +2288,15 @@ async def test_the_gauge_reads_the_size_after_a_listing_page_and_an_adapter_that
         _ = [item async for item in listing.list_items()]
     finally:
         await listing.aclose()
+    assert page_sizes(reader) == [(8, {"source": SOURCE.name})]
+    climbing_server = FakeEmbyServer()
+    for item in _dated(60):
+        climbing_server.add_item(item, T0)
+    climbing = _adapter(climbing_server, page_size=2, page_size_max=8, clock=ticking())
+    try:
+        _ = [item async for item in climbing.list_items()]
+    finally:
+        await climbing.aclose()
     assert page_sizes(reader) == [(8, {"source": SOURCE.name})]
 
 
