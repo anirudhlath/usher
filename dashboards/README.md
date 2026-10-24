@@ -1249,9 +1249,9 @@ page, and a push removal sends one when it asks a source about an item, so the
 limit's series can start with no walk. The limit's line ends shortly after
 listing stops: only listing writes the gauge, and the SDK clears a synchronous
 gauge after each collection. A counter whose series begins at 1 has risen by
-nothing inside the window, so `rate()` divides zero by zero. The seed is one unit per walk, so its series is
-always `NaN`. The episodes line starts at 18:39, two minutes after the stage's
-first unit completed.
+nothing inside the window, so `rate()` divides zero by zero. The seed is one
+unit per walk, so its series is always `NaN`. The episodes line starts at
+18:39, two minutes after the stage's first unit completed.
 
 ### 12 — Retraction checks, by path and outcome
 
