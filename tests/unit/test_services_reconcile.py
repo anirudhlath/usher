@@ -5,7 +5,7 @@ import contextlib
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable, Collection, Iterator, Sequence
 from datetime import UTC, datetime, timedelta
-from itertools import groupby, pairwise
+from itertools import accumulate, groupby, pairwise
 
 import httpx
 import pytest
@@ -2421,11 +2421,11 @@ def _limits(seen: Sequence[httpx.Request]) -> set[int]:
     return {limit for limit in asked if limit >= 2}
 
 
-def _titles_asked(seen: Sequence[httpx.Request]) -> list[int]:
-    """Each `Limit` the titles listing of `films` asked for, in the order it asked."""
+def _titles_asked(seen: Sequence[httpx.Request]) -> list[tuple[int, int]]:
+    """Each `StartIndex` and `Limit` the titles listing of `films` asked for, in order."""
     films = LibraryUnit(WalkStage.TITLES, "films")
     return [
-        int(request.url.params["Limit"])
+        (int(request.url.params["StartIndex"]), int(request.url.params["Limit"]))
         for request in seen
         if request.url.params.get("ParentId") == films.view_id
         and request.url.params.get("IncludeItemTypes") == films.item_types
@@ -2433,11 +2433,11 @@ def _titles_asked(seen: Sequence[httpx.Request]) -> list[int]:
 
 
 async def test_a_whole_library_walk_whose_pages_grow_commits_every_item() -> None:
-    """Pages of 2 grow to the ceiling of 16 within one unit, and every film is committed.
+    """Pages that grow from the floor to the ceiling within one unit commit every film.
 
-    The first page of 16 follows one of 8 and reads half of it again, so it brings 12
-    new items, three batches of 4, and one commit holds all 12. The clock moves a second
-    a read, so each doubling doubles the rate.
+    The first page at the ceiling brings more new items than any commit without it can
+    hold, and one commit holds all of them. The clock moves a second a read, so a larger
+    page reads at a higher rate.
     """
     batch, floor, ceiling = 4, 2, 16
     fixture = _Fixture(batch_size=batch, walkers=1)
@@ -2450,20 +2450,28 @@ async def test_a_whole_library_walk_whose_pages_grow_commits_every_item() -> Non
     finally:
         await emby.aclose()
     titles = _titles_asked(seen)
+    sizes = [limit for _, limit in titles]
     missing = await _missing(fixture, range(300))
     # `items_seen` is the run's running total, read back at every commit, so each step
     # is what one commit held, whichever unit made it; a beat adds nothing.
     largest = max(after - before for (before, _), (after, _) in pairwise(fixture.checkpoints))
-    # Each page after a listing's first reads half the page before it again, so none
-    # brings a whole ceiling of new items. The first page at the ceiling follows one at
-    # half the ceiling, so it brings this many, more than any other page.
-    first_at_ceiling = ceiling - ceiling // 2 // 2
+    # A titles page's new items are how far it moved the end of what the listing had
+    # asked for, a short last page counted as full. The writer commits once its held
+    # pages reach a batch, so a commit without a given page holds fewer than a batch
+    # before its last page, and that last page is another one.
+    ends = list(accumulate((start + limit for start, limit in titles), max, initial=0))
+    brought = [after - before for before, after in pairwise(ends)]
     assert run.status is SyncRunStatus.COMPLETED
-    assert (titles[:1], max(titles, default=0)) == ([floor], ceiling), (
+    assert (sizes[:1], max(sizes, default=0)) == ([floor], ceiling), (
         "the premise: the pages grew to the ceiling mid-unit"
     )
+    first = sizes.index(ceiling)
+    others = brought[:first] + brought[first + 1 :]
+    assert brought[first] > batch - 1 + max(others, default=0), (
+        "the premise: the first page at the ceiling brings more than a commit without it can hold"
+    )
     assert missing == []
-    assert largest >= first_at_ceiling, "the first page at the ceiling was split across commits"
+    assert largest >= brought[first], "the first page at the ceiling was split across commits"
 
 
 async def test_a_walk_killed_mid_unit_resumes_at_its_committed_offset_under_another_page_size() -> (
