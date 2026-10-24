@@ -1243,12 +1243,13 @@ minute's successes raised it back to 4. **Mean unit duration, by stage:** titles
 read the same 323 s in, at 12 of 38 units: limit 4, titles 75.4 s.
 
 **The seed never draws, and no stage draws before its second unit completes.**
-Both series exist only in a process that has walked a source: the gauge is
-first written by a listing page, the histogram by a unit's completion. The
-limit's line also ends shortly after listing stops: only listing writes the
-gauge, and the SDK clears a synchronous gauge after each collection. A
-counter whose series begins at 1 has risen by nothing inside the window, so
-`rate()` divides zero by zero. The seed is one unit per walk, so its series is
+The histogram is first written by a unit's completion, so only a process that
+has walked a source has its series. The gauge is first written by any listing
+page, and a push removal sends one when it asks a source about an item, so the
+limit's series can start with no walk. The limit's line ends shortly after
+listing stops: only listing writes the gauge, and the SDK clears a synchronous
+gauge after each collection. A counter whose series begins at 1 has risen by
+nothing inside the window, so `rate()` divides zero by zero. The seed is one unit per walk, so its series is
 always `NaN`. The episodes line starts at 18:39, two minutes after the stage's
 first unit completed.
 
