@@ -30,6 +30,7 @@ from tests.fakes.title_match_repository import FakeTitleMatchRepository
 from tests.fakes.title_repository import FakeTitleRepository
 from tests.unit.test_telemetry_retraction import retraction_checks
 from usher.adapters.emby.adapter import EmbyAdapter
+from usher.adapters.emby.planning import LibraryUnit
 from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
 from usher.domain.source import Source
@@ -2310,12 +2311,7 @@ async def test_an_emby_unit_resumes_judged_by_the_checkpoint_its_walk_stored() -
     `m230` on and never `m200` to `m229`.
     """
     fixture = _Fixture(batch_size=100, walkers=1)
-    server = FakeEmbyServer()
-    server.add_view("films", "Films")
-    for index in range(300):
-        film = _item(f"m{index:03d}", added_at=T0 + timedelta(seconds=index))
-        server.add_item(film, T0)
-        server.place(film.external_id, "films")
+    server = _films_server()
     emby = EmbyAdapter(
         fixture.source,
         SourceCredentials(username=server.username, password=SecretStr(server.password)),
@@ -2323,7 +2319,6 @@ async def test_an_emby_unit_resumes_judged_by_the_checkpoint_its_walk_stored() -
         page_size=100,
         sleep=instant_sleep,
     )
-    created = T0 + timedelta(seconds=199) - datetime(1970, 1, 1, tzinfo=UTC)
     lines: list[str] = []
     try:
         server.fail_after = 200
@@ -2332,11 +2327,6 @@ async def test_an_emby_unit_resumes_judged_by_the_checkpoint_its_walk_stored() -
         (films,) = [
             u for u in await fixture.runs.units_for(first.id) if u.unit_key == "titles:films"
         ]
-        assert (films.position, films.checkpoint, films.status) == (
-            150,
-            str(created // timedelta(microseconds=1)),
-            SyncRunUnitStatus.FAILED,
-        )
         for index in range(80):
             server.remove_item(f"m{index:03d}")
         server.fail_after = None
@@ -2347,21 +2337,11 @@ async def test_an_emby_unit_resumes_judged_by_the_checkpoint_its_walk_stored() -
             logger.remove(handle)
     finally:
         await emby.aclose()
-    assert (second.id, second.status) == (first.id, SyncRunStatus.COMPLETED)
-    assert [line.rstrip("\n") for line in lines] == [
-        "Living Room Emby's listing moved past the overlap before StartIndex=150; "
-        "reading again from StartIndex=50"
-    ]
-    missing = [
-        f"m{index:03d}"
-        for index in range(80, 300)
-        if await fixture.media_items.get_by_external_id(fixture.source.id, f"m{index:03d}") is None
-    ]
-    assert missing == []
+    await _assert_resumed_in_place(fixture, films, first, second, lines)
 
 
 def _films_server() -> FakeEmbyServer:
-    """Three hundred films a second apart in the view `films`, as the checkpoint case seeds them."""
+    """Three hundred films a second apart, each placed in the view `films`."""
     server = FakeEmbyServer()
     server.add_view("films", "Films")
     for index in range(300):
@@ -2369,6 +2349,38 @@ def _films_server() -> FakeEmbyServer:
         server.add_item(film, T0)
         server.place(film.external_id, "films")
     return server
+
+
+async def _missing(fixture: _Fixture, indices: range) -> list[str]:
+    """Each film `m{index:03d}` of `indices` that the fixture's store does not hold."""
+    return [
+        f"m{index:03d}"
+        for index in indices
+        if await fixture.media_items.get_by_external_id(fixture.source.id, f"m{index:03d}") is None
+    ]
+
+
+async def _assert_resumed_in_place(
+    fixture: _Fixture, films: SyncRunUnit, first: SyncRun, second: SyncRun, lines: Sequence[str]
+) -> None:
+    """The checkpoint case's four claims, which the case resumed in larger pages shares.
+
+    `films` is the Films unit as the failed `first` attempt left it, and `lines` the
+    WARNING messages the `second` attempt logged.
+    """
+    created = T0 + timedelta(seconds=199) - datetime(1970, 1, 1, tzinfo=UTC)
+    assert (films.position, films.checkpoint, films.status) == (
+        150,
+        str(created // timedelta(microseconds=1)),
+        SyncRunUnitStatus.FAILED,
+    )
+    assert (second.id, second.status) == (first.id, SyncRunStatus.COMPLETED)
+    assert [line.rstrip("\n") for line in lines] == [
+        "Living Room Emby's listing moved past the overlap before StartIndex=150; "
+        "reading again from StartIndex=50"
+    ]
+    missing = await _missing(fixture, range(80, 300))
+    assert missing == []
 
 
 def _recorded_emby(
@@ -2409,30 +2421,44 @@ def _limits(seen: Sequence[httpx.Request]) -> set[int]:
     return {limit for limit in asked if limit >= 2}
 
 
+def _titles_asked(seen: Sequence[httpx.Request]) -> list[int]:
+    """Each `Limit` the titles listing of `films` asked for, in the order it asked."""
+    films = LibraryUnit(WalkStage.TITLES, "films")
+    return [
+        int(request.url.params["Limit"])
+        for request in seen
+        if request.url.params.get("ParentId") == films.view_id
+        and request.url.params.get("IncludeItemTypes") == films.item_types
+    ]
+
+
 async def test_a_whole_library_walk_whose_pages_grow_commits_every_item() -> None:
     """Pages of 2 grow to the ceiling of 16 within one unit, and every film is committed.
 
     A full page of 16 brings at least 8 new items, more than a batch of 4, and is
     committed whole. The clock moves a second a read, so each doubling doubles the rate.
     """
-    fixture = _Fixture(batch_size=4, walkers=1)
+    batch, floor, ceiling = 4, 2, 16
+    fixture = _Fixture(batch_size=batch, walkers=1)
     server = _films_server()
     emby, seen = _recorded_emby(
-        fixture.source, server, page_size=2, page_size_max=16, clock=ticking()
+        fixture.source, server, page_size=floor, page_size_max=ceiling, clock=ticking()
     )
     try:
         run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, emby)
     finally:
         await emby.aclose()
-    limits = _limits(seen)
-    missing = [
-        f"m{index:03d}"
-        for index in range(300)
-        if await fixture.media_items.get_by_external_id(fixture.source.id, f"m{index:03d}") is None
-    ]
+    titles = _titles_asked(seen)
+    missing = await _missing(fixture, range(300))
+    # `items_seen` is the run's running total, read back at every commit, so each step
+    # is what one commit held, whichever unit made it; a beat adds nothing.
+    largest = max(after - before for (before, _), (after, _) in pairwise(fixture.checkpoints))
     assert run.status is SyncRunStatus.COMPLETED
-    assert {2, 16} <= limits, "the premise: the pages grew to the ceiling mid-unit"
+    assert (titles[0], max(titles)) == (floor, ceiling), (
+        "the premise: the pages grew to the ceiling mid-unit"
+    )
     assert missing == []
+    assert largest > batch, "no commit held more than a batch: a larger page was split"
 
 
 async def test_a_walk_killed_mid_unit_resumes_at_its_committed_offset_under_another_page_size() -> (
@@ -2449,7 +2475,6 @@ async def test_a_walk_killed_mid_unit_resumes_at_its_committed_offset_under_anot
     first_emby, first_seen = _recorded_emby(
         fixture.source, server, page_size=100, page_size_max=400, clock=lambda: 1_000.0
     )
-    created = T0 + timedelta(seconds=199) - datetime(1970, 1, 1, tzinfo=UTC)
     try:
         server.fail_after = 200
         first = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, first_emby)
@@ -2477,22 +2502,7 @@ async def test_a_walk_killed_mid_unit_resumes_at_its_committed_offset_under_anot
         await second_emby.aclose()
     first_limits, second_limits = _limits(first_seen), _limits(second_seen)
     assert (first_limits, second_limits) == ({100}, {200}), "the premise: two page sizes"
-    assert (films.position, films.checkpoint, films.status) == (
-        150,
-        str(created // timedelta(microseconds=1)),
-        SyncRunUnitStatus.FAILED,
-    )
-    assert (second.id, second.status) == (first.id, SyncRunStatus.COMPLETED)
-    assert [line.rstrip("\n") for line in lines] == [
-        "Living Room Emby's listing moved past the overlap before StartIndex=150; "
-        "reading again from StartIndex=50"
-    ]
-    missing = [
-        f"m{index:03d}"
-        for index in range(80, 300)
-        if await fixture.media_items.get_by_external_id(fixture.source.id, f"m{index:03d}") is None
-    ]
-    assert missing == []
+    await _assert_resumed_in_place(fixture, films, first, second, lines)
 
 
 async def test_a_cursored_delta_walks_beside_a_live_whole_library_walk() -> None:
