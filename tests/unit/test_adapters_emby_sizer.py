@@ -215,7 +215,22 @@ def test_a_hand_off_at_another_concurrency_first_in_a_climbed_trial_starts_a_new
     _measure(sizer, 2_000, 4.0, times=1, concurrency=1)
     assert sizer.trial == climbed + 1, "a hand-off at another concurrency starts a new trial"
     _measure(sizer, 2_000, 4.0, times=TRIAL_HANDOFFS - 1, concurrency=1)
-    assert sizer.size == 2_000, "500 items/s at 1 was compared against 1,000 at 4"
+    assert sizer.size == 2_000, "the switching hand-off was counted"
+
+
+def test_a_hand_off_at_another_concurrency_first_after_a_failure_starts_a_new_trial() -> None:
+    """The trial a failure starts keeps the concurrency the sizer counted at before it."""
+    sizer = _sizer()
+    _measure(sizer, 1_000, 1.0)
+    assert sizer.size == 2_000, "the premise: it counted at concurrency 4"
+    sizer.failed(sizer.trial)
+    failed = sizer.trial
+    _measure(sizer, 1_000, 1.0, times=1, concurrency=1)  # an outage drops the limit to 1
+    assert sizer.trial == failed + 1, "a hand-off at another concurrency starts a new trial"
+    _measure(sizer, 1_000, 1.0, times=REPROBE_AFTER - 1, concurrency=1)
+    assert sizer.size == 1_000, "the switching hand-off was counted"
+    _measure(sizer, 1_000, 1.0, times=1, concurrency=1)
+    assert sizer.size == 2_000
 
 
 @pytest.mark.parametrize(("behind", "seconds"), [(1, 1.0), (0, 0.0)])
