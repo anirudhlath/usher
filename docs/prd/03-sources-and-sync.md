@@ -99,10 +99,14 @@ when the walk stops:
   most 50,000). The size doubles while a doubling hands the writer at least 10%
   more items a second per walker, and settles a step back after the first
   doubling that does not. A listing page that fails as unreachable halves it,
-  never below `USHER_SOURCE_PAGE_SIZE`, and settles it there; a burst of such
-  failures halves it once, and a 429 leaves it alone. A size settled below
-  `USHER_SOURCE_PAGE_SIZE_MAX` tries the next doubling again after 100 more
-  pages. Setting the two equal turns adaptation off.
+  never below `USHER_SOURCE_PAGE_SIZE`, and settles it there, and a 429 leaves
+  it alone. The halving reaches only later requests: the failed page's own
+  retries ask for the size it was asked at. A failure of a request made before
+  the size last changed leaves the size alone, so a burst of such failures
+  halves it at most once, whether several walkers' pages fail or one page fails
+  its retries. A size settled below `USHER_SOURCE_PAGE_SIZE_MAX` tries the next
+  doubling again after 100 more pages. Setting the two equal turns adaptation
+  off.
 - **Items are walked in ascending creation order**, so items added during a
   walk land at the end. Each page after the first re-reads the last 50 items of
   the page before (half the page, if it held fewer than 100). A page that holds

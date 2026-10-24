@@ -76,7 +76,8 @@ Versioning is `0.x` while the wire contract may still move —
 
 - **`USHER_SOURCE_PAGE_SIZE` is capped at 50,000, up from 1,000.** It is now
   the size listing pages start at and the smallest they adapt down to; its
-  default stays 1,000.
+  default stays 1,000. Startup refuses a `USHER_SOURCE_PAGE_SIZE_MAX` below it,
+  and that defaults to 10,000, so raise the two together.
 - **`USHER_SOURCE_REQUESTS_PER_SECOND` now defaults to 0, no gate.** Out of the
   box, listings to a source are throttled only by the adaptive limiter
   `USHER_SYNC_WALKERS` caps, which backs off on an outage or a 429, so a sync
