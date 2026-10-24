@@ -2007,9 +2007,11 @@ async def test_a_listing_failure_halves_the_size_only_when_it_is_an_outage(
 ) -> None:
     """An outage on a listing page halves the size from the next request on; a 429 does not.
 
-    The size is climbed to 8 first, so a halving cannot be mistaken for the floor, and the
-    frozen clock holds it there otherwise. The failed page is asked for again as it was.
-    Either failure drops the listing limit to one before that page is handed off.
+    The size is climbed to 8 first, so a halving cannot be mistaken for the floor. Nothing
+    else moves it: only the retry's wait moves the clock, so the failed page's hand-off is
+    the only one that takes any time, and one is too few for the sizer to act on. The failed
+    page is asked for again as it was. Either failure drops the listing limit to one before
+    that page is handed off.
     """
     server = FakeEmbyServer()
     library = _dated(40)
@@ -2185,6 +2187,8 @@ async def test_pages_reports_hand_offs_with_the_earlier_requests_trial_and_never
     # A page reaches back over half the page before it, so pages of 2 bring 1 new item,
     # the first of 4 brings 3, later 4s bring 2, the first of 8 brings 6 and later 8s 4.
     assert [c.items for c in calls] == [1] * 5 + [3] + [2] * 5 + [6] + [4] * 8
+    # Nothing here fails, so the listing limit never leaves its ceiling, by default 4.
+    assert {c.concurrency for c in calls} == {4}
 
 
 async def test_the_hand_off_after_a_moved_page_is_not_reported(
@@ -2251,9 +2255,10 @@ async def test_each_listing_times_its_own_hand_offs(monkeypatch: pytest.MonkeyPa
             await listing.aclose()
         await adapter.aclose()
     first, second = pages.values()
-    # Each listing reports every page it yielded but its first and its ending one. At
-    # least, not exactly: hand-offs timed against whichever listing handed off last also
-    # report the second listing's first page, and that defect is the next line's to catch.
+    # Each listing reports every page it yielded but its first and its ending one, which is
+    # the sum below. A defect in what a hand-off is timed against can change how many are
+    # reported, so the premise takes that sum as a floor: it proves both listings reported
+    # and leaves the timing to the next line.
     assert first > 2 and second > 2 and len(calls) >= (first - 2) + (second - 2), (
         "the premise: both listings reported"
     )
@@ -2267,7 +2272,8 @@ async def test_the_gauge_reads_the_size_after_a_listing_page_and_an_adapter_that
 
     A collect consumes every gauge reading, so the adapter that never lists is read first
     and the one that lists writes after that read. A third climbs from 2 to 8 while it
-    lists, so only a reading taken at a page after its first can say 8.
+    lists: read after its first page it must say 2, and read once the listing has ended it
+    must say 8, so a page before the ending one and a page after the first both write it.
     """
     reader = InMemoryMetricReader()
     metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
@@ -2293,9 +2299,13 @@ async def test_the_gauge_reads_the_size_after_a_listing_page_and_an_adapter_that
     for item in _dated(60):
         climbing_server.add_item(item, T0)
     climbing = _adapter(climbing_server, page_size=2, page_size_max=8, clock=ticking())
+    pages = climbing._pages(_listing_query(LIBRARY_SINCE_PARAM, None), start_index=0)
     try:
-        _ = [item async for item in climbing.list_items()]
+        await anext(pages)
+        assert page_sizes(reader) == [(2, {"source": SOURCE.name})]
+        _ = [page async for page in pages]
     finally:
+        await pages.aclose()
         await climbing.aclose()
     assert page_sizes(reader) == [(8, {"source": SOURCE.name})]
 
