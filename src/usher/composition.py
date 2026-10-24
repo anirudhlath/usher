@@ -295,6 +295,7 @@ def adapter_factory(settings: Settings, gates: SourceGateRegistry) -> SourceAdap
     """This deployment's tuning, applied to every adapter it builds."""
     return ConfiguredSourceAdapterFactory(
         page_size=settings.source_page_size,
+        page_size_max=settings.source_page_size_max,
         timeout_seconds=settings.source_timeout_seconds,
         reauth_cooldown_seconds=settings.source_reauth_cooldown_seconds,
         gates=gates,

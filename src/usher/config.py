@@ -168,7 +168,10 @@ class Settings(BaseSettings):
     # exist yet. Deliberately named `source_*`, not `emby_*` -- config.py is
     # not an adapter, and a setting named for one media server would be the
     # first source-specific concept to escape `adapters/`.
-    source_page_size: int = Field(default=1000, ge=1, le=1000)
+    source_page_size: int = Field(default=1000, ge=1, le=50_000)
+    # The largest page a walk's listing adapts up to, from `source_page_size`, which is
+    # where it starts and the smallest it goes; set the two equal to turn adaptation off.
+    source_page_size_max: int = Field(default=10_000, ge=1, le=50_000)
     source_timeout_seconds: float = Field(default=30.0, gt=0)
     # How long a rejected credential is remembered before another
     # authentication is attempted. Without this, a source configured with a
@@ -464,6 +467,17 @@ class Settings(BaseSettings):
                 "USHER_QUERY_EXPANSION_ENABLED=true needs USHER_LLM_ENABLED=true "
                 "-- query expansion is one completion in front of the embed, and "
                 "with no LLM there is no completion to put there"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _page_size_ceiling_is_not_below_its_floor(self) -> "Settings":
+        """Refuse a listing page ceiling below the floor pages start at."""
+        floor, ceiling = self.source_page_size, self.source_page_size_max
+        if ceiling < floor:
+            raise ValueError(
+                f"USHER_SOURCE_PAGE_SIZE_MAX ({ceiling}) must be at least "
+                f"USHER_SOURCE_PAGE_SIZE ({floor}); set them equal to turn adaptation off"
             )
         return self
 

@@ -10,6 +10,13 @@ Versioning is `0.x` while the wire contract may still move —
 
 ### Added
 
+- Listing pages adapt. Each source's pages start at `USHER_SOURCE_PAGE_SIZE`
+  and double while a doubling hands items over at least 10% faster per walker,
+  up to the new `USHER_SOURCE_PAGE_SIZE_MAX` (default 10,000). After the first
+  doubling that does not, they settle a step back and try again 100 pages
+  later; a listing page that fails as unreachable halves them. Set the two
+  equal to turn adaptation off. The gauge `usher.source.listing.page_size`
+  shows the size, and every change logs one INFO line.
 - The counter `usher.sync.retraction.checks` counts the items a sweep or a
   push removal asked the server about, by `path` (`sweep` or `push`) and
   `outcome` (`gone` or `served`). Dashboard 3 draws it.
@@ -67,6 +74,9 @@ Versioning is `0.x` while the wire contract may still move —
 
 ### Changed
 
+- **`USHER_SOURCE_PAGE_SIZE` is capped at 50,000, up from 1,000.** It is now
+  the size listing pages start at and the smallest they adapt down to; its
+  default stays 1,000.
 - **`USHER_SOURCE_REQUESTS_PER_SECOND` now defaults to 0, no gate.** Out of the
   box, listings to a source are throttled only by the adaptive limiter
   `USHER_SYNC_WALKERS` caps, which backs off on an outage or a 429, so a sync

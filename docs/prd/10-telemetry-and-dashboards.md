@@ -164,6 +164,17 @@ reads `USHER_SYNC_WALKERS` while a walk is healthy, 1 straight after a failure,
 and climbs back a step per ten pages. Two walks of one source at once write one
 series.
 
+**`usher.source.listing.page_size` is written each time a listing page
+arrives**, by the adapter that asked for it, so an adapter that never lists
+leaves no reading. It reads the size that adapter's next listing request asks
+for, which moves between `USHER_SOURCE_PAGE_SIZE` and
+`USHER_SOURCE_PAGE_SIZE_MAX`: it starts at the first, doubles while a doubling
+hands the writer at least 10% more items a second per walker, settles a step
+back when one does not and tries again after 100 pages, and halves when a
+listing page fails as unreachable
+([03](03-sources-and-sync.md#walking-the-library)). Every change also logs one
+INFO line naming the source and the sizes it moved between.
+
 **`usher.sync.unit.duration` is seconds per unit of a whole-library walk**,
 from the moment a walker claims the unit to the unit's last commit, recorded
 once for each unit that completes; a unit that fails records nothing. `stage` is

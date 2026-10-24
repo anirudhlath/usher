@@ -178,7 +178,16 @@ export const CONFIG: readonly SettingRow[] = [
     key: 'USHER_SOURCE_PAGE_SIZE',
     group: 'sources',
     def: '1000',
-    about: 'Items per page when walking a source’s library.',
+    about: 'Items per page a walk of a source’s library starts at, and the smallest it adapts down to.',
+    secret: false,
+    measured: false,
+  },
+  {
+    key: 'USHER_SOURCE_PAGE_SIZE_MAX',
+    group: 'sources',
+    def: '10000',
+    about:
+      'The largest page a walk adapts up to. Set it equal to USHER_SOURCE_PAGE_SIZE to turn adaptation off.',
     secret: false,
     measured: false,
   },

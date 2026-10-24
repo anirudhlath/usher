@@ -30,6 +30,7 @@ class ConfiguredSourceAdapterFactory(SourceAdapterFactory):
         self,
         *,
         page_size: int = 1000,
+        page_size_max: int = 10_000,
         timeout_seconds: float = 30.0,
         reauth_cooldown_seconds: float = 60.0,
         gates: SourceGateRegistry | None = None,
@@ -39,6 +40,7 @@ class ConfiguredSourceAdapterFactory(SourceAdapterFactory):
         unit_max_items: int = 100_000,
     ) -> None:
         self._page_size = page_size
+        self._page_size_max = page_size_max
         self._timeout_seconds = timeout_seconds
         self._reauth_cooldown_seconds = reauth_cooldown_seconds
         # `None` is a factory nobody handed a registry to -- a directly constructed one
@@ -63,6 +65,7 @@ class ConfiguredSourceAdapterFactory(SourceAdapterFactory):
                 source,
                 credentials,
                 page_size=self._page_size,
+                page_size_max=self._page_size_max,
                 timeout_seconds=self._timeout_seconds,
                 reauth_cooldown_seconds=self._reauth_cooldown_seconds,
                 limiter=self._gates.gate(source.id, source.name),

@@ -3418,6 +3418,21 @@ async def test_the_walker_setting_reaches_every_adapter_the_deployment_builds() 
         await adapter.aclose()
 
 
+async def test_the_composition_root_carries_both_page_size_bounds() -> None:
+    """`USHER_SOURCE_PAGE_SIZE` and `USHER_SOURCE_PAGE_SIZE_MAX`, through `adapter_factory`.
+
+    The factory's own test hands it both directly, so a composition root that dropped
+    either would leave every deployment on the factory's default for it.
+    """
+    settings = _settings(source_page_size=300, source_page_size_max=4321)
+    adapter = adapter_factory(settings, source_gates(settings)).build(_GATED, _GATE_CREDENTIALS)
+    try:
+        assert isinstance(adapter, EmbyAdapter), "the premise: the factory built an Emby adapter"
+        assert (adapter._sizer.floor, adapter._sizer.ceiling) == (300, 4321)
+    finally:
+        await adapter.aclose()
+
+
 async def test_the_walk_settings_reach_the_reconciler_and_the_adapter() -> None:
     """`USHER_SYNC_WALKERS` reaches `ReconcileService`, `USHER_SYNC_UNIT_MAX_ITEMS` the adapter.
 
