@@ -1244,7 +1244,9 @@ read the same 323 s in, at 12 of 38 units: limit 4, titles 75.4 s.
 
 **The seed never draws, and no stage draws before its second unit completes.**
 Both series exist only in a process that has walked a source: the gauge is
-first written by a listing page, the histogram by a unit's completion. A
+first written by a listing page, the histogram by a unit's completion. The
+limit's line also ends shortly after listing stops: only listing writes the
+gauge, and the SDK clears a synchronous gauge after each collection. A
 counter whose series begins at 1 has risen by nothing inside the window, so
 `rate()` divides zero by zero. The seed is one unit per walk, so its series is
 always `NaN`. The episodes line starts at 18:39, two minutes after the stage's
@@ -1280,7 +1282,9 @@ settles it there, and a 429 leaves it alone. A size settled below
 `USHER_SOURCE_PAGE_SIZE_MAX` tries the next doubling again after 100 more
 pages. **A line pinned at `USHER_SOURCE_PAGE_SIZE_MAX` usually means fetching
 is still the bottleneck**, unless the two settings are equal, which turns
-adaptation off and holds the line flat.
+adaptation off and holds the line flat. **The line ends shortly after listing
+stops**, because only a listing page writes the gauge and the SDK clears it
+after each collection.
 
 **Not yet observed.** The gauge is first written when a listing page arrives,
 and no process carrying it has listed a real source since this panel was
