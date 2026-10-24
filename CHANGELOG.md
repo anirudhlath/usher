@@ -16,7 +16,7 @@ Versioning is `0.x` while the wire contract may still move —
   doubling that does not, they settle a step back and try again 100 pages
   later; a listing page that fails as unreachable halves them. Set the two
   equal to turn adaptation off. The gauge `usher.source.listing.page_size`
-  shows the size, and every change logs one INFO line.
+  shows the size, and every change logs one INFO line. Dashboard 3 draws it.
 - The counter `usher.sync.retraction.checks` counts the items a sweep or a
   push removal asked the server about, by `path` (`sweep` or `push`) and
   `outcome` (`gone` or `served`). Dashboard 3 draws it.

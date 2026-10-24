@@ -1123,6 +1123,9 @@ def test_the_page_size_panel_draws_the_listing_page_size_by_source() -> None:
     )
     assert _AGGREGATION.findall(expr) == ["max"], expr
     assert [labels for labels, _operand in _aggregations(expr)] == [{"source"}], expr
+    assert re.findall(r"\b(by|without)\s*\(", expr) == ["by"], (
+        f"the page-size panel must group `by`, as `without (source)` merges the sources: {expr}"
+    )
 
 
 def test_the_dashboard_3_prose_claims_are_falsifiable() -> None:

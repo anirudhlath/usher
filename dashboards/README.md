@@ -1278,9 +1278,9 @@ and settles a step back after the first doubling that does not. A listing page
 that fails as unreachable halves it, never below `USHER_SOURCE_PAGE_SIZE`, and
 settles it there, and a 429 leaves it alone. A size settled below
 `USHER_SOURCE_PAGE_SIZE_MAX` tries the next doubling again after 100 more
-pages. **A line pinned at `USHER_SOURCE_PAGE_SIZE_MAX` means fetching is still
-the bottleneck**, unless the two settings are equal, which turns adaptation off
-and holds the line flat.
+pages. **A line pinned at `USHER_SOURCE_PAGE_SIZE_MAX` usually means fetching
+is still the bottleneck**, unless the two settings are equal, which turns
+adaptation off and holds the line flat.
 
 **Not yet observed.** The gauge is first written when a listing page arrives,
 and no process carrying it has listed a real source since this panel was
