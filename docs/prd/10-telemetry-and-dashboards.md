@@ -106,7 +106,7 @@ control that does nothing.
 
 ### Metrics — OpenTelemetry → Prometheus
 
-**Every row is emitted today. 45 rows: 44 instruments Usher declares, plus one
+**Every row is emitted today. 46 rows: 45 instruments Usher declares, plus one
 `FastAPIInstrumentor` supplies.**
 
 | Metric | Type | Labels | Emitted |
@@ -136,6 +136,7 @@ control that does nothing.
 | `usher.source.request.duration` | histogram | source, op | ✅ M3 |
 | `usher.source.throttle.wait` | histogram | source | ✅ M10 |
 | `usher.source.listing.concurrency` | gauge | source | ✅ fast first sync |
+| `usher.source.listing.page_size` | gauge | source | ✅ adaptive page size |
 | `usher.source.push.connected` | gauge | source | ✅ M5 |
 | `usher.source.push.reconnects` | counter | source | ✅ M5 |
 | `usher.source.push.events` | counter | source, kind | ✅ M5 |
@@ -158,10 +159,23 @@ control that does nothing.
 | `usher.scheduler.job.due` | gauge | job | ✅ M10 |
 
 **`usher.source.listing.concurrency` is written after every listing page**, by
-the adapter that sent it, so an adapter that never lists leaves no reading. It
-reads `USHER_SYNC_WALKERS` while a walk is healthy, 1 straight after a failure,
-and climbs back a step per ten pages. Two walks of one source at once write one
+the adapter that sent it, so an adapter that never lists leaves no reading. A
+source's series ends shortly after its listing stops. It reads
+`USHER_SYNC_WALKERS` while a walk is healthy, 1 straight after a failure, and
+climbs back a step per ten pages. Two walks of one source at once write one
 series.
+
+**`usher.source.listing.page_size` is written each time a listing page
+arrives**, by the adapter that asked for it, so an adapter that never lists
+leaves no reading. A source's series ends shortly after its listing stops. It
+reads the size that adapter's next listing request asks for, which moves
+between `USHER_SOURCE_PAGE_SIZE` and
+`USHER_SOURCE_PAGE_SIZE_MAX`: it starts at the first, doubles while a doubling
+hands the writer at least 10% more items a second per walker, settles a step
+back when one does not and tries again after 100 pages, and halves when a
+listing page fails as unreachable
+([03](03-sources-and-sync.md#walking-the-library)). Every change also logs one
+INFO line naming the source and the sizes it moved between.
 
 **`usher.sync.unit.duration` is seconds per unit of a whole-library walk**,
 from the moment a walker claims the unit to the unit's last commit, recorded
@@ -347,14 +361,15 @@ and duration · **push connection uptime and reconnect count** · **push events
 applied, by kind**, which separates "the lane is up" from "the lane is doing
 anything" · Emby request latency · TMDb requests/sec against the
 `USHER_TMDB_REQUESTS_PER_SECOND` ceiling, with 429 count · **whole-library
-walks: the listing limit and the mean unit duration, by stage** · **retraction
-checks, by path and outcome**.
+walks: the listing limit and the mean unit duration, by stage** · **listing
+page size, by source** · **retraction checks, by path and outcome**.
 
 ✅ **Every panel here is backed by real data as of M9, the whole-library walk
 panel as of the fast first sync's acceptance walk, and the retraction-checks
-panel as of confirmed retraction's acceptance.** ⚠️ A panel that drains the
-whole unmatched queue should page with the keyset cursor; the `OFFSET` form is
-quadratic in queue depth.
+panel as of confirmed retraction's acceptance, except the listing-page-size
+panel, which is unbacked until a real source is listed.** ⚠️ A panel that
+drains the whole unmatched queue should page with the keyset cursor; the
+`OFFSET` form is quadratic in queue depth.
 
 ### 4 — Performance
 

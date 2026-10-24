@@ -12,27 +12,32 @@ from collections.abc import AsyncGenerator, Callable, Coroutine, Sequence
 from contextlib import aclosing
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import quote
 
 import httpx
 import pytest
 from loguru import logger
-from opentelemetry import trace
+from opentelemetry import metrics, trace
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from pydantic import SecretStr
 
 from tests.fakes.emby_fixtures import load_emby_fixture
+from tests.fakes.emby_harness import climb, page_sizes, ticking
 from tests.fakes.emby_server import SERVER_VERSION, USER_ID, FakeEmbyServer
 from tests.fakes.push_connection import FakePushConnection, FakePushConnector
 from tests.fakes.slow_transport import SlowTransport
 from usher.adapters.emby.adapter import (
     IDS_PER_REQUEST,
+    LIBRARY_SINCE_PARAM,
     MAX_PAGES,
     SEED_UNIT,
     EmbyAdapter,
+    _listing_query,
     _unit_query,
 )
 from usher.adapters.emby.limit import RAISE_AFTER
@@ -171,10 +176,23 @@ def _library(
     return view_id
 
 
+def _named(**options: Any) -> dict[str, Any]:
+    """The options a case named; one left `None` falls to the constructor's own default."""
+    return {name: value for name, value in options.items() if value is not None}
+
+
 def _recorded(
-    server: FakeEmbyServer, *, page_size: int = 2, unit_max_items: int = 100_000
+    server: FakeEmbyServer,
+    *,
+    page_size: int = 2,
+    page_size_max: int | None = None,
+    unit_max_items: int = 100_000,
+    clock: Callable[[], float] | None = None,
 ) -> tuple[EmbyAdapter, list[httpx.Request]]:
-    """An adapter over `server`, and every request it sends, query included."""
+    """An adapter over `server`, and every request it sends, query included.
+
+    `page_size_max` and `clock` reach the constructor only when a case names them.
+    """
     seen: list[httpx.Request] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -183,7 +201,12 @@ def _recorded(
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handle), base_url=SOURCE.base_url)
     adapter = EmbyAdapter(
-        SOURCE, CREDENTIALS, client=client, page_size=page_size, unit_max_items=unit_max_items
+        SOURCE,
+        CREDENTIALS,
+        client=client,
+        page_size=page_size,
+        unit_max_items=unit_max_items,
+        **_named(page_size_max=page_size_max, clock=clock),
     )
     return adapter, seen
 
@@ -207,13 +230,42 @@ def _deleting(
     return handle
 
 
+def _failing(
+    server: FakeEmbyServer,
+    *,
+    at: int,
+    fail: Callable[[], httpx.Response],
+    seen: list[httpx.Request],
+) -> Callable[[httpx.Request], httpx.Response]:
+    """`server`, answering the `at`-th `/Items` request with `fail()` instead, once.
+
+    Every request lands in `seen`, and every `/Items` request counts towards `at`, a
+    failed one included.
+    """
+    listings = 0
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal listings
+        seen.append(request)
+        if request.url.path.endswith("/Items"):
+            listings += 1
+            if listings == at:
+                return fail()
+        return server.handle(request)
+
+    return handle
+
+
 def _adapter(
     server: FakeEmbyServer,
     *,
     page_size: int = 2,
+    page_size_max: int | None = None,
     max_pages: int = MAX_PAGES,
     unit_max_items: int = 100_000,
+    clock: Callable[[], float] | None = None,
 ) -> EmbyAdapter:
+    """An adapter over `server`; `page_size_max` and `clock` reach it only when named."""
     return EmbyAdapter(
         SOURCE,
         CREDENTIALS,
@@ -221,6 +273,7 @@ def _adapter(
         page_size=page_size,
         max_pages=max_pages,
         unit_max_items=unit_max_items,
+        **_named(page_size_max=page_size_max, clock=clock),
     )
 
 
@@ -251,17 +304,19 @@ def _on(
     max_pages: int = MAX_PAGES,
     waits: _Waits | None = None,
     page_size: int | None = None,
+    page_size_max: int | None = None,
+    clock: Callable[[], float] | None = None,
 ) -> EmbyAdapter:
     """An adapter over a hand-written handler, for shapes `FakeEmbyServer` will not produce.
 
-    `page_size` reaches the constructor only when a case names one.
+    `page_size`, `page_size_max` and `clock` reach the constructor only when a case names
+    one, and a named `clock` overrides `waits`' clock.
     """
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url=SOURCE.base_url)
     options: dict[str, Any] = {"max_pages": max_pages}
-    if page_size is not None:
-        options["page_size"] = page_size
     if waits is not None:
         options |= {"sleep": waits.sleep, "clock": waits.clock}
+    options |= _named(page_size=page_size, page_size_max=page_size_max, clock=clock)
     return EmbyAdapter(SOURCE, CREDENTIALS, client=client, **options)
 
 
@@ -904,7 +959,7 @@ async def test_the_walk_advances_by_what_it_was_served_not_by_what_it_asked_for(
     """A server may return fewer items than `Limit`, so the cursor advances by what arrived.
 
     A page thinned by a filter, a per-library cap, or the last page of a library.
-    `start += self._page_size` jumps past exactly the difference on the next request —
+    `start += <the size it asked for>` jumps past exactly the difference on the next request —
     silently, with no error and no empty page — and the reconciler marks every skipped
     item `available = false`.
     """
@@ -1610,6 +1665,10 @@ def _refused() -> httpx.Response:
     raise httpx.ConnectError("connection refused")
 
 
+def _timed_out() -> httpx.Response:
+    raise httpx.ReadTimeout("upstream stopped responding")
+
+
 def _status(code: int, headers: dict[str, str] | None = None) -> Callable[[], httpx.Response]:
     return lambda: httpx.Response(code, headers=headers)
 
@@ -1872,6 +1931,383 @@ async def test_each_retry_is_logged_with_the_page_the_attempt_and_the_wait() -> 
         f"GET /Users/{{user_id}}/Items returned HTTP 502; asking again in {wait}s"
         for attempt, wait in [(1, 15), (2, 30), (3, 60), (4, 120), (5, 240)]
     ]
+
+
+# --- the page sizer --------------------------------------------------------
+
+
+class _HandOff(NamedTuple):
+    items: int
+    seconds: float
+    trial: int
+    concurrency: int
+
+
+def _hand_offs(monkeypatch: pytest.MonkeyPatch, adapter: EmbyAdapter) -> list[_HandOff]:
+    """Every hand-off `adapter` reports to its sizer, each passed on to the real method."""
+    calls: list[_HandOff] = []
+    real = adapter._sizer.handed_off
+
+    def record(items: int, seconds: float, *, trial: int, concurrency: int) -> None:
+        calls.append(_HandOff(items, seconds, trial, concurrency))
+        real(items, seconds, trial=trial, concurrency=concurrency)
+
+    monkeypatch.setattr(adapter._sizer, "handed_off", record)
+    return calls
+
+
+async def test_a_listing_whose_size_climbs_partway_reads_every_item_once() -> None:
+    """Pages of 2 climb to 4 and then to the ceiling of 8, a second between hand-offs.
+
+    Sizes 2 and 4 are each asked for six times: once for a page whose hand-off is not
+    counted, four times for pages whose hand-offs are, and once read ahead before the
+    fourth decides.
+    """
+    server = FakeEmbyServer()
+    library = _dated(60)
+    for item in library:
+        server.add_item(item, T0)
+    adapter, seen = _recorded(server, page_size=2, page_size_max=8, clock=ticking())
+    try:
+        ids = [item.external_id async for item in adapter.list_items()]
+    finally:
+        await adapter.aclose()
+    limits = [int(request.url.params["Limit"]) for request in _listings(seen)]
+    assert limits[:12] == [2] * 6 + [4] * 6 and set(limits[12:]) == {8}
+    assert sorted(ids) == [item.external_id for item in library]
+
+
+async def test_without_a_ceiling_every_request_asks_for_page_size() -> None:
+    """The climbing case with no `page_size_max`: the ceiling is `page_size` itself."""
+    server = FakeEmbyServer()
+    for item in _dated(60):
+        server.add_item(item, T0)
+    adapter, seen = _recorded(server, page_size=2, clock=ticking())
+    try:
+        _ = [item async for item in adapter.list_items()]
+    finally:
+        await adapter.aclose()
+    limits = [int(request.url.params["Limit"]) for request in _listings(seen)]
+    assert set(limits) == {2}
+
+
+@pytest.mark.parametrize(
+    ("fail", "halves"),
+    [
+        (_bad_gateway, True),
+        (_status(408), True),
+        (_refused, True),
+        (_timed_out, True),
+        (_status(429, {"Retry-After": "1"}), False),
+    ],
+    ids=["bad-gateway", "request-timeout", "refused", "timed-out", "rate-limited"],
+)
+async def test_a_listing_failure_halves_the_size_only_when_it_is_an_outage(
+    fail: Callable[[], httpx.Response], halves: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An outage on a listing page halves the size from the next request on; a 429 does not.
+
+    The size is climbed to 8 first, so a halving cannot be mistaken for the floor. Nothing
+    else moves it: only the retry's wait moves the clock, so the failed page's hand-off is
+    the only one that takes any time, and one is too few for the sizer to act on. The failed
+    page is asked for again as it was. Either failure drops the listing limit to one before
+    that page is handed off.
+    """
+    server = FakeEmbyServer()
+    library = _dated(40)
+    for item in library:
+        server.add_item(item, T0)
+    seen: list[httpx.Request] = []
+    adapter = _on(
+        _failing(server, at=2, fail=fail, seen=seen),
+        waits=_Waits(),
+        page_size=2,
+        page_size_max=16,
+    )
+    climb(adapter._sizer, 8)
+    calls = _hand_offs(monkeypatch, adapter)
+    try:
+        ids = [item.external_id async for item in adapter.list_items()]
+    finally:
+        await adapter.aclose()
+    limits = [int(request.url.params["Limit"]) for request in _listings(seen)]
+    starts = [int(request.url.params["StartIndex"]) for request in _listings(seen)]
+    assert starts[1] == starts[2], "the retry asked for the same page"
+    assert limits[:4] == ([8, 8, 8, 4] if halves else [8, 8, 8, 8])
+    # The first hand-off reported is the failed page's, read after the limit dropped.
+    assert calls[0].concurrency == 1
+    assert sorted(ids) == [item.external_id for item in library]
+
+
+async def test_an_outage_on_an_ids_read_leaves_the_size_alone() -> None:
+    """Only a listing page's outage halves the size, and an `Ids` read is not one.
+
+    The size is climbed to 8 first, so a halving cannot be mistaken for the floor.
+    """
+    server = FakeEmbyServer()
+    film = _dated(1)[0]
+    server.add_item(film, T0)
+    seen: list[httpx.Request] = []
+    adapter = _on(
+        _failing(server, at=1, fail=_bad_gateway, seen=seen),
+        waits=_Waits(),
+        page_size=2,
+        page_size_max=16,
+    )
+    climb(adapter._sizer, 8)
+    trial_before = adapter._sizer.trial
+    try:
+        await adapter.confirm_gone([film.external_id])
+    finally:
+        await adapter.aclose()
+    assert len(_listings(seen)) == 2, "the premise: the Ids read failed once and was asked again"
+    assert (adapter._sizer.size, adapter._sizer.trial) == (8, trial_before)
+
+
+async def test_a_listing_whose_size_drops_after_an_outage_reads_every_item_once_through_deletions() -> (  # noqa: E501
+    None
+):
+    """Pages dropped from 8 to 4 mid-walk still reach back over a deletion behind the cursor.
+
+    The second listing request fails once, halving the size. Once the third page is
+    served, one film behind the cursor is deleted and two are added at the end.
+    """
+    server = FakeEmbyServer()
+    films = _dated(42)
+    for item in films[:40]:
+        server.add_item(item, T0)
+    seen: list[httpx.Request] = []
+    failing = _failing(server, at=2, fail=_bad_gateway, seen=seen)
+    changed = False
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal changed
+        response = failing(request)
+        if not changed and server.listings == 3:
+            changed = True
+            server.remove_item("movie-005")
+            for item in films[40:]:
+                server.add_item(item, T0)
+        return response
+
+    adapter = _on(handle, waits=_Waits(), page_size=2, page_size_max=16)
+    climb(adapter._sizer, 8)
+    try:
+        ids = [item.external_id async for item in adapter.list_items()]
+    finally:
+        await adapter.aclose()
+    limits = [int(request.url.params["Limit"]) for request in _listings(seen)]
+    assert 4 in limits, "the premise: the size dropped"
+    # Every film, the deleted one too: the first page read it before it went.
+    assert sorted(ids) == [item.external_id for item in films]
+
+
+async def test_a_server_capping_its_pages_reads_every_item_and_settles_where_it_serves() -> None:
+    """A server that serves at most 4 items a page: asking for 8 gains nothing, so it settles.
+
+    Pages of 2 and 4 climb as in the climbing case. Pages asked for 8 bring what pages of 4
+    did, which is not `GAIN` times as fast, so the size settles back to 4.
+    """
+    server = FakeEmbyServer()
+    server.max_limit = 4
+    library = _dated(80)
+    for item in library:
+        server.add_item(item, T0)
+    adapter, seen = _recorded(server, page_size=2, page_size_max=16, clock=ticking())
+    try:
+        ids = [item.external_id async for item in adapter.list_items()]
+    finally:
+        await adapter.aclose()
+    limits = [int(request.url.params["Limit"]) for request in _listings(seen)]
+    assert limits[:18] == [2] * 6 + [4] * 6 + [8] * 6 and set(limits[18:]) == {4}
+    assert sorted(ids) == [item.external_id for item in library]
+
+
+async def test_a_page_asked_before_a_climb_is_judged_by_its_own_size() -> None:
+    """A page asked for at 4 that arrives after a re-probe has climbed to 8 is not short.
+
+    The first page's total of 10 goes stale as 790 more films are added, so past it a short
+    page ends the walk. An outage drops 8 to 4 with the longest page served still 8, and a
+    re-probe later climbs back while a page asked for at 4 is in flight. Judged by 8, that
+    page would be short and end the walk with most of the library unread.
+    """
+    server = FakeEmbyServer()
+    library = _dated(800)
+    for item in library[:10]:
+        server.add_item(item, T0)
+    seen: list[httpx.Request] = []
+    failing = _failing(server, at=30, fail=_bad_gateway, seen=seen)
+    grown = False
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal grown
+        response = failing(request)
+        if not grown and server.listings == 1:
+            grown = True
+            for item in library[10:]:
+                server.add_item(item, T0)
+        return response
+
+    adapter = _on(handle, waits=_Waits(), page_size=2, page_size_max=8, clock=ticking())
+    try:
+        ids = [item.external_id async for item in adapter.list_items()]
+    finally:
+        await adapter.aclose()
+    limits = [int(request.url.params["Limit"]) for request in _listings(seen)]
+    # The re-probe is read off the sizer, not the requests: a page judged by the size the
+    # sizer holds when it arrives ends the walk before the re-probe's first request goes out.
+    assert adapter._sizer.size == 8 and 4 in limits[limits.index(8) :], (
+        "the premise: a drop from 8, then a re-probe back to 8"
+    )
+    assert sorted(ids) == [item.external_id for item in library]
+
+
+async def test_pages_reports_hand_offs_with_the_earlier_requests_trial_and_never_the_first_or_last_page(  # noqa: E501
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The climbing case's hand-offs, as `_pages` reports them to the sizer.
+
+    Each carries the trial of the request for the page handed off before it, so the first
+    two after each climb still carry the trial before and are not counted. Each also
+    carries the new items its own page brought.
+    """
+    server = FakeEmbyServer()
+    for item in _dated(60):
+        server.add_item(item, T0)
+    adapter, seen = _recorded(server, page_size=2, page_size_max=8, clock=ticking())
+    calls = _hand_offs(monkeypatch, adapter)
+    try:
+        _ = [item async for item in adapter.list_items()]
+    finally:
+        await adapter.aclose()
+    limits = [int(request.url.params["Limit"]) for request in _listings(seen)]
+    assert len(calls) == len(limits) - 2
+    assert [c.trial for c in calls][:12] == [0] * 6 + [1] * 6
+    assert {c.trial for c in calls[12:]} == {2}
+    # A page reaches back over half the page before it, so pages of 2 bring 1 new item,
+    # the first of 4 brings 3, later 4s bring 2, the first of 8 brings 6 and later 8s 4.
+    assert [c.items for c in calls] == [1] * 5 + [3] + [2] * 5 + [6] + [4] * 8
+    # Nothing here fails, so the listing limit never leaves its ceiling, by default 4.
+    assert {c.concurrency for c in calls} == {4}
+
+
+async def test_the_hand_off_after_a_moved_page_is_not_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shift-past-the-overlap case: the page read after the moved one is not timed.
+
+    Its time since the last hand-off would include the moved page's round trip.
+    """
+    server = FakeEmbyServer()
+    for item in _numbered(250):
+        server.add_item(item, T0)
+    deleting = _deleting(server, [f"movie-{index:03d}" for index in range(60)])
+    seen: list[httpx.Request] = []
+
+    def record(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return deleting(request)
+
+    lines: list[str] = []
+    handle = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        adapter = _on(record, page_size=100)
+        calls = _hand_offs(monkeypatch, adapter)
+        try:
+            _ = [item async for item in adapter.list_items()]
+        finally:
+            await adapter.aclose()
+    finally:
+        logger.remove(handle)
+    limits = [int(request.url.params["Limit"]) for request in _listings(seen)]
+    moved_lines = [line for line in lines if "moved past the overlap" in line]
+    assert len(moved_lines) == 1, "the premise: exactly one page moved"
+    # Not the first page, the moved one, the one after it, or the last.
+    assert len(calls) == len(limits) - 4
+
+
+async def test_each_listing_times_its_own_hand_offs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two listings stepped in turn on one clock, which moves a second at each hand-off.
+
+    The other listing's hand-off falls between each two of one listing's, so each listing's
+    are two seconds apart; timed against whichever handed off last, each would be one.
+    """
+    server = FakeEmbyServer()
+    for item in _dated(20):
+        server.add_item(item, T0)
+    adapter = _adapter(server, page_size=2, clock=ticking())
+    calls = _hand_offs(monkeypatch, adapter)
+    query = _listing_query(LIBRARY_SINCE_PARAM, None)
+    listings = [adapter._pages(query, start_index=0), adapter._pages(query, start_index=0)]
+    pages = dict.fromkeys(listings, 0)
+    try:
+        live = list(listings)
+        while live:
+            for listing in list(live):
+                try:
+                    await anext(listing)
+                except StopAsyncIteration:
+                    live.remove(listing)
+                else:
+                    pages[listing] += 1
+    finally:
+        for listing in listings:
+            await listing.aclose()
+        await adapter.aclose()
+    first, second = pages.values()
+    # Each listing reports every page it yielded but its first and its ending one, which is
+    # the sum below. A defect in what a hand-off is timed against can change how many are
+    # reported, so the premise takes that sum as a floor: it proves both listings reported
+    # and leaves the timing to the next line.
+    assert first > 2 and second > 2 and len(calls) >= (first - 2) + (second - 2), (
+        "the premise: both listings reported"
+    )
+    assert {c.seconds for c in calls} == {2.0}
+
+
+async def test_the_gauge_reads_the_size_after_a_listing_page_and_an_adapter_that_never_lists_writes_none() -> (  # noqa: E501
+    None
+):
+    """Only a listing page's arrival writes the gauge; a climb and an `Ids` read write nothing.
+
+    A collect consumes every gauge reading, so the adapter that never lists is read first
+    and the one that lists writes after that read. A third climbs from 2 to 8 while it
+    lists: read after its first page it must say 2, and read once the listing has ended it
+    must say 8, so a page before the ending one and a page after the first both write it.
+    """
+    reader = InMemoryMetricReader()
+    metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
+    server = FakeEmbyServer()
+    library = _dated(20)
+    for item in library:
+        server.add_item(item, T0)
+    confirming = _adapter(server, page_size=2, page_size_max=16)
+    climb(confirming._sizer, 8)
+    try:
+        await confirming.confirm_gone([library[0].external_id])
+    finally:
+        await confirming.aclose()
+    assert page_sizes(reader) == []
+    listing = _adapter(server, page_size=2, page_size_max=16, clock=lambda: 1_000.0)
+    climb(listing._sizer, 8)
+    try:
+        _ = [item async for item in listing.list_items()]
+    finally:
+        await listing.aclose()
+    assert page_sizes(reader) == [(8, {"source": SOURCE.name})]
+    climbing_server = FakeEmbyServer()
+    for item in _dated(60):
+        climbing_server.add_item(item, T0)
+    climbing = _adapter(climbing_server, page_size=2, page_size_max=8, clock=ticking())
+    pages = climbing._pages(_listing_query(LIBRARY_SINCE_PARAM, None), start_index=0)
+    try:
+        await anext(pages)
+        assert page_sizes(reader) == [(2, {"source": SOURCE.name})]
+        _ = [page async for page in pages]
+    finally:
+        await pages.aclose()
+        await climbing.aclose()
+    assert page_sizes(reader) == [(8, {"source": SOURCE.name})]
 
 
 # --- get_item --------------------------------------------------------

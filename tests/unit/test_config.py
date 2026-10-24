@@ -1,5 +1,6 @@
 import inspect
 import pkgutil
+import re
 import tomllib
 from pathlib import Path
 
@@ -406,6 +407,76 @@ def test_sync_unit_max_items_is_from_one_page_to_a_million(
         assert Settings().sync_unit_max_items == int(value)
     else:
         with pytest.raises(ValidationError):
+            Settings()
+
+
+@pytest.mark.parametrize(
+    ("value", "accepted"), [(0, False), (1, True), (50_000, True), (50_001, False)]
+)
+def test_source_page_size_is_from_one_to_fifty_thousand(
+    monkeypatch: pytest.MonkeyPatch, value: int, accepted: bool
+) -> None:
+    """Zero asks for empty pages, and the cap is the largest page Emby has been seen serving.
+
+    The ceiling sits at the cap, so it refuses nothing below it. At 50,001 the ceiling
+    check refuses too, which is why the refusal must be the field's own.
+    """
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    monkeypatch.setenv("USHER_SOURCE_PAGE_SIZE_MAX", "50000")
+    monkeypatch.setenv("USHER_SOURCE_PAGE_SIZE", str(value))
+    if accepted:
+        assert Settings().source_page_size == value
+    else:
+        with pytest.raises(ValidationError) as caught:
+            Settings()
+        assert [error["loc"] for error in caught.value.errors()] == [("source_page_size",)]
+
+
+@pytest.mark.parametrize(
+    ("value", "accepted"), [(0, False), (1, True), (50_000, True), (50_001, False)]
+)
+def test_source_page_size_max_is_from_one_to_fifty_thousand(
+    monkeypatch: pytest.MonkeyPatch, value: int, accepted: bool
+) -> None:
+    """The ceiling has the floor's bounds.
+
+    The floor sits at one, so it refuses nothing above it. At zero the floor check
+    refuses too, which is why the refusal must be the field's own.
+    """
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    monkeypatch.setenv("USHER_SOURCE_PAGE_SIZE", "1")
+    monkeypatch.setenv("USHER_SOURCE_PAGE_SIZE_MAX", str(value))
+    if accepted:
+        assert Settings().source_page_size_max == value
+    else:
+        with pytest.raises(ValidationError) as caught:
+            Settings()
+        assert [error["loc"] for error in caught.value.errors()] == [("source_page_size_max",)]
+
+
+@pytest.mark.parametrize(("ceiling", "accepted"), [(999, False), (1_000, True)])
+def test_a_page_size_ceiling_below_its_floor_is_refused(
+    monkeypatch: pytest.MonkeyPatch, ceiling: int, accepted: bool
+) -> None:
+    """A ceiling under the floor is refused at startup; one equal to it turns adaptation off.
+
+    The message names both variables and both values, so the operator knows which to move.
+    """
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    monkeypatch.setenv("USHER_SOURCE_PAGE_SIZE", "1000")
+    monkeypatch.setenv("USHER_SOURCE_PAGE_SIZE_MAX", str(ceiling))
+    if accepted:
+        settings = Settings()
+        assert (settings.source_page_size, settings.source_page_size_max) == (1_000, ceiling)
+    else:
+        refusal = (
+            f"USHER_SOURCE_PAGE_SIZE_MAX ({ceiling}) must be at least USHER_SOURCE_PAGE_SIZE "
+            "(1000); set them equal to turn adaptation off"
+        )
+        with pytest.raises(ValidationError, match=re.escape(refusal)):
             Settings()
 
 

@@ -61,6 +61,7 @@ async def test_the_deployment_tuning_reaches_the_adapter() -> None:
     gates = SourceGateRegistry(1.25)
     factory = ConfiguredSourceAdapterFactory(
         page_size=17,
+        page_size_max=170,
         timeout_seconds=3.5,
         reauth_cooldown_seconds=7.25,
         gates=gates,
@@ -72,7 +73,7 @@ async def test_the_deployment_tuning_reaches_the_adapter() -> None:
     adapter = factory.build(SOURCE, CREDENTIALS)
     try:
         assert isinstance(adapter, EmbyAdapter)
-        assert adapter._page_size == 17
+        assert (adapter._sizer.floor, adapter._sizer.ceiling) == (17, 170)
         assert adapter._listing_limit.limit == 3
         assert adapter._unit_max_items == 5_000
         assert adapter._client.timeout.read == 3.5
@@ -92,17 +93,26 @@ async def test_the_deployment_tuning_reaches_the_adapter() -> None:
 
 
 async def test_an_unconfigured_factory_pages_at_the_settings_default() -> None:
-    """A factory nobody configured must build what `USHER_SOURCE_PAGE_SIZE`'s default builds.
+    """A factory nobody configured must build what both page-size settings' defaults build.
 
-    The composition root always passes the setting, so this default is read only by a
-    factory constructed directly, and no other case here both leaves it alone and reads it.
+    The composition root always passes the settings, so these defaults are read only by a
+    factory constructed directly, and no other case here both leaves them alone and reads
+    them.
     """
     adapter = ConfiguredSourceAdapterFactory().build(SOURCE, CREDENTIALS)
     try:
         assert isinstance(adapter, EmbyAdapter)
-        assert adapter._page_size == Settings.model_fields["source_page_size"].default == 1000, (
+        assert adapter._sizer.floor == Settings.model_fields["source_page_size"].default == 1000, (
             "an unconfigured factory pages differently from USHER_SOURCE_PAGE_SIZE's default, "
             "or that default is no longer 1,000"
+        )
+        assert (
+            adapter._sizer.ceiling
+            == Settings.model_fields["source_page_size_max"].default
+            == 10_000
+        ), (
+            "an unconfigured factory adapts to a ceiling other than USHER_SOURCE_PAGE_SIZE_MAX's "
+            "default, or that default is no longer 10,000"
         )
     finally:
         await adapter.aclose()

@@ -90,11 +90,30 @@ recovers them.
 
 ### Walking the library
 
-`list_items` and `watch_state` page over the source's own listing, in pages of
-`USHER_SOURCE_PAGE_SIZE` items (default **1,000**, at most 1,000), asking for
+`list_items` and `watch_state` page over the source's own listing, asking for
 the next page while the current one is written — one page read ahead, cancelled
 when the walk stops:
 
+- **Pages start at `USHER_SOURCE_PAGE_SIZE` items and adapt up to
+  `USHER_SOURCE_PAGE_SIZE_MAX`** (defaults **1,000** and **10,000**, both at
+  most 50,000). The size doubles while a doubling hands the writer at least 10%
+  more items a second per walker, and settles a step back after the first
+  doubling that does not. A listing page that fails as unreachable halves it,
+  never below `USHER_SOURCE_PAGE_SIZE`, and settles it there, and a 429 leaves
+  it alone. The halving reaches only later requests: the failed page's own
+  retries ask for the size it was asked at. Each size is judged over a trial,
+  which starts again whenever the size changes, a page asked for in the trial
+  fails as unreachable, or a page is timed at a listing concurrency other than
+  the trial's when it and the page before it in its listing were both asked for
+  in the trial. A trial started by such a page takes that page's concurrency,
+  and any other trial keeps the concurrency of the trial before it. An adapter's
+  trials have no concurrency until it first times a page that, like the page
+  before it in its listing, was asked for in the trial, and the trial that page
+  is timed in takes the page's. Only a failure of a page asked for in the
+  current trial halves the size, so a burst of such failures halves it at most
+  once, whether several walkers' pages fail or one page fails its retries. A
+  size settled below `USHER_SOURCE_PAGE_SIZE_MAX` tries the next doubling again
+  after 100 more pages. Setting the two equal turns adaptation off.
 - **Items are walked in ascending creation order**, so items added during a
   walk land at the end. Each page after the first re-reads the last 50 items of
   the page before (half the page, if it held fewer than 100). A page that holds
@@ -119,9 +138,9 @@ when the walk stops:
   time was recorded is read again from its start. Duplicates are permitted;
   silent truncation is not.
 - **A walk fails on a listing that 10,000 pages do not finish**, and each unit
-  of a whole-library walk is a listing of its own: at the default page size,
-  while its listing holds still, that is one of 9,500,050 items or more, and
-  fewer at a smaller page (the
+  of a whole-library walk is a listing of its own: at the default
+  `USHER_SOURCE_PAGE_SIZE`, while its listing holds still, that is one of
+  9,500,050 items or more, and fewer at a smaller one (the
   [configuration guide](../guide/configuration.md#walking-a-large-library) has
   the table).
 - **The delta cursor is widened by one second.**

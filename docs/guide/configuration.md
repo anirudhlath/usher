@@ -118,10 +118,28 @@ you are watching first, then each library's films and shows, then their
 episodes, a library larger than `USHER_SYNC_UNIT_MAX_ITEMS` (default 100,000)
 in several pieces. Up to `USHER_SYNC_WALKERS` pieces are read at once.
 
-`USHER_SOURCE_PAGE_SIZE` (default 1,000, at most 1,000) also bounds how large a
-piece can be. A sync reads at most 10,000 pages of one piece, and each page
-after the first moves on by the page size less a reach-back of 50 items, or of
-half the page below 100. A piece those pages do not finish fails:
+A sync asks for pages of `USHER_SOURCE_PAGE_SIZE` items (default 1,000) at
+first. It doubles them while each doubling hands the writer at least 10% more
+items a second per walker, up to `USHER_SOURCE_PAGE_SIZE_MAX` (default 10,000),
+settles a step back when one does not, and tries again after 100 pages. Both
+are at most 50,000. Usher refuses to start with a `USHER_SOURCE_PAGE_SIZE_MAX`
+below `USHER_SOURCE_PAGE_SIZE`, so raise the two together; set them equal to
+keep every page one size.
+
+A page that fails as unreachable, such as a timeout or a 5xx, halves them for
+later requests, never below `USHER_SOURCE_PAGE_SIZE`, and is itself asked for
+again at the size it asked for. So if pages grow larger than the server can
+send within a listing page's read budget, 120 s or
+`USHER_SOURCE_TIMEOUT_SECONDS` if that is longer, the walk fails once that
+page's retries run out instead of shrinking; keep `USHER_SOURCE_PAGE_SIZE_MAX`
+below that size.
+
+`USHER_SOURCE_PAGE_SIZE` also bounds how large a piece can be. A sync reads at
+most 10,000 pages of one piece, and each page after the first moves on by the
+page size less a reach-back of 50 items, or of half the page below 100. A piece
+those pages do not finish fails. No page asks for fewer than
+`USHER_SOURCE_PAGE_SIZE` items, so the table is computed from it, for pages
+that stay at that size; pages that have grown reach further:
 
 | Page size | A piece fails once it holds |
 |---|---|

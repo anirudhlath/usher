@@ -174,12 +174,13 @@ job is enqueued at `BACKFILL` for that remote search.
   `RequestRefused`, the 4xx `EmbySession.ok` still reports as `PortUnavailable`.
   A test that fails a walk on purpose injects `sleep=instant_sleep`
   (`tests/fakes/emby_harness.py`), or it sits through those minutes as a hang.
-- **A page's reach-back is clamped to half the page before it**, a walk ends on
-  a short page that brought nothing new, and **a page that moved is never read**
-  — it shares no id with the page before and does not start before the anchor's
-  `DateCreated` (`paging.OffsetWindow`): the walk asks again `BACKUP` earlier,
-  doubling. A fixed `PAGE_OVERLAP` stalls on pages of 50 or fewer, deletions
-  strand the total, and a tie on the anchor counts as moved.
+- **A page's reach-back is clamped to half the page before it**, a page is short
+  against the size it was asked at or the longest page served if that is fewer,
+  a walk ends on a short page that brought nothing new, and **a page that moved
+  is never read** — it shares no id with the page before and does not start
+  before the anchor's `DateCreated` (`paging.OffsetWindow`): the walk asks again
+  `BACKUP` earlier, doubling. A fixed `PAGE_OVERLAP` stalls on pages of 50 or
+  fewer, deletions strand the total, and a tie on the anchor counts as moved.
 - **A service that checkpoints per batch must not evolve its own stale copy in
   the failure handler** — `reconcile`'s binding is the pre-walk value, so
   `run.evolve(status=FAILED)` writes `items_seen = 0` over a real checkpoint.

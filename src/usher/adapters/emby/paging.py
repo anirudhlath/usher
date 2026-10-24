@@ -44,10 +44,10 @@ class Page:
 class OffsetWindow:
     """The arithmetic of one walk, kept apart from the requests it plans.
 
-    The total is read from the first page only. A page is short when it is shorter
-    than the longest page served before it, or than `limit` before any. A walk ends
-    on an empty page; on a short page once the cursor has reached that total; or on
-    a short page that brought nothing new.
+    The total is read from the first page only. A page is short when it holds fewer
+    entries than it was asked for, or than the longest page served before it if that
+    is fewer. A walk ends on an empty page; on a short page once the cursor has
+    reached that total; or on a short page that brought nothing new.
 
     Each page after the first reaches back `PAGE_OVERLAP` items, clamped to half the
     page before it, and an entry the previous page carried is dropped by its `Id`.
@@ -65,13 +65,11 @@ class OffsetWindow:
     def __init__(
         self,
         *,
-        limit: int,
         start: int,
         keyed: bool = False,
         after: int | None = None,
         until: int | None = None,
     ) -> None:
-        self.limit = limit
         self.start = start
         self.keyed = keyed
         self.until = until
@@ -104,7 +102,7 @@ class OffsetWindow:
         """Whether a keyed listing has served a page whose keys fall."""
         return self._unsorted
 
-    def receive(self, entries: list[Any], total: object) -> Page:
+    def receive(self, entries: list[Any], total: object, *, asked: int) -> Page:
         """Account for the page requested at `start`."""
         ids = [_id_of(entry) for entry in entries]
         known = [key for key in map(key_of, entries) if key is not None]
@@ -114,10 +112,10 @@ class OffsetWindow:
         # `bool` either, because JSON `true` is an `int` to Python.
         if self._first and isinstance(total, int) and not isinstance(total, bool) and total > 0:
             self.total = total
-        # Against the longest page served, or `limit` before the first: a capped
-        # server serves nothing longer, and its full pages past a stale total are a
-        # library that grew.
-        short = len(entries) < (self._longest or self.limit)
+        # Against the size it was asked at, or the longest page served if that is
+        # fewer. A capped server serves nothing longer, and its full pages past a
+        # stale total are a library that grew.
+        short = len(entries) < (min(asked, self._longest) if self._longest else asked)
         first, self._first = self._first, False
         self._longest = max(self._longest, len(entries))
         if self._moved(ids, known):

@@ -786,8 +786,8 @@ renderer.
 
 # Dashboard 3 — Pipeline
 
-Twelve panels, and the mixed one: Prometheus for rates and depths, Postgres for
-the queue's and the reconciler's own breakdowns. Dashboard 1's principle
+Thirteen panels, and the mixed one: Prometheus for rates and depths, Postgres
+for the queue's and the reconciler's own breakdowns. Dashboard 1's principle
 ("the catalog *is* the record") does not decide this dashboard on its own,
 because half of what a pipeline does leaves no row behind — a completed job is
 **deleted**, and a request that TMDb refused exists only as a counter.
@@ -1243,12 +1243,15 @@ minute's successes raised it back to 4. **Mean unit duration, by stage:** titles
 read the same 323 s in, at 12 of 38 units: limit 4, titles 75.4 s.
 
 **The seed never draws, and no stage draws before its second unit completes.**
-Both series exist only in a process that has walked a source: the gauge is
-first written by a listing page, the histogram by a unit's completion. A
-counter whose series begins at 1 has risen by nothing inside the window, so
-`rate()` divides zero by zero. The seed is one unit per walk, so its series is
-always `NaN`. The episodes line starts at 18:39, two minutes after the stage's
-first unit completed.
+The histogram is first written by a unit's completion, so only a process that
+has walked a source has its series. The gauge is first written by any listing
+page, and a push removal sends one when it asks a source about an item, so the
+limit's series can start with no walk. The limit's line ends shortly after
+listing stops: only listing writes the gauge, and the SDK clears a synchronous
+gauge after each collection. A counter whose series begins at 1 has risen by
+nothing inside the window, so `rate()` divides zero by zero. The seed is one
+unit per walk, so its series is always `NaN`. The episodes line starts at
+18:39, two minutes after the stage's first unit completed.
 
 ### 12 — Retraction checks, by path and outcome
 
@@ -1272,6 +1275,32 @@ walks. Read a sweep's numbers with `max_over_time` over the walk's window. **The
 push lines start again from zero at every deploy or restart**, because each app
 process has its own series. To count across them, sum each process's
 `max_over_time`.
+
+### 13 — Listing page size, by source
+
+`timeseries`, Prometheus, beside panel 11.
+
+```
+max by (source) (usher_source_listing_page_size_ratio)
+```
+
+`usher.source.listing.page_size`, labelled `source`: the items that source's
+adapter asks for in its next listing request. It starts at
+`USHER_SOURCE_PAGE_SIZE` and moves up to `USHER_SOURCE_PAGE_SIZE_MAX`, doubling
+while a doubling hands the writer at least 10% more items a second per walker,
+and settles a step back after the first doubling that does not. A listing page
+that fails as unreachable halves it, never below `USHER_SOURCE_PAGE_SIZE`, and
+settles it there, and a 429 leaves it alone. A size settled below
+`USHER_SOURCE_PAGE_SIZE_MAX` tries the next doubling again after 100 more
+pages. **A line pinned at `USHER_SOURCE_PAGE_SIZE_MAX` usually means fetching
+is still the bottleneck**, unless the two settings are equal, which turns
+adaptation off and holds the line flat. **The line ends shortly after listing
+stops**, because only a listing page writes the gauge and the SDK clears it
+after each collection.
+
+**Not yet observed.** The gauge is first written when a listing page arrives,
+and no process carrying it has listed a real source since this panel was
+committed, so there is no reading to record.
 
 ## ⚠️ Three Dashboard 3 panels plot a mean, not a quantile, and the reason is an instrument
 

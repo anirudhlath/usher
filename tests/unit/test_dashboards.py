@@ -502,8 +502,8 @@ def test_the_catalogue_scan_reaches_the_row_that_carries_no_usher_prefix() -> No
         "the catalogue scan is still anchored on `usher.`, so an API-latency panel would "
         "fail invariant 2 for naming the one metric PRD 10 says it should"
     )
-    assert len(catalogue) == 45, (
-        f"PRD 10's metric table parsed to {len(catalogue)} rows, not the 45 its own header "
+    assert len(catalogue) == 46, (
+        f"PRD 10's metric table parsed to {len(catalogue)} rows, not the 46 its own header "
         "counts out — the table's shape has moved and both readers need checking"
     )
 
@@ -819,11 +819,11 @@ def _sql(panel: dict[str, Any]) -> str:
     return "\n".join(_target_sql(target) for target in panel.get("targets") or [])
 
 
-def _assert_dashboard_3_has_twelve_panels(panels: list[dict[str, Any]]) -> None:
-    """Dashboard 3's panel count: PRD 10's eleven items, with queue depth drawn twice."""
+def _assert_dashboard_3_has_thirteen_panels(panels: list[dict[str, Any]]) -> None:
+    """Dashboard 3's panel count: PRD 10's twelve items, with queue depth drawn twice."""
     titles = [str(panel["title"]) for panel in panels]
-    assert len(panels) == 12, (
-        "dashboard 3 is twelve panels -- PRD 10's eleven items, with queue depth drawn "
+    assert len(panels) == 13, (
+        "dashboard 3 is thirteen panels -- PRD 10's twelve items, with queue depth drawn "
         f"twice -- not {len(panels)}: {titles}"
     )
 
@@ -849,7 +849,7 @@ def test_the_queue_depth_panels_are_two_panels_over_two_datasources() -> None:
     assert "Parked jobs by kind" in titles, (
         f"the known-title anchor is gone, so this scan is reading something else: {titles}"
     )
-    _assert_dashboard_3_has_twelve_panels(panels)
+    _assert_dashboard_3_has_thirteen_panels(panels)
 
     depth = [panel for panel in panels if "queue depth" in str(panel["title"]).lower()]
     assert len(depth) == 2, (
@@ -1104,6 +1104,30 @@ def test_the_retraction_panel_draws_checks_by_path_and_outcome() -> None:
     assert [labels for labels, _operand in _aggregations(expr)] == [{"path", "outcome"}], expr
 
 
+def test_the_page_size_panel_draws_the_listing_page_size_by_source() -> None:
+    """One line per source: a max by `source`, as panel 11 draws the listing limit."""
+    page_size = [
+        panel
+        for panel in _live_panels(_PIPELINE)
+        if str(panel["title"]) == "Listing page size, by source"
+    ]
+    assert len(page_size) == 1, f"dashboard 3 has {len(page_size)} page-size panels, not one"
+    [expr] = _exprs(page_size[0])
+    queried = {normalise_metric(token) for token in _metric_tokens(expr)}
+    assert queried == {"usher_source_listing_page_size"}, (
+        f"the page-size panel queries {sorted(queried)}"
+    )
+    assert _metric_tokens(expr) == {"usher_source_listing_page_size_ratio"}, (
+        "the page-size panel does not name the gauge as Prometheus stores it, with the "
+        f"`_ratio` its unit puts in the name, so it draws nothing: {expr}"
+    )
+    assert _AGGREGATION.findall(expr) == ["max"], expr
+    assert [labels for labels, _operand in _aggregations(expr)] == [{"source"}], expr
+    assert re.findall(r"\b(by|without)\s*\(", expr) == ["by"], (
+        f"the page-size panel must group `by`, as `without (source)` merges the sources: {expr}"
+    )
+
+
 def test_the_dashboard_3_prose_claims_are_falsifiable() -> None:
     """Each of the four checks above, handed an input it has to refuse.
 
@@ -1124,8 +1148,8 @@ def test_the_dashboard_3_prose_claims_are_falsifiable() -> None:
         _assert_names_the_transport_failures(
             {"title": "TMDb requests", "description": "429s over the total"}
         )
-    with pytest.raises(AssertionError, match=r"twelve panels .* not 11:"):
-        _assert_dashboard_3_has_twelve_panels([{"title": f"panel {n}"} for n in range(11)])
+    with pytest.raises(AssertionError, match=r"thirteen panels .* not 12:"):
+        _assert_dashboard_3_has_thirteen_panels([{"title": f"panel {n}"} for n in range(12)])
 
 
 # --------------------------------------------------------------------------------

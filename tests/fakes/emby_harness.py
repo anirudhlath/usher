@@ -1,8 +1,13 @@
-"""Binds a real `EmbyAdapter` to `FakeEmbyServer` for the contract suite."""
+"""Binds a real `EmbyAdapter` to `FakeEmbyServer` for the contract suite.
 
-from collections.abc import Sequence
+Also `climb`, `ticking` and `page_sizes` for the page sizer, and `gauge_readings` for any gauge.
+"""
+
+import itertools
+from collections.abc import Callable, Sequence
 
 import httpx
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader, NumberDataPoint
 from pydantic import AwareDatetime, SecretStr
 
 from tests.contract.source_harness import SourceHarness
@@ -10,6 +15,7 @@ from tests.fakes.emby_server import FakeEmbyServer
 from tests.fakes.push_connection import FakePushConnection, FakePushConnector
 from tests.fakes.slow_transport import SlowTransport
 from usher.adapters.emby.adapter import EmbyAdapter
+from usher.adapters.emby.sizer import REPROBE_AFTER, TRIAL_HANDOFFS, PageSizer
 from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
 from usher.domain.source import Source
@@ -34,6 +40,61 @@ async def instant_sleep(seconds: float) -> None:
     A case that fails a walk on purpose -- `fail_after`, `offline` -- would otherwise
     sit through eight minutes of them before the failure it is about arrives.
     """
+
+
+# Rounds `climb` allows: a settled size's wait to re-probe, rounded down, plus 32. The 32
+# cover up to 29 doublings, enough for any ceiling below 2**29, and the rounds that a
+# settle-back trial or a concurrency switch's uncounted hand-off, and the rounding down of
+# the wait, can add.
+_CLIMB_ROUNDS = REPROBE_AFTER // TRIAL_HANDOFFS + 32
+
+
+def climb(sizer: PageSizer, size: int) -> None:
+    """Climb `sizer` to `size` through its public methods.
+
+    Each round hands off `TRIAL_HANDOFFS` pages of the current size a second apart, so
+    a size's rate is the size itself and every doubling doubles it. A `size` above the
+    ceiling, off the doubling path, or still out of reach after `_CLIMB_ROUNDS` rounds
+    fails here instead of looping.
+    """
+    assert size <= sizer.ceiling, f"{size} is above the sizer's ceiling, {sizer.ceiling}"
+    rounds = 0
+    while sizer.size < size:
+        assert rounds < _CLIMB_ROUNDS, f"the climb to {size} stalled at {sizer.size}"
+        for _ in range(TRIAL_HANDOFFS):
+            sizer.handed_off(sizer.size, 1.0, trial=sizer.trial, concurrency=1)
+        rounds += 1
+    assert sizer.size == size, f"the climb passed {size} and stopped at {sizer.size}"
+
+
+def ticking(start: float = 1_000.0) -> Callable[[], float]:
+    """A clock that reads one second later each time it is read, starting at `start`."""
+    ticks = itertools.count(start, 1.0)
+    return lambda: next(ticks)
+
+
+def gauge_readings(reader: InMemoryMetricReader, name: str) -> list[tuple[float, dict[str, str]]]:
+    """Every point of the gauge `name` the reader collects, as (value, labels)."""
+    data = reader.get_metrics_data()
+    points = [
+        point
+        for resource in (data.resource_metrics if data else ())
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+        if metric.name == name
+        for point in metric.data.data_points
+    ]
+    readings: list[tuple[float, dict[str, str]]] = []
+    for point in points:
+        assert isinstance(point, NumberDataPoint), f"each {name} point is a gauge reading"
+        attributes = {str(key): str(value) for key, value in dict(point.attributes or {}).items()}
+        readings.append((point.value, attributes))
+    return readings
+
+
+def page_sizes(reader: InMemoryMetricReader) -> list[tuple[float, dict[str, str]]]:
+    """Every `usher.source.listing.page_size` point the reader collects, as (value, labels)."""
+    return gauge_readings(reader, "usher.source.listing.page_size")
 
 
 class EmbyHarness(SourceHarness):

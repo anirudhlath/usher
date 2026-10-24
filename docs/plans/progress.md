@@ -148,6 +148,22 @@ heading false. Slices 2–4 get plans of their own and rows here.
 spec and is not a milestone, so a row under any heading above would make that
 heading false. `tests/unit/test_docs_currency.py` reads it into the same union.
 
+## Adaptive page size (from docs/specs/2026-10-19-adaptive-page-size-design.md)
+| Task | What it delivers | Plan file | Status |
+|---|---|---|---|
+| 1 | `PageSizer`: listing pages climb while a doubling is 10% faster, settle a step back, re-probe after 100 pages and halve on an outage; its gauge and INFO lines | docs/plans/2026-10-19-adaptive-page-size.md | 🔨 in review (PR #108) |
+| 2 | The paging window judges each page short against the size it was asked at | docs/plans/2026-10-19-adaptive-page-size.md | 🔨 in review (PR #108) |
+| 3 | The Emby adapter pages every listing at the sizer's size, timing clean hand-offs and halving on a listing outage | docs/plans/2026-10-19-adaptive-page-size.md | 🔨 in review (PR #108) |
+| 4 | Walks whose page size changes commit every item and resume at their committed offset | docs/plans/2026-10-19-adaptive-page-size.md | 🔨 in review (PR #108) |
+| 5 | `USHER_SOURCE_PAGE_SIZE_MAX` reaches production, and `USHER_SOURCE_PAGE_SIZE` is capped at 50,000 | docs/plans/2026-10-19-adaptive-page-size.md | 🔨 in review (PR #108) |
+| 6 | Dashboard 3 draws each source's listing page size | docs/plans/2026-10-19-adaptive-page-size.md | 🔨 in review (PR #108) |
+| 7 | Status rows: this plan in review | docs/plans/2026-10-19-adaptive-page-size.md | 🔨 in review (PR #108) |
+| 8 | Live acceptance: a timed full walk against 1,772 s, with the size's trace, its INFO lines and peak memory — owner-gated | docs/plans/2026-10-19-adaptive-page-size.md | 📋 planned |
+
+**A ninth table, for the eighth's reason.** Adaptive page size has its own spec
+and is not a milestone, so a row under any heading above would make that
+heading false. `tests/unit/test_docs_currency.py` reads it into the same union.
+
 ## M1 task groups → plan line ranges
 Plan file: `docs/plans/2026-07-28-m1-foundation.md` (2470 lines)
 

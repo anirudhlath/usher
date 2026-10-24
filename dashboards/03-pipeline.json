@@ -1,7 +1,7 @@
 {
   "uid": "usher-pipeline",
   "title": "Usher \u2014 3 Pipeline",
-  "description": "Twelve panels, mixed by design: Prometheus for rates and depths, Postgres for the queue's and the reconciler's own breakdowns. Two of these panels read a series whose label is not the one a reader of the title assumes \u2014 the queue-depth pair is two panels because usher.jobs.queued is labelled kind and a priority band exists only in the jobs table, and the enrichment panel splits on outcome because the demand/background split does not exist on that histogram at all.",
+  "description": "Thirteen panels, mixed by design: Prometheus for rates and depths, Postgres for the queue's and the reconciler's own breakdowns. Two of these panels read a series whose label is not the one a reader of the title assumes \u2014 the queue-depth pair is two panels because usher.jobs.queued is labelled kind and a priority band exists only in the jobs table, and the enrichment panel splits on outcome because the demand/background split does not exist on that histogram at all.",
   "tags": [
     "usher",
     "pipeline"
@@ -674,14 +674,14 @@
       "id": 11,
       "type": "timeseries",
       "title": "Whole-library walks \u2014 listing limit and mean unit duration",
-      "description": "usher.source.listing.concurrency, as usher_source_listing_concurrency_ratio, labelled source: the cap the listing limiter holds now. It reads USHER_SYNC_WALKERS while pages succeed, drops to 1 on an outage or a 429, and climbs back a step for every ten pages in a row that succeed, so a sawtooth is the backoff working. A line held at 1 means pages keep needing another try, or USHER_SYNC_WALKERS is 1.\n\nusher.sync.unit.duration, as usher_sync_unit_duration_seconds, labelled source and stage: the seconds from a walker's claim of a unit to that unit's last commit, recorded once for each unit that completes. A unit that fails records nothing. **It is plotted as a mean, not a quantile**: the histogram declares no bucket boundaries, so it has the SDK's second-scale defaults, and a quantile over those is not a measurement.\n\n\u26a0\ufe0f **Both series exist only in a process that has walked a source.** The gauge is first written by a listing page and the histogram by a unit's completion, so a quiet server shows no series rather than a zero.",
+      "description": "usher.source.listing.concurrency, as usher_source_listing_concurrency_ratio, labelled source: the cap the listing limiter holds now. It reads USHER_SYNC_WALKERS while pages succeed, drops to 1 on an outage or a 429, and climbs back a step for every ten pages in a row that succeed, so a sawtooth is the backoff working. A line held at 1 means pages keep needing another try, or USHER_SYNC_WALKERS is 1.\n\nusher.sync.unit.duration, as usher_sync_unit_duration_seconds, labelled source and stage: the seconds from a walker's claim of a unit to that unit's last commit, recorded once for each unit that completes. A unit that fails records nothing. **It is plotted as a mean, not a quantile**: the histogram declares no bucket boundaries, so it has the SDK's second-scale defaults, and a quantile over those is not a measurement.\n\n\u26a0\ufe0f **The duration series needs a walk, but the limit's needs only a listing page.** The histogram is first written by a unit's completion and the gauge by any listing page, and a push removal sends one when it asks the source about an item, so the limit can draw with no walk. A quiet server shows no series rather than a zero. The limit's line also ends shortly after listing stops, since only listing writes the gauge and the SDK clears it after each collection.",
       "datasource": {
         "type": "prometheus",
         "uid": "usher-prometheus"
       },
       "gridPos": {
         "h": 8,
-        "w": 24,
+        "w": 12,
         "x": 0,
         "y": 32
       },
@@ -809,6 +809,63 @@
           },
           "expr": "sum by (path, outcome) (usher_sync_retraction_checks_total)",
           "legendFormat": "{{path}} \u00b7 {{outcome}}",
+          "range": true,
+          "instant": false
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Listing page size, by source",
+      "description": "usher.source.listing.page_size, as usher_source_listing_page_size_ratio, labelled source: the items that source's adapter asks for in its next listing request. It starts at USHER_SOURCE_PAGE_SIZE and moves up to USHER_SOURCE_PAGE_SIZE_MAX, doubling while a doubling hands the writer at least 10% more items a second per walker, and settles a step back after the first doubling that does not. A listing page that fails as unreachable halves it, never below USHER_SOURCE_PAGE_SIZE, and settles it there, and a 429 leaves it alone. A size settled below USHER_SOURCE_PAGE_SIZE_MAX tries the next doubling again after 100 more pages. **A line pinned at USHER_SOURCE_PAGE_SIZE_MAX usually means fetching is still the bottleneck**, unless the two settings are equal, which turns adaptation off and holds the line flat.\n\n\u26a0\ufe0f **The line ends shortly after listing stops.** The gauge is written only as a listing page arrives, and the SDK clears it after each collection, so a server that is not listing shows no series rather than a zero.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "usher-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 32
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "showPoints": "auto"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "editorMode": "code",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "usher-prometheus"
+          },
+          "expr": "max by (source) (usher_source_listing_page_size_ratio)",
+          "legendFormat": "{{source}} \u00b7 page size",
           "range": true,
           "instant": false
         }

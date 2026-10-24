@@ -422,8 +422,9 @@ async def test_a_large_event_defers_to_a_delta_instead_of_a_request_per_item(
     """Emby emits `LibraryChanged` during a library scan and it can name thousands.
 
     A request per changed item on a lane budgeted at one connection per source
-    is not slow, it is a design defect -- and a delta walk is one paged request
-    per `USHER_SOURCE_PAGE_SIZE` items under `MinDateLastSaved`.
+    is not slow, it is a design defect -- and a delta walk under `MinDateLastSaved`
+    is one request per listing page, each asking for at least
+    `USHER_SOURCE_PAGE_SIZE` items.
     """
     many = tuple(f"item-{index}" for index in range(60))
     outcome = await fixture.apply(SourceEvent(kind=SourceEventKind.ITEM_ADDED, external_ids=many))
