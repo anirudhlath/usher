@@ -18,7 +18,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from pydantic import AwareDatetime, SecretStr
 
-from tests.fakes.emby_harness import instant_sleep
+from tests.fakes.emby_harness import climb, instant_sleep, ticking
 from tests.fakes.emby_server import FakeEmbyServer
 from tests.fakes.episode_repository import FakeEpisodeRepository
 from tests.fakes.event_publisher import FakeEventPublisher
@@ -2347,6 +2347,141 @@ async def test_an_emby_unit_resumes_judged_by_the_checkpoint_its_walk_stored() -
             logger.remove(handle)
     finally:
         await emby.aclose()
+    assert (second.id, second.status) == (first.id, SyncRunStatus.COMPLETED)
+    assert [line.rstrip("\n") for line in lines] == [
+        "Living Room Emby's listing moved past the overlap before StartIndex=150; "
+        "reading again from StartIndex=50"
+    ]
+    missing = [
+        f"m{index:03d}"
+        for index in range(80, 300)
+        if await fixture.media_items.get_by_external_id(fixture.source.id, f"m{index:03d}") is None
+    ]
+    assert missing == []
+
+
+def _films_server() -> FakeEmbyServer:
+    """Three hundred films a second apart in the view `films`, as the checkpoint case seeds them."""
+    server = FakeEmbyServer()
+    server.add_view("films", "Films")
+    for index in range(300):
+        film = _item(f"m{index:03d}", added_at=T0 + timedelta(seconds=index))
+        server.add_item(film, T0)
+        server.place(film.external_id, "films")
+    return server
+
+
+def _recorded_emby(
+    source: Source,
+    server: FakeEmbyServer,
+    *,
+    page_size: int,
+    page_size_max: int | None = None,
+    clock: Callable[[], float],
+) -> tuple[EmbyAdapter, list[httpx.Request]]:
+    """An adapter over `server` that takes its retry waits at once, and every request it sends.
+
+    Left out, `page_size_max` is the adapter's own default, a ceiling of `page_size`.
+    """
+    seen: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return server.handle(request)
+
+    emby = EmbyAdapter(
+        source,
+        SourceCredentials(username=server.username, password=SecretStr(server.password)),
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handle), base_url=source.base_url),
+        page_size=page_size,
+        page_size_max=page_size_max,
+        sleep=instant_sleep,
+        clock=clock,
+    )
+    return emby, seen
+
+
+def _limits(seen: Sequence[httpx.Request]) -> set[int]:
+    """Each `Limit` of 2 or more an `/Items` request asked for; counts ask 0, boundary reads 1."""
+    asked = (
+        int(request.url.params["Limit"]) for request in seen if request.url.path.endswith("/Items")
+    )
+    return {limit for limit in asked if limit >= 2}
+
+
+async def test_a_whole_library_walk_whose_pages_grow_commits_every_item() -> None:
+    """Pages of 2 grow to the ceiling of 16 within one unit, and every film is committed.
+
+    A full page of 16 brings at least 8 new items, more than a batch of 4, and is
+    committed whole. The clock moves a second a read, so each doubling doubles the rate.
+    """
+    fixture = _Fixture(batch_size=4, walkers=1)
+    server = _films_server()
+    emby, seen = _recorded_emby(
+        fixture.source, server, page_size=2, page_size_max=16, clock=ticking()
+    )
+    try:
+        run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, emby)
+    finally:
+        await emby.aclose()
+    limits = _limits(seen)
+    missing = [
+        f"m{index:03d}"
+        for index in range(300)
+        if await fixture.media_items.get_by_external_id(fixture.source.id, f"m{index:03d}") is None
+    ]
+    assert run.status is SyncRunStatus.COMPLETED
+    assert {2, 16} <= limits, "the premise: the pages grew to the ceiling mid-unit"
+    assert missing == []
+
+
+async def test_a_walk_killed_mid_unit_resumes_at_its_committed_offset_under_another_page_size() -> (
+    None
+):
+    """The checkpoint case above, killed in pages of 100 and resumed in pages of 200.
+
+    Each attempt has its own adapter. Both clocks stand still, so the sizer times nothing
+    and neither size moves: the first adapter's floor is 100, which its failure cannot
+    halve, and the second is climbed to its ceiling of 200 before it walks.
+    """
+    fixture = _Fixture(batch_size=100, walkers=1)
+    server = _films_server()
+    first_emby, first_seen = _recorded_emby(
+        fixture.source, server, page_size=100, page_size_max=400, clock=lambda: 1_000.0
+    )
+    created = T0 + timedelta(seconds=199) - datetime(1970, 1, 1, tzinfo=UTC)
+    try:
+        server.fail_after = 200
+        first = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, first_emby)
+        assert first.status is SyncRunStatus.FAILED, "the premise: the first attempt failed"
+        (films,) = [
+            u for u in await fixture.runs.units_for(first.id) if u.unit_key == "titles:films"
+        ]
+    finally:
+        await first_emby.aclose()
+    for index in range(80):
+        server.remove_item(f"m{index:03d}")
+    server.fail_after = None
+    second_emby, second_seen = _recorded_emby(
+        fixture.source, server, page_size=50, page_size_max=200, clock=lambda: 1_000.0
+    )
+    climb(second_emby._sizer, 200)
+    lines: list[str] = []
+    try:
+        handle = logger.add(lines.append, level="WARNING", format="{message}")
+        try:
+            second = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, second_emby)
+        finally:
+            logger.remove(handle)
+    finally:
+        await second_emby.aclose()
+    first_limits, second_limits = _limits(first_seen), _limits(second_seen)
+    assert (first_limits, second_limits) == ({100}, {200}), "the premise: two page sizes"
+    assert (films.position, films.checkpoint, films.status) == (
+        150,
+        str(created // timedelta(microseconds=1)),
+        SyncRunUnitStatus.FAILED,
+    )
     assert (second.id, second.status) == (first.id, SyncRunStatus.COMPLETED)
     assert [line.rstrip("\n") for line in lines] == [
         "Living Room Emby's listing moved past the overlap before StartIndex=150; "
