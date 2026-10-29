@@ -917,18 +917,51 @@ def test_targets_and_status_cannot_disagree() -> None:
 
 
 @pytest.mark.parametrize(
-    ("series", "episode", "expected"),
+    ("series", "year", "episode", "expected"),
     [
-        pytest.param("The Office", "The Dundies", "The Office - S02E01 - The Dundies", id="whole"),
-        pytest.param("The Office", None, "The Office - S02E01", id="no_episode_name"),
-        pytest.param(None, "The Dundies", "S02E01 - The Dundies", id="no_series"),
-        pytest.param("Face/Off", "A/B", "Face\u2215Off - S02E01 - A\u2215B", id="slashes"),
+        pytest.param(
+            "The Office",
+            2005,
+            "The Dundies",
+            "The Office (2005) - S02E01 - The Dundies",
+            id="whole",
+        ),
+        pytest.param(
+            "The Office", None, "The Dundies", "The Office - S02E01 - The Dundies", id="no_year"
+        ),
+        pytest.param("The Office", 2005, None, "The Office (2005) - S02E01", id="no_episode_name"),
+        pytest.param(None, None, "The Dundies", "S02E01 - The Dundies", id="no_series"),
+        pytest.param(
+            "Example (2005)",
+            2005,
+            "Pilot",
+            "Example (2005) - S02E01 - Pilot",
+            id="year_already_named",
+        ),
+        pytest.param(
+            "Face/Off", 1997, "A/B", "Face\u2215Off (1997) - S02E01 - A\u2215B", id="slashes"
+        ),
     ],
 )
-def test_an_episode_is_named_by_its_series_number_and_name(
-    series: str | None, episode: str | None, expected: str
+def test_an_episode_is_named_by_its_series_year_number_and_name(
+    series: str | None, year: int | None, episode: str | None, expected: str
 ) -> None:
-    title = Title(kind=TitleKind.SERIES, name=series, sort_name=series) if series else None
+    """The series' year is what tells Infuse's own matcher which of two same-named shows it is.
+
+    No id tag, though the series carries both: Infuse reads one only for a movie.
+    """
+    title = (
+        Title(
+            kind=TitleKind.SERIES,
+            name=series,
+            sort_name=series,
+            year=year,
+            tmdb_id=90002316,
+            imdb_id="tt99000002",
+        )
+        if series
+        else None
+    )
     one = Episode(
         title_id=uuid.uuid4(),
         season_id=uuid.uuid4(),
@@ -939,6 +972,66 @@ def test_an_episode_is_named_by_its_series_number_and_name(
     assert episode_name(title, one) == expected
 
 
-def test_a_title_is_named_by_its_name_with_no_slash() -> None:
-    title = Title(kind=TitleKind.MOVIE, name="Face/Off", sort_name="Face/Off")
-    assert title_name(title) == "Face\u2215Off"
+@pytest.mark.parametrize(
+    ("name", "year", "tmdb_id", "imdb_id", "expected"),
+    [
+        pytest.param(
+            "Spider-Man",
+            2002,
+            90000557,
+            "tt99000001",
+            "Spider-Man (2002) {tmdb-90000557}",
+            id="whole",
+        ),
+        pytest.param(
+            "Example", 2010, None, "tt99000003", "Example (2010) {imdb-tt99000003}", id="imdb_only"
+        ),
+        pytest.param("Example", 2010, None, None, "Example (2010)", id="no_id"),
+        pytest.param("Example", None, 90000557, None, "Example {tmdb-90000557}", id="no_year"),
+        pytest.param(
+            "Example (2010)",
+            2010,
+            90000557,
+            None,
+            "Example (2010) {tmdb-90000557}",
+            id="year_already_named",
+        ),
+        pytest.param(
+            "Example (1999)",
+            2010,
+            90000557,
+            None,
+            "Example (1999) (2010) {tmdb-90000557}",
+            id="another_year_named",
+        ),
+        pytest.param(
+            "Face/Off", 1997, 90000754, None, "Face\u2215Off (1997) {tmdb-90000754}", id="slash"
+        ),
+    ],
+)
+def test_a_movie_is_named_by_its_name_year_and_id_tag(
+    name: str, year: int | None, tmdb_id: int | None, imdb_id: str | None, expected: str
+) -> None:
+    """`{tmdb-N}` is what Infuse's matcher cannot mistake for another film of that name and year."""
+    title = Title(
+        kind=TitleKind.MOVIE,
+        name=name,
+        sort_name=name,
+        year=year,
+        tmdb_id=tmdb_id,
+        imdb_id=imdb_id,
+    )
+    assert title_name(title) == expected
+
+
+def test_a_series_played_as_a_title_carries_no_id_tag() -> None:
+    """Infuse would read a series' TMDb id as a movie's, and match whichever film has it."""
+    title = Title(
+        kind=TitleKind.SERIES,
+        name="The Office",
+        sort_name="The Office",
+        year=2005,
+        tmdb_id=90002316,
+        imdb_id="tt99000002",
+    )
+    assert title_name(title) == "The Office (2005)"

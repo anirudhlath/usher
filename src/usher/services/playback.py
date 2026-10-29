@@ -10,6 +10,7 @@ from loguru import logger
 from opentelemetry import trace
 from opentelemetry.trace import Span
 
+from usher.domain.enums import TitleKind
 from usher.domain.episode import Episode
 from usher.domain.source import MediaItem, Source
 from usher.domain.title import Title
@@ -43,15 +44,31 @@ _UNREACHABLE = "could not reach the source holding this item"
 _SLASH_STAND_IN = "\u2215"
 
 
+def _with_year(title: Title) -> str:
+    """`Name (Year)`, the form Infuse's own metadata matcher tells same-named titles apart by."""
+    if title.year is None or title.name.endswith(f"({title.year})"):
+        return title.name
+    return f"{title.name} ({title.year})"
+
+
 def title_name(title: Title) -> str:
-    """The name a ticket URL carries for a title, as its last path segment."""
-    return title.name.replace("/", _SLASH_STAND_IN)
+    """The name a ticket URL carries for a title, as its last path segment.
+
+    A movie's `{tmdb-N}` or `{imdb-tt…}` tag is an exact match where the name and year
+    are not. A series gets none: Infuse would read its id as a movie's.
+    """
+    name = _with_year(title)
+    if title.kind is TitleKind.MOVIE and title.tmdb_id is not None:
+        name = f"{name} {{tmdb-{title.tmdb_id}}}"
+    elif title.kind is TitleKind.MOVIE and title.imdb_id is not None:
+        name = f"{name} {{imdb-{title.imdb_id}}}"
+    return name.replace("/", _SLASH_STAND_IN)
 
 
 def episode_name(series: Title | None, episode: Episode) -> str:
-    """`Series - S01E03 - Episode`, dropping whichever part the catalog lacks."""
+    """`Series (Year) - S01E03 - Episode`, dropping whichever part the catalog lacks."""
     number = f"S{episode.season_number:02d}E{episode.episode_number:02d}"
-    parts = [series.name if series else None, number, episode.name]
+    parts = [_with_year(series) if series else None, number, episode.name]
     return " - ".join(part for part in parts if part).replace("/", _SLASH_STAND_IN)
 
 

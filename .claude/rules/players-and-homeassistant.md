@@ -98,6 +98,13 @@ uv run python scripts/capture_ha_shape.py --listen 30 \
   not change on the wake, so the send cannot wait on it.
 - **Infuse opens a handed-over link with no prompt and no press**, which is why
   its recipe is hands-free.
+- **Infuse looks up its own metadata from the link's last segment**, and that
+  match is what its swipe-down panel and HA's `media_title` show. A bare name
+  takes the newest film or show of that name; `(Year)` fixes a different-year
+  clash, and only a movie's `{tmdb-N}`/`{imdb-tt…}` fixes a same-year one.
+- **For an episode Infuse ignores `{tmdb-}` and `{imdb-}`, and `{tvdb-}` stops it
+  matching at all**, so a series sharing its name and year with another has no
+  fix. Every tag shows in Infuse's on-screen title, extension or not.
 
 ## Fixtures and fakes
 

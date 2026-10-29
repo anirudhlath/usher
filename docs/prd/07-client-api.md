@@ -513,10 +513,12 @@ the real source URL, with `Cache-Control: no-store`. An expired or forged
 ticket is a `404` — one answer for both, deliberately.
 
 **A ticket URL ends with the item's name**, `GET /stream/{ticket}/{name}`, so a
-player that names a stream by its URL shows the title rather than the ticket:
-the title's name, or `Series - S01E03 - Episode` for an episode, dropping a part
-the catalog lacks, with any `/` written as `∕`. The name is never read, and the
-same ticket redeems without it.
+player that names a stream by its URL shows the title rather than the ticket,
+and a player that matches its own metadata by that name finds the right one:
+`Name (Year) {tmdb-N}` for a movie (`{imdb-tt…}` when it has no TMDb id),
+`Series (Year) - S01E03 - Episode` for an episode, dropping a part the catalog
+lacks, with any `/` written as `∕`. A series carries no id tag. The name is
+never read, and the same ticket redeems without it.
 
 **`source` is per target, not per response.** A household with two copies of
 one film has two sources and one list of targets ranked across both.

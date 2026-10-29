@@ -78,6 +78,10 @@ Versioning is `0.x` while the wire contract may still move —
 - A playback ticket URL ends with the item's name, `GET /stream/{ticket}/{name}`
   — the title, or `Series - S01E03 - Episode` — so Infuse shows the title
   rather than the ticket. `GET /stream/{ticket}` still redeems.
+- That name carries the year, and a movie's TMDb or IMDb id as `{tmdb-N}` —
+  `Name (Year) {tmdb-N}`, `Series (Year) - S01E03 - Episode` — because Infuse
+  matches its own metadata by it, and a bare name took the newest film or show
+  of that name.
 - The Infuse recipe is hands-free: a send at the TV opened and played with no
   prompt and no press, so `/ways` ranks Infuse's best copy first.
 

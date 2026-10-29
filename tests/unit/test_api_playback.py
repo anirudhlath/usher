@@ -132,8 +132,15 @@ class _Household:
         self.credentials = FakeCredentialStore()
         self.factory = _ScriptedFactory()
 
-    async def add_title(self, name: str = "Example Movie") -> uuid.UUID:
-        title = Title(kind=TitleKind.MOVIE, name=name, sort_name=name)
+    async def add_title(
+        self,
+        name: str = "Example Movie",
+        *,
+        kind: TitleKind = TitleKind.MOVIE,
+        year: int | None = None,
+        tmdb_id: int | None = None,
+    ) -> uuid.UUID:
+        title = Title(kind=kind, name=name, sort_name=name, year=year, tmdb_id=tmdb_id)
         await self.titles.add(title)
         return title.id
 
@@ -793,24 +800,38 @@ async def _minted_url_for(
 
 
 @pytest.mark.parametrize(
-    ("name", "segment"),
+    ("name", "year", "tmdb_id", "segment"),
     [
-        pytest.param("Spider-Man", "Spider-Man", id="plain"),
+        pytest.param("Spider-Man", None, None, "Spider-Man", id="plain"),
+        pytest.param(
+            "Spider-Man",
+            2002,
+            90000557,
+            "Spider-Man%20%282002%29%20%7Btmdb-90000557%7D",
+            id="year_and_id",
+        ),
         pytest.param(
             "Face/Off? #1 at 100% Amélie",
+            None,
+            None,
             quote("Face\u2215Off? #1 at 100% Amélie", safe=""),
             id="every_character_a_path_segment_cannot_carry_raw",
         ),
     ],
 )
 async def test_a_title_s_ticket_url_ends_with_its_name_and_still_redeems(
-    client: httpx.AsyncClient, household: _Household, name: str, segment: str
+    client: httpx.AsyncClient,
+    household: _Household,
+    name: str,
+    year: int | None,
+    tmdb_id: int | None,
+    segment: str,
 ) -> None:
     """A player that names a stream by its last segment -- Infuse does -- shows the title.
 
     A slash would split the segment, so the name carries U+2215 in its place.
     """
-    title_id = await household.add_title(name)
+    title_id = await household.add_title(name, year=year, tmdb_id=tmdb_id)
     source = await household.add_source("Living Room Emby")
     await household.add_copy(source, title_id=title_id)
     minted = await _minted_url_for(client, household, f"/titles/{title_id}/play", source)
@@ -820,19 +841,31 @@ async def test_a_title_s_ticket_url_ends_with_its_name_and_still_redeems(
 
 
 @pytest.mark.parametrize(
-    ("episode_name", "segment"),
+    ("year", "episode_name", "segment"),
     [
-        pytest.param("The Dundies", "Example%20Show%20-%20S01E03%20-%20The%20Dundies", id="named"),
-        pytest.param(None, "Example%20Show%20-%20S01E03", id="unnamed"),
+        pytest.param(
+            None, "The Dundies", "Example%20Show%20-%20S01E03%20-%20The%20Dundies", id="named"
+        ),
+        pytest.param(None, None, "Example%20Show%20-%20S01E03", id="unnamed"),
+        pytest.param(
+            2005,
+            "The Dundies",
+            "Example%20Show%20%282005%29%20-%20S01E03%20-%20The%20Dundies",
+            id="series_year",
+        ),
     ],
 )
 async def test_an_episode_s_ticket_url_ends_with_its_series_number_and_name(
     client: httpx.AsyncClient,
     household: _Household,
+    year: int | None,
     episode_name: str | None,
     segment: str,
 ) -> None:
-    title_id = await household.add_title("Example Show")
+    """The series' own year, from the series the episode belongs to, and no id tag."""
+    title_id = await household.add_title(
+        "Example Show", kind=TitleKind.SERIES, year=year, tmdb_id=90002316
+    )
     episode_id = await household.add_episode(title_id, episode_name)
     source = await household.add_source("Living Room Emby")
     await household.add_copy(source, title_id=title_id, episode_id=episode_id)
