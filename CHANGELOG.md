@@ -75,6 +75,12 @@ Versioning is `0.x` while the wire contract may still move —
 
 ### Changed
 
+- A playback ticket URL ends with the item's name, `GET /stream/{ticket}/{name}`
+  — the title, or `Series - S01E03 - Episode` — so Infuse shows the title
+  rather than the ticket. `GET /stream/{ticket}` still redeems.
+- The Infuse recipe is hands-free: a send at the TV opened and played with no
+  prompt and no press, so `/ways` ranks Infuse's best copy first.
+
 - **`USHER_SOURCE_PAGE_SIZE` is capped at 50,000, up from 1,000.** It is now
   the size listing pages start at and the smallest they adapt down to; its
   default stays 1,000. Startup refuses a `USHER_SOURCE_PAGE_SIZE_MAX` below it,

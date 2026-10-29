@@ -89,6 +89,12 @@ _NOT_A_PROBLEM_DOCUMENT: Final[tuple[tuple[str, str, str | None, str], ...]] = (
         "never proxies the bytes it points at.",
     ),
     (
+        "/stream/{ticket}/{name}",
+        "302",
+        None,
+        "The same redirect, under the item's name: the name is never read.",
+    ),
+    (
         "/images/{image_id}",
         "304",
         None,
@@ -545,6 +551,13 @@ def test_every_problem_response_is_declared_at_the_problem_media_type(
     [
         pytest.param("/browse?cursor=not-a-cursor", "/browse", "400", "invalid_cursor", id="400"),
         pytest.param("/stream/not-a-ticket", "/stream/{ticket}", "404", "ticket_invalid", id="404"),
+        pytest.param(
+            "/stream/not-a-ticket/Spider-Man",
+            "/stream/{ticket}/{name}",
+            "404",
+            "ticket_invalid",
+            id="404_named",
+        ),
         pytest.param(
             "/seasons/not-a-uuid/episodes",
             "/seasons/{season_id}/episodes",

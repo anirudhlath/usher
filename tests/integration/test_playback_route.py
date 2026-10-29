@@ -447,7 +447,7 @@ async def test_the_ticket_path_segment_needs_no_further_encoding(
     would be testing nothing.
     """
     minted = (await client.post(f"/titles/{seeded.movie_id}/play")).json()["targets"][0]["url"]
-    segment = minted.rsplit("/", 1)[-1]
-    assert segment, "the premise: the minted URL ends in a ticket segment"
+    segment, name = minted.split("/stream/", 1)[1].split("/")
+    assert segment and name, "the premise: the minted URL ends in a ticket and a name"
     assert quote(segment, safe="=") == segment, segment
     assert (await client.get(f"/stream/{segment}")).status_code == 302

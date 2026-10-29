@@ -113,7 +113,7 @@ async def test_screens_answer_the_projection_with_home_assistant_s_reading(
         "apple_tv.infuse",
         "apple_tv.airplay",
     ]
-    assert [recipe["hands_free"] for recipe in device["recipes"]] == [False, True]
+    assert [recipe["hands_free"] for recipe in device["recipes"]] == [True, True]
     assert {recipe["proven"] for recipe in device["recipes"]} == {False}
     assert device["state"]["app_name"] == "Example Player"
     assert device["state"]["media_position_seconds"] == 489.0

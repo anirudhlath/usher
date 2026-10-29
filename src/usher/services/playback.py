@@ -10,7 +10,9 @@ from loguru import logger
 from opentelemetry import trace
 from opentelemetry.trace import Span
 
+from usher.domain.episode import Episode
 from usher.domain.source import MediaItem, Source
+from usher.domain.title import Title
 from usher.ports.credentials import CredentialStore
 from usher.ports.errors import UsherPortError
 from usher.ports.repository import MediaItemRepository, SourceRepository
@@ -26,6 +28,8 @@ __all__ = [
     "PlaybackService",
     "PlaybackStatus",
     "PlaybackTarget",
+    "episode_name",
+    "title_name",
 ]
 
 _tracer = trace.get_tracer("usher.playback")
@@ -34,6 +38,21 @@ _tracer = trace.get_tracer("usher.playback")
 # The names are appended; nothing derived from the upstream's own message
 # ever is. See the module docstring.
 _UNREACHABLE = "could not reach the source holding this item"
+
+# A slash would split the ticket URL's last segment, which a player shows as the name.
+_SLASH_STAND_IN = "\u2215"
+
+
+def title_name(title: Title) -> str:
+    """The name a ticket URL carries for a title, as its last path segment."""
+    return title.name.replace("/", _SLASH_STAND_IN)
+
+
+def episode_name(series: Title | None, episode: Episode) -> str:
+    """`Series - S01E03 - Episode`, dropping whichever part the catalog lacks."""
+    number = f"S{episode.season_number:02d}E{episode.episode_number:02d}"
+    parts = [series.name if series else None, number, episode.name]
+    return " - ".join(part for part in parts if part).replace("/", _SLASH_STAND_IN)
 
 
 class PlaybackStatus(StrEnum):
@@ -105,7 +124,7 @@ class PlaybackService:
         sources: SourceRepository,
         credentials: CredentialStore,
         adapters: SourceAdapterFactory,
-        mint: Callable[[str], str],
+        mint: Callable[[str, str], str],
     ) -> None:
         self._media_items = media_items
         self._sources = sources
@@ -113,14 +132,14 @@ class PlaybackService:
         self._adapters = adapters
         self._mint = mint
 
-    async def for_title(self, title_id: uuid.UUID) -> PlaybackResolution:
-        """Ranked targets for a title, across every source that holds it."""
+    async def for_title(self, title_id: uuid.UUID, *, name: str) -> PlaybackResolution:
+        """Ranked targets for a title, across every source that holds it, minted under `name`."""
         with _tracer.start_as_current_span("playback.resolve") as span:
             span.set_attribute("usher.title_id", str(title_id))
             copies = await self._media_items.list_for_title(title_id)
-            return await self._resolve(copies, span)
+            return await self._resolve(copies, span, name)
 
-    async def for_episode(self, episode_id: uuid.UUID) -> PlaybackResolution:
+    async def for_episode(self, episode_id: uuid.UUID, *, name: str) -> PlaybackResolution:
         """Ranked targets for one episode.
 
         `list_for_episode`, not `list_for_title`: that read carries
@@ -131,9 +150,11 @@ class PlaybackService:
         with _tracer.start_as_current_span("playback.resolve") as span:
             span.set_attribute("usher.episode_id", str(episode_id))
             copies = await self._media_items.list_for_episode(episode_id)
-            return await self._resolve(copies, span)
+            return await self._resolve(copies, span, name)
 
-    async def _resolve(self, copies: Sequence[MediaItem], span: Span) -> PlaybackResolution:
+    async def _resolve(
+        self, copies: Sequence[MediaItem], span: Span, name: str
+    ) -> PlaybackResolution:
         """Ask every copy's source, in the order the repository ranked them.
 
         One batched read of the source list rather than one `get` per copy --
@@ -166,7 +187,7 @@ class PlaybackService:
                 continue
             served.extend((source, target) for target in targets)
 
-        resolved = self._with_tickets(served)
+        resolved = self._with_tickets(served, name)
         # Every served target becomes exactly one resolved target unless it
         # was dropped, so the difference *is* the drop count -- no second
         # tally to fall out of step with the loop that does the dropping.
@@ -235,7 +256,9 @@ class PlaybackService:
             )
             return None
 
-    def _with_tickets(self, served: Sequence[tuple[Source, StreamTarget]]) -> list[PlaybackTarget]:
+    def _with_tickets(
+        self, served: Sequence[tuple[Source, StreamTarget]], name: str
+    ) -> list[PlaybackTarget]:
         """Substitute a ticket for every URL.
 
         Two passes, and that is what makes the pairing order-independent. Every
@@ -247,7 +270,7 @@ class PlaybackService:
         minted: dict[str, str] = {}
         for _, target in served:
             if target.kind is StreamTargetKind.DIRECT and target.url not in minted:
-                minted[target.url] = self._mint(target.url)
+                minted[target.url] = self._mint(target.url, name)
         resolved: list[PlaybackTarget] = []
         for source, target in served:
             if target.kind is StreamTargetKind.DIRECT:

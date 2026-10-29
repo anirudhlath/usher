@@ -80,9 +80,8 @@ RECIPES: Final[tuple[Recipe, ...]] = (
             audio_codecs=None,
             max_height=2160,
         ),
-        # tvOS asks "Open Infuse?" on every handover; spike 1 decides whether a
-        # `select` can answer it.
-        hands_free=False,
+        # Spike 1 at the TV: Infuse opened and played with no prompt and no press.
+        hands_free=True,
         proven=False,
     ),
     Recipe(

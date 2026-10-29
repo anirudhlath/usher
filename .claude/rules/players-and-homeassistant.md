@@ -91,6 +91,14 @@ uv run python scripts/capture_ha_shape.py --listen 30 \
 - **An error names HA's code, never HA's message**, and the token travels only
   in the `auth` frame.
 
+## At the TV
+
+- **A sleeping Apple TV refuses `play_media`**: HA's call fails with pyatv's
+  `Open URL failed`. Wake it with `media_player.turn_on` first; HA's state does
+  not change on the wake, so the send cannot wait on it.
+- **Infuse opens a handed-over link with no prompt and no press**, which is why
+  its recipe is hands-free.
+
 ## Fixtures and fakes
 
 - **`tests/fixtures/homeassistant/shape.json` holds key paths and type names,

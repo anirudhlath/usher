@@ -55,9 +55,9 @@ def test_every_recipe_is_assumed_until_proven_at_the_tv() -> None:
     assert [recipe.key for recipe in RECIPES if recipe.proven] == []
 
 
-def test_infuse_needs_a_press_until_spike_one_says_otherwise() -> None:
+def test_infuse_needs_no_press_as_spike_one_found_at_the_tv() -> None:
     hands_free = {recipe.key: recipe.hands_free for recipe in RECIPES}
-    assert hands_free == {"apple_tv.infuse": False, "apple_tv.airplay": True, "cast.shield": True}
+    assert hands_free == {"apple_tv.infuse": True, "apple_tv.airplay": True, "cast.shield": True}
 
 
 def test_each_recipe_names_its_own_app_and_handover() -> None:
