@@ -830,9 +830,15 @@ def get_playback_service(
 ) -> PlaybackService:
     """`PlaybackService`, with the mint closure this request's URL implies."""
 
-    def mint_ticket_url(url: str) -> str:
+    def mint_ticket_url(url: str, name: str) -> str:
         ticket = mint(cipher, url, minted_at=datetime.now(UTC))
-        return str(request.url_for("redeem_playback_ticket", ticket=quote(ticket, safe="=")))
+        return str(
+            request.url_for(
+                "redeem_named_playback_ticket",
+                ticket=quote(ticket, safe="="),
+                name=quote(name, safe=""),
+            )
+        )
 
     return PlaybackService(media_items, sources, credentials, adapters, mint_ticket_url)
 

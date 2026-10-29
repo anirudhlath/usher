@@ -377,6 +377,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/stream/{ticket}/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Redeem a playback ticket into a redirect, under the item's name
+         * @description `GET /stream/{ticket}`, minted with the item's name as the last segment.
+         *
+         *     A player that names a stream by its URL -- Infuse does -- shows the title rather
+         *     than the ticket. `name` is never read: the ticket alone decides the answer.
+         */
+        get: operations["redeem_named_playback_ticket_stream__ticket___name__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/rows/regenerate": {
         parameters: {
             query?: never;
@@ -3001,6 +3024,45 @@ export interface operations {
             header?: never;
             path: {
                 ticket: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Redirect to the real source URL. `Cache-Control: no-store`; Usher never proxies the bytes. */
+            302: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The ticket is expired or forged -- deliberately one answer for both. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description The request was rejected. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    redeem_named_playback_ticket_stream__ticket___name__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                ticket: string;
+                name: string;
             };
             cookie?: never;
         };

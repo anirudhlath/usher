@@ -20,13 +20,21 @@ from usher.api.deps import (
 from usher.api.dto.playback import PlayResponse
 from usher.api.dto.problem import ProblemCode, ProblemResponse
 from usher.api.errors import ProblemException
-from usher.services.playback import PlaybackResolution, PlaybackStatus
+from usher.services.playback import (
+    PlaybackResolution,
+    PlaybackStatus,
+    episode_name,
+    title_name,
+)
 from usher.services.playback_ticket import redeem
 
 router = APIRouter(tags=["playback"])
 
-#: The name `api/deps.py` builds the ticket URL with, through `request.url_for`.
+#: The redeem route without the item's name, still honoured.
 REDEEM_ROUTE_NAME: Final = "redeem_playback_ticket"
+
+#: The name `api/deps.py` builds the ticket URL with, through `request.url_for`.
+NAMED_REDEEM_ROUTE_NAME: Final = "redeem_named_playback_ticket"
 
 #: How long a minted ticket is honoured, in seconds.
 TICKET_TTL_SECONDS: Final = 300
@@ -95,7 +103,8 @@ async def play_title(
     **`?search_id=` reports PRD 10's `played`**, which is the one fact
     `search_queries` exists to answer and the one no other route can.
     """
-    if await titles.get(title_id) is None:
+    title = await titles.get(title_id)
+    if title is None:
         # Generic `not_found`: RFC 9457's `instance` already carries
         # `/titles/{id}/play`, so `title_not_found` would be a second spelling of
         # what the document says. One 404 convention, not two.
@@ -104,7 +113,7 @@ async def play_title(
             code=ProblemCode.NOT_FOUND,
             detail="title not found",
         )
-    answer = _answer(await playback.for_title(title_id))
+    answer = _answer(await playback.for_title(title_id, name=title_name(title)))
     await _record_play(queries, search_id, user_id=user_id)
     return answer
 
@@ -118,6 +127,7 @@ async def play_title(
 async def play_episode(
     episode_id: uuid.UUID,
     episodes: EpisodeRepositoryDep,
+    titles: TitleRepositoryDep,
     playback: PlaybackServiceDep,
     user_id: DefaultUserIdDep,
     queries: SearchQueryRepositoryDep,
@@ -134,15 +144,33 @@ async def play_episode(
     still records `played` here: PRD 10 asks whether the search led to
     anything, and it did.
     """
-    if not await episodes.list_by_ids([episode_id]):
+    episode = (await episodes.list_by_ids([episode_id])).get(episode_id)
+    if episode is None:
         raise ProblemException(
             status_code=status.HTTP_404_NOT_FOUND,
             code=ProblemCode.NOT_FOUND,
             detail="episode not found",
         )
-    answer = _answer(await playback.for_episode(episode_id))
+    name = episode_name(await titles.get(episode.title_id), episode)
+    answer = _answer(await playback.for_episode(episode_id, name=name))
     await _record_play(queries, search_id, user_id=user_id)
     return answer
+
+
+_REDEEM_RESPONSES: Final[dict[int | str, dict[str, Any]]] = {
+    302: {
+        "description": (
+            "Redirect to the real source URL. `Cache-Control: no-store`; Usher never "
+            "proxies the bytes."
+        ),
+        "content": None,
+    },
+    404: {
+        "model": ProblemResponse,
+        "description": ("The ticket is expired or forged -- deliberately one answer for both."),
+    },
+    422: {"model": ProblemResponse, "description": "The request was rejected."},
+}
 
 
 @router.get(
@@ -150,20 +178,7 @@ async def play_episode(
     name=REDEEM_ROUTE_NAME,
     status_code=status.HTTP_302_FOUND,
     response_class=RedirectResponse,
-    responses={
-        302: {
-            "description": (
-                "Redirect to the real source URL. `Cache-Control: no-store`; Usher never "
-                "proxies the bytes."
-            ),
-            "content": None,
-        },
-        404: {
-            "model": ProblemResponse,
-            "description": ("The ticket is expired or forged -- deliberately one answer for both."),
-        },
-        422: {"model": ProblemResponse, "description": "The request was rejected."},
-    },
+    responses=_REDEEM_RESPONSES,
     summary="Redeem a playback ticket into a redirect",
 )
 async def redeem_playback_ticket(ticket: str, cipher: TicketCipherDep) -> RedirectResponse:
@@ -193,6 +208,26 @@ async def redeem_playback_ticket(ticket: str, cipher: TicketCipherDep) -> Redire
         status_code=status.HTTP_302_FOUND,
         headers={"Cache-Control": "no-store"},
     )
+
+
+@router.get(
+    "/stream/{ticket}/{name}",
+    name=NAMED_REDEEM_ROUTE_NAME,
+    status_code=status.HTTP_302_FOUND,
+    response_class=RedirectResponse,
+    responses=_REDEEM_RESPONSES,
+    summary="Redeem a playback ticket into a redirect, under the item's name",
+)
+async def redeem_named_playback_ticket(
+    ticket: str, name: str, cipher: TicketCipherDep
+) -> RedirectResponse:
+    """`GET /stream/{ticket}`, minted with the item's name as the last segment.
+
+    A player that names a stream by its URL -- Infuse does -- shows the title rather
+    than the ticket. `name` is never read: the ticket alone decides the answer.
+    """
+    del name
+    return await redeem_playback_ticket(ticket, cipher)
 
 
 async def _record_play(

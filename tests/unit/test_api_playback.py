@@ -132,14 +132,16 @@ class _Household:
         self.credentials = FakeCredentialStore()
         self.factory = _ScriptedFactory()
 
-    async def add_title(self) -> uuid.UUID:
-        title = Title(kind=TitleKind.MOVIE, name="Example Movie", sort_name="Example Movie")
+    async def add_title(self, name: str = "Example Movie") -> uuid.UUID:
+        title = Title(kind=TitleKind.MOVIE, name=name, sort_name=name)
         await self.titles.add(title)
         return title.id
 
-    async def add_episode(self, title_id: uuid.UUID) -> uuid.UUID:
+    async def add_episode(self, title_id: uuid.UUID, name: str | None = None) -> uuid.UUID:
         season = Season(title_id=title_id, season_number=1)
-        episode = Episode(title_id=title_id, season_id=season.id, season_number=1, episode_number=3)
+        episode = Episode(
+            title_id=title_id, season_id=season.id, season_number=1, episode_number=3, name=name
+        )
         await self.episodes.upsert_seasons([season])
         await self.episodes.upsert_episodes([episode])
         return episode.id
@@ -774,7 +776,70 @@ async def test_the_minted_url_is_the_redeem_routes_own_path(
     request time rather than at import.
     """
     minted = await _minted_direct_url(client, household)
-    assert re.fullmatch(r"http://test/stream/[A-Za-z0-9\-_=]+", minted), minted
+    assert re.fullmatch(r"http://test/stream/[A-Za-z0-9\-_=]+/Example%20Movie", minted), minted
+
+
+async def _minted_url_for(
+    client: httpx.AsyncClient, household: _Household, play: str, source: Source
+) -> str:
+    household.factory.script(source, targets=_emby_shaped_targets(DIRECT_URL))
+    response = await client.post(play)
+    assert response.status_code == 200, response.text
+    targets = response.json()["targets"]
+    assert [target["kind"] for target in targets] == ["direct", "deep_link"], "the premise"
+    assert targets[1]["url"] == wrap_deep_link(targets[0]["url"]), "the link wraps the same URL"
+    url: str = targets[0]["url"]
+    return url
+
+
+@pytest.mark.parametrize(
+    ("name", "segment"),
+    [
+        pytest.param("Spider-Man", "Spider-Man", id="plain"),
+        pytest.param(
+            "Face/Off? #1 at 100% Amélie",
+            quote("Face\u2215Off? #1 at 100% Amélie", safe=""),
+            id="every_character_a_path_segment_cannot_carry_raw",
+        ),
+    ],
+)
+async def test_a_title_s_ticket_url_ends_with_its_name_and_still_redeems(
+    client: httpx.AsyncClient, household: _Household, name: str, segment: str
+) -> None:
+    """A player that names a stream by its last segment -- Infuse does -- shows the title.
+
+    A slash would split the segment, so the name carries U+2215 in its place.
+    """
+    title_id = await household.add_title(name)
+    source = await household.add_source("Living Room Emby")
+    await household.add_copy(source, title_id=title_id)
+    minted = await _minted_url_for(client, household, f"/titles/{title_id}/play", source)
+    assert minted.rsplit("/", 1)[1] == segment
+    response = await client.get(minted)
+    assert (response.status_code, response.headers["location"]) == (302, DIRECT_URL)
+
+
+@pytest.mark.parametrize(
+    ("episode_name", "segment"),
+    [
+        pytest.param("The Dundies", "Example%20Show%20-%20S01E03%20-%20The%20Dundies", id="named"),
+        pytest.param(None, "Example%20Show%20-%20S01E03", id="unnamed"),
+    ],
+)
+async def test_an_episode_s_ticket_url_ends_with_its_series_number_and_name(
+    client: httpx.AsyncClient,
+    household: _Household,
+    episode_name: str | None,
+    segment: str,
+) -> None:
+    title_id = await household.add_title("Example Show")
+    episode_id = await household.add_episode(title_id, episode_name)
+    source = await household.add_source("Living Room Emby")
+    await household.add_copy(source, title_id=title_id, episode_id=episode_id)
+    minted = await _minted_url_for(client, household, f"/episodes/{episode_id}/play", source)
+    assert minted.rsplit("/", 1)[1] == segment
+    response = await client.get(minted)
+    assert (response.status_code, response.headers["location"]) == (302, DIRECT_URL)
 
 
 async def test_following_a_ticket_is_a_302_to_the_real_url_with_no_store(

@@ -17,7 +17,7 @@ Usher's HTTP API is enough to build a full media browser. The web console in
 |---|---|
 | **Screens** | `GET /home`, `GET /search`, `GET /search/suggest`, `GET /browse` |
 | **Resources** | `GET /titles/{id}`, `GET /titles/{id}/similar`, `GET /series/{id}/seasons`, `GET /seasons/{id}/episodes`, `GET /episodes/{id}`, `GET /people/{id}`, `GET /collections/{id}`, `GET /images/{id}` |
-| **Actions** | `POST /titles/{id}/play`, `POST /episodes/{id}/play`, `GET /stream/{ticket}`, `PUT /watch/titles/{id}`, `PUT /watch/episodes/{id}`, `POST` and `DELETE /watch/titles/{id}/played` |
+| **Actions** | `POST /titles/{id}/play`, `POST /episodes/{id}/play`, `GET /stream/{ticket}` and `GET /stream/{ticket}/{name}`, `PUT /watch/titles/{id}`, `PUT /watch/episodes/{id}`, `POST` and `DELETE /watch/titles/{id}/played` |
 | **Admin** | `POST` and `GET /admin/sources`, `GET /admin/sources/{id}/status`, `DELETE /admin/sources/{id}`, `POST /admin/sources/{id}/sync`, `GET /admin/unmatched`, `POST /admin/unmatched/{id}/resolve`, `GET /admin/bootstrap/status`, `POST /admin/bootstrap/{phase}`, `GET /admin/rows/providers`, `PUT /admin/rows/providers/{slug}`, `POST /admin/rows/regenerate` |
 | **Meta** | `GET /health`, `GET /health/ready`, `GET /meta/attribution`, `GET /events`, `GET /openapi.json` |
 

@@ -37,6 +37,9 @@ SOURCE = uuid.UUID("00000000-0000-4000-8000-0000000000aa")
 TITLE = uuid.UUID("00000000-0000-4000-8000-0000000000bb")
 VARIANTS = uuid.UUID("00000000-0000-4000-8000-0000000000cc")
 RECIPE = {recipe.key: recipe for recipe in RECIPES}
+# No shipped recipe needs a press since spike 1, so the ranking's press tier is
+# pinned against a Living Room whose Infuse is put back to needing one.
+PRESS_FIRST = (replace(RECIPE["apple_tv.infuse"], hands_free=False), RECIPE["apple_tv.airplay"])
 # Names whose codepoint, casefolded and reading orders all disagree, listed in none of them.
 _READ_APART = ("Pantry", "Écran", "office")
 # Audio as (codec, channels), best first; every pair in a row scores alike.
@@ -153,9 +156,19 @@ def _shield_in_the_bedroom(recipes: tuple[Recipe, ...] = RECIPES) -> tuple[Scree
     return project(house, recipes).screens
 
 
-def _living_room() -> Screen:
-    screen = project(this_house()).screen(LIVING_ROOM)
+def _living_room(recipes: tuple[Recipe, ...] = RECIPES) -> Screen:
+    screen = project(this_house(), recipes).screen(LIVING_ROOM)
     assert screen is not None
+    return screen
+
+
+def _pressing_living_room() -> Screen:
+    screen = _living_room(PRESS_FIRST)
+    [device] = screen.devices
+    assert [(r.key, r.hands_free) for r in device.recipes] == [
+        ("apple_tv.infuse", False),
+        ("apple_tv.airplay", True),
+    ], "the premise: Infuse needs a press"
     return screen
 
 
@@ -441,9 +454,8 @@ def test_a_way_whose_copy_names_no_container_gives_up_no_container() -> None:
 
 
 def test_hands_free_ways_rank_above_ways_that_need_a_press_whatever_their_quality() -> None:
-    assert not RECIPE["apple_tv.infuse"].hands_free, "the premise: Infuse needs a press"
     assert quality_of(DV_MKV).score > quality_of(HDR10_MP4).score, "the premise"
-    ways = rank((_living_room(),), (DV_MKV, HDR10_MP4))
+    ways = rank((_pressing_living_room(),), (DV_MKV, HDR10_MP4))
     assert [(way.recipe.key, way.file.external_id, way.playable) for way in ways] == [
         ("apple_tv.airplay", "hdr10-mp4", True),
         ("apple_tv.infuse", "dv-mkv", True),
@@ -452,9 +464,20 @@ def test_hands_free_ways_rank_above_ways_that_need_a_press_whatever_their_qualit
     ]
 
 
-def test_best_is_the_first_playable_way_and_the_rest_say_what_they_give_up() -> None:
-    assert not RECIPE["apple_tv.infuse"].hands_free, "the premise: Infuse needs a press"
+def test_with_infuse_needing_no_press_the_best_copy_is_the_living_room_s_best() -> None:
+    assert quality_of(DV_MKV).score > quality_of(HDR10_MP4).score, "the premise"
     ways = rank((_living_room(),), (DV_MKV, HDR10_MP4))
+    assert [(way.recipe.key, way.file.external_id, way.playable, way.best) for way in ways] == [
+        ("apple_tv.infuse", "dv-mkv", True, True),
+        ("apple_tv.airplay", "hdr10-mp4", True, False),
+        ("apple_tv.infuse", "hdr10-mp4", True, False),
+        ("apple_tv.airplay", "dv-mkv", False, False),
+    ]
+    assert [way for way in ways if "NEEDS A PRESS" in way.gives_up] == []
+
+
+def test_best_is_the_first_playable_way_and_the_rest_say_what_they_give_up() -> None:
+    ways = rank((_pressing_living_room(),), (DV_MKV, HDR10_MP4))
     assert [way.best for way in ways] == [True, False, False, False]
     assert [way.gives_up for way in ways] == [
         (),
@@ -620,8 +643,7 @@ def test_a_container_loss_names_the_family_of_the_best_copy() -> None:
 
 
 def test_against_a_best_that_needs_a_press_no_way_gives_the_press_up() -> None:
-    assert not RECIPE["apple_tv.infuse"].hands_free, "the premise: Infuse needs a press"
-    ways = rank((_living_room(),), (HD_MKV, DV_MKV))
+    ways = rank((_pressing_living_room(),), (HD_MKV, DV_MKV))
     assert [(way.recipe.key, way.file.external_id, way.best) for way in ways] == [
         ("apple_tv.infuse", "dv-mkv", True),
         ("apple_tv.infuse", "hd-mkv", False),
@@ -637,8 +659,7 @@ def test_against_a_best_that_needs_a_press_no_way_gives_the_press_up() -> None:
 
 
 def test_each_way_carries_its_own_id_and_whether_its_facts_are_known() -> None:
-    assert not RECIPE["apple_tv.infuse"].hands_free, "the premise: Infuse needs a press"
-    ways = rank((_living_room(),), (H264_BARE, HDR10_MP4))
+    ways = rank((_pressing_living_room(),), (H264_BARE, HDR10_MP4))
     assert [(way.recipe.key, way.file.external_id) for way in ways] == [
         ("apple_tv.airplay", "hdr10-mp4"),
         ("apple_tv.airplay", "h264-bare"),

@@ -16,9 +16,11 @@ from tests.fakes.credential_store import FakeCredentialStore
 from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.source_adapter import FakeSourceAdapter
 from tests.fakes.source_repository import FakeSourceRepository
-from usher.domain.enums import HdrFormat, SourceKind
+from usher.domain.enums import HdrFormat, SourceKind, TitleKind
+from usher.domain.episode import Episode
 from usher.domain.ids import new_id
 from usher.domain.source import Source
+from usher.domain.title import Title
 from usher.ports.credentials import SourceCredentials
 from usher.ports.errors import PortDataMalformed, PortUnavailable
 from usher.ports.ingest import MediaItemUpsert
@@ -35,6 +37,8 @@ from usher.services.playback import (
     PlaybackService,
     PlaybackStatus,
     PlaybackTarget,
+    episode_name,
+    title_name,
 )
 
 CREDENTIALS = SourceCredentials(username="usher", password=SecretStr("correct-horse-battery"))
@@ -45,6 +49,7 @@ CREDENTIALS = SourceCredentials(username="usher", password=SecretStr("correct-ho
 TOKEN = "tok-Zq7"
 DIRECT_URL = f"https://e/a.mkv?api_key={TOKEN}"
 SECOND_URL = f"https://f/b.mkv?api_key={TOKEN}"
+NAME = "Example Movie"
 
 T0 = datetime(2026, 8, 10, 12, 0, tzinfo=UTC)
 LATER = T0 + timedelta(hours=1)
@@ -73,9 +78,11 @@ class RecordingMint:
 
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.names: list[str] = []
 
-    def __call__(self, url: str) -> str:
+    def __call__(self, url: str, name: str) -> str:
         self.calls.append(url)
+        self.names.append(name)
         return f"tkt{len(self.calls)}a"
 
 
@@ -287,7 +294,7 @@ async def test_a_deep_link_carries_the_ticket_and_never_the_source_url() -> None
     await household.add_copy(source, external_id="e1")
     household.factory.script(source, targets=_emby_shaped_targets(DIRECT_URL))
 
-    resolution = await household.service().for_title(household.title_id)
+    resolution = await household.service().for_title(household.title_id, name=NAME)
 
     assert resolution.status is PlaybackStatus.PLAYABLE
     assert [entry.target.kind for entry in resolution.targets] == [
@@ -317,7 +324,7 @@ async def test_the_direct_target_keeps_every_fact_a_client_chooses_on() -> None:
     await household.add_copy(source, external_id="e1")
     household.factory.script(source, targets=_emby_shaped_targets(DIRECT_URL))
 
-    resolution = await household.service().for_title(household.title_id)
+    resolution = await household.service().for_title(household.title_id, name=NAME)
 
     direct = resolution.targets[0].target
     assert direct.container == "mkv"
@@ -344,9 +351,10 @@ async def test_one_ticket_is_minted_per_distinct_source_url() -> None:
     await household.add_copy(source, external_id="e1")
     household.factory.script(source, targets=_emby_shaped_targets(DIRECT_URL))
 
-    await household.service().for_title(household.title_id)
+    await household.service().for_title(household.title_id, name=NAME)
 
     assert household.mint.calls == [DIRECT_URL]
+    assert household.mint.names == [NAME], "every ticket is minted under the item's name"
 
 
 async def test_a_deep_link_is_paired_by_containment_and_not_by_position() -> None:
@@ -364,7 +372,7 @@ async def test_a_deep_link_is_paired_by_containment_and_not_by_position() -> Non
     )
     household.factory.script(source, targets=[deep_for_second, first, second])
 
-    resolution = await household.service().for_title(household.title_id)
+    resolution = await household.service().for_title(household.title_id, name=NAME)
 
     # Premise: the two directs got different tickets, so "carries the right
     # one" is a distinguishable claim.
@@ -401,7 +409,7 @@ async def test_a_deep_link_that_wraps_no_visible_direct_url_is_dropped() -> None
     first, second = _emby_shaped_targets(DIRECT_URL)[0], _emby_shaped_targets(SECOND_URL)[0]
     household.factory.script(source, targets=[orphan, first, second])
 
-    resolution = await household.service().for_title(household.title_id)
+    resolution = await household.service().for_title(household.title_id, name=NAME)
 
     assert [entry.target.kind for entry in resolution.targets] == [
         StreamTargetKind.DIRECT,
@@ -427,7 +435,7 @@ async def test_a_deep_link_is_paired_across_the_source_that_produced_it() -> Non
     household.factory.script(first, targets=_emby_shaped_targets(DIRECT_URL))
     household.factory.script(second, targets=_emby_shaped_targets(SECOND_URL))
 
-    resolution = await household.service().for_title(household.title_id)
+    resolution = await household.service().for_title(household.title_id, name=NAME)
 
     per_source: dict[str, list[StreamTarget]] = {
         entry.source_name: [] for entry in resolution.targets
@@ -467,7 +475,7 @@ async def test_a_prefix_of_another_copys_url_does_not_steal_its_deep_link() -> N
         ],
     )
 
-    resolution = await household.service().for_title(household.title_id)
+    resolution = await household.service().for_title(household.title_id, name=NAME)
 
     directs = [
         entry.target for entry in resolution.targets if entry.target.kind is StreamTargetKind.DIRECT
@@ -499,7 +507,7 @@ async def test_a_second_source_serves_when_the_first_raises() -> None:
     household.factory.script(down, error=PortUnavailable(f"GET /Items failed: {TOKEN}"))
     household.factory.script(up, targets=_emby_shaped_targets(SECOND_URL))
 
-    resolution = await household.service().for_title(household.title_id)
+    resolution = await household.service().for_title(household.title_id, name=NAME)
 
     assert resolution.status is PlaybackStatus.PLAYABLE
     assert {entry.source_name for entry in resolution.targets} == {"Living Room Emby"}
@@ -523,7 +531,7 @@ async def test_every_source_raising_is_unavailable_rather_than_an_empty_list() -
     household.factory.script(first, error=PortUnavailable("connect timed out"))
     household.factory.script(second, error=PortUnavailable("connect timed out"))
 
-    resolution = await household.service().for_title(household.title_id)
+    resolution = await household.service().for_title(household.title_id, name=NAME)
 
     assert resolution.status is PlaybackStatus.UNAVAILABLE
     assert resolution.targets == ()
@@ -542,7 +550,7 @@ async def test_a_source_answering_with_no_targets_is_not_playable() -> None:
     await household.add_copy(source, external_id="e1")
     household.factory.script(source, targets=[])
 
-    resolution = await household.service().for_title(household.title_id)
+    resolution = await household.service().for_title(household.title_id, name=NAME)
 
     assert resolution.status is PlaybackStatus.NOT_PLAYABLE
     assert resolution.targets == ()
@@ -561,7 +569,7 @@ async def test_a_household_holding_no_copy_at_all_is_not_playable() -> None:
     household = _Household()
     await household.add_source("Living Room Emby")
 
-    resolution = await household.service().for_title(household.title_id)
+    resolution = await household.service().for_title(household.title_id, name=NAME)
 
     assert resolution.status is PlaybackStatus.NOT_PLAYABLE
     assert household.factory.built == []
@@ -582,7 +590,7 @@ async def test_a_failure_beside_an_empty_answer_is_unavailable() -> None:
     household.factory.script(empty, targets=[])
     household.factory.script(down, error=PortUnavailable("connect timed out"))
 
-    resolution = await household.service().for_title(household.title_id)
+    resolution = await household.service().for_title(household.title_id, name=NAME)
 
     assert resolution.status is PlaybackStatus.UNAVAILABLE
     assert resolution.detail is not None
@@ -605,7 +613,7 @@ async def test_a_malformed_payload_from_one_copy_does_not_abort_the_others() -> 
     household.factory.script(malformed, error=PortDataMalformed("MediaSources was not a list"))
     household.factory.script(up, targets=_emby_shaped_targets(SECOND_URL))
 
-    resolution = await household.service().for_title(household.title_id)
+    resolution = await household.service().for_title(household.title_id, name=NAME)
 
     assert resolution.status is PlaybackStatus.PLAYABLE
     assert {entry.source_name for entry in resolution.targets} == {"Living Room Emby"}
@@ -622,7 +630,7 @@ async def test_a_source_with_no_stored_credentials_is_unavailable() -> None:
     source = await household.add_source("Living Room Emby", with_credentials=False)
     await household.add_copy(source, external_id="e1")
 
-    resolution = await household.service().for_title(household.title_id)
+    resolution = await household.service().for_title(household.title_id, name=NAME)
 
     assert resolution.status is PlaybackStatus.UNAVAILABLE
     assert household.factory.built == []
@@ -638,7 +646,7 @@ async def test_a_credential_that_no_longer_decrypts_is_unavailable() -> None:
     source = await household.add_source("Living Room Emby")
     await household.add_copy(source, external_id="e1")
 
-    resolution = await household.service().for_title(household.title_id)
+    resolution = await household.service().for_title(household.title_id, name=NAME)
 
     assert resolution.status is PlaybackStatus.UNAVAILABLE
     assert household.factory.built == []
@@ -661,7 +669,7 @@ async def test_a_copy_whose_source_row_has_gone_is_skipped_not_failed() -> None:
     )
     await household.add_copy(ghost, external_id="e1")
 
-    resolution = await household.service().for_title(household.title_id)
+    resolution = await household.service().for_title(household.title_id, name=NAME)
 
     assert resolution.status is PlaybackStatus.NOT_PLAYABLE
     assert household.factory.built == []
@@ -684,7 +692,7 @@ async def test_the_unavailable_detail_names_the_source_and_not_the_exception() -
     await household.add_copy(source, external_id="e1")
     household.factory.script(source, error=PortUnavailable(f"GET {DIRECT_URL} failed"))
 
-    resolution = await household.service().for_title(household.title_id)
+    resolution = await household.service().for_title(household.title_id, name=NAME)
 
     assert resolution.status is PlaybackStatus.UNAVAILABLE
     assert resolution.detail is not None
@@ -707,7 +715,7 @@ async def test_the_detail_names_every_source_that_failed_once_each() -> None:
     household.factory.script(first, error=PortUnavailable("connect timed out"))
     household.factory.script(second, error=PortUnavailable("connect timed out"))
 
-    resolution = await household.service().for_title(household.title_id)
+    resolution = await household.service().for_title(household.title_id, name=NAME)
 
     assert resolution.detail is not None
     assert resolution.detail.count("Attic Emby") == 1
@@ -744,7 +752,7 @@ async def test_an_available_copy_is_offered_before_an_unavailable_one() -> None:
     assert copies[retracted.id].id < copies[live.id].id
     assert copies[retracted.id].last_seen_at > copies[live.id].last_seen_at
 
-    resolution = await household.service().for_title(household.title_id)
+    resolution = await household.service().for_title(household.title_id, name=NAME)
 
     assert [entry.source_name for entry in resolution.targets][:1] == ["Living Room Emby"]
     assert {entry.source_name for entry in resolution.targets} == {
@@ -768,7 +776,7 @@ async def test_a_household_holding_only_unavailable_copies_still_gets_targets() 
     copies = await household.media_items.list_for_title(household.title_id)
     assert [copy.available for copy in copies] == [False]
 
-    resolution = await household.service().for_title(household.title_id)
+    resolution = await household.service().for_title(household.title_id, name=NAME)
 
     assert resolution.status is PlaybackStatus.PLAYABLE
     assert len(resolution.targets) == 2
@@ -795,7 +803,7 @@ async def test_the_freshest_of_two_available_copies_is_offered_first() -> None:
     assert copies[stale.id].id < copies[fresh.id].id
     assert copies[stale.id].last_seen_at < copies[fresh.id].last_seen_at
 
-    resolution = await household.service().for_title(household.title_id)
+    resolution = await household.service().for_title(household.title_id, name=NAME)
 
     assert next(entry.source_name for entry in resolution.targets) == "Living Room Emby"
 
@@ -820,7 +828,7 @@ async def test_exactly_one_adapter_is_built_per_copy_and_every_one_is_closed() -
     household.factory.script(first, targets=_emby_shaped_targets(DIRECT_URL))
     household.factory.script(second, targets=_emby_shaped_targets(SECOND_URL))
 
-    await household.service().for_title(household.title_id)
+    await household.service().for_title(household.title_id, name=NAME)
 
     assert len(household.factory.built) == 3
     assert sorted(household.factory.closed) == sorted(household.factory.built)
@@ -841,7 +849,7 @@ async def test_an_adapter_whose_source_raised_is_closed_too() -> None:
     household.factory.script(down, error=PortUnavailable("connect timed out"))
     household.factory.script(up, targets=_emby_shaped_targets(SECOND_URL))
 
-    await household.service().for_title(household.title_id)
+    await household.service().for_title(household.title_id, name=NAME)
 
     assert household.factory.built == [down.id, up.id]
     assert sorted(household.factory.closed) == sorted([down.id, up.id])
@@ -866,7 +874,7 @@ async def test_an_episode_is_resolved_through_its_own_copies() -> None:
     # case cannot pass against an implementation that used it.
     assert await household.media_items.list_for_title(household.title_id) == []
 
-    resolution = await household.service().for_episode(household.episode_id)
+    resolution = await household.service().for_episode(household.episode_id, name=NAME)
 
     assert resolution.status is PlaybackStatus.PLAYABLE
     assert resolution.targets[0].target.url == "tkt1a"
@@ -877,7 +885,7 @@ async def test_an_episode_with_no_copy_is_not_playable() -> None:
     household = _Household()
     await household.add_source("Living Room Emby")
 
-    resolution = await household.service().for_episode(household.episode_id)
+    resolution = await household.service().for_episode(household.episode_id, name=NAME)
 
     assert resolution.status is PlaybackStatus.NOT_PLAYABLE
     assert household.factory.built == []
@@ -906,3 +914,31 @@ def test_targets_and_status_cannot_disagree() -> None:
             PlaybackResolution(status=status, targets=(one,))
     with pytest.raises(ValueError, match="targets"):
         PlaybackResolution(status=PlaybackStatus.PLAYABLE)
+
+
+@pytest.mark.parametrize(
+    ("series", "episode", "expected"),
+    [
+        pytest.param("The Office", "The Dundies", "The Office - S02E01 - The Dundies", id="whole"),
+        pytest.param("The Office", None, "The Office - S02E01", id="no_episode_name"),
+        pytest.param(None, "The Dundies", "S02E01 - The Dundies", id="no_series"),
+        pytest.param("Face/Off", "A/B", "Face\u2215Off - S02E01 - A\u2215B", id="slashes"),
+    ],
+)
+def test_an_episode_is_named_by_its_series_number_and_name(
+    series: str | None, episode: str | None, expected: str
+) -> None:
+    title = Title(kind=TitleKind.SERIES, name=series, sort_name=series) if series else None
+    one = Episode(
+        title_id=uuid.uuid4(),
+        season_id=uuid.uuid4(),
+        season_number=2,
+        episode_number=1,
+        name=episode,
+    )
+    assert episode_name(title, one) == expected
+
+
+def test_a_title_is_named_by_its_name_with_no_slash() -> None:
+    title = Title(kind=TitleKind.MOVIE, name="Face/Off", sort_name="Face/Off")
+    assert title_name(title) == "Face\u2215Off"

@@ -172,8 +172,10 @@ grep -rhn '^class .*BaseModel' src/usher/api/dto/ | grep -v 'Response\|Request'
   the scan. `*Request` models are excluded on purpose: they legitimately carry
   credentials (`SourceCreateRequest.password`).
 - **`request.url_for` substitutes path parameters raw**, so `api/deps.py`'s
-  `quote(ticket, safe="=")` is the only encoding step; `RedirectResponse`
-  re-quotes `Location` with `%` safe and `wrap_deep_link` encodes once.
+  `quote(ticket, safe="=")` and `quote(name, safe="")` are the only encoding
+  steps; `RedirectResponse` re-quotes `Location` with `%` safe and
+  `wrap_deep_link` encodes once. A `/` in the name is `∕` before quoting, so the
+  name stays one segment however a player decodes it.
 - **`TICKET_TTL_SECONDS: Final = 300` is a constant, not a setting.** Expired
   and forged both answer `404 ticket_invalid` (D1), and **mint and redeem share
   a process** — another `USHER_SECRET_KEY` looks exactly like a ticket bug.
