@@ -5,6 +5,10 @@
 **Slices:** two, each with its own plan and PR. Slice 1 makes every copy Usher
 holds describe and play its own file. Slice 2 finds the versions Usher has never
 held. Slice 2's plan is written after slice 1 passes acceptance.
+**Follow-up:** a self-healing mechanism that finds and fixes drift like this
+without an operator (the owner, 2026-10-30: "we need to have a self healing
+mechanism that proactively fixes issues like this"). It is its own design, and
+it decides when the pass runs by itself.
 
 ## What the owner asked for
 
@@ -153,6 +157,10 @@ builder check).
 - **The new order.** Copies are ordered available first, then by
   `domain.ways.quality_of(copy).score` descending, which is the device-free
   part of `/ways`' ranking, with today's order as the tiebreak.
+- **One definition of quality** (the owner's ruling, 2026-10-29: "reuse the
+  order for quality for play order and not duplicate it"). `/play` calls the
+  same `quality_of` that `/ways` ranks by, and never gets its own copy of the
+  order. If `/ways`' notion of quality changes, `/play`'s changes with it.
 
 **Watch progress stays shared** per film or episode (*my call*, which the owner
 accepted). Write-back still goes to every copy.
@@ -177,9 +185,10 @@ shape and the name are the builder's.
 
 **How it runs** (*my calls*):
 
-- **On an operator's command.** Nothing schedules it, as with the full walk. It
-  runs once after slice 2 deploys, and again whenever the operator wants it. The
-  CLI spelling (a `usher sync` kind or a subcommand) is the builder's.
+- **On an operator's command** (the owner's ruling, 2026-10-30: "Manual is fine
+  for now"). Nothing schedules it, as with the full walk. It runs once after
+  slice 2 deploys, and again whenever the operator wants it. The CLI spelling
+  (a `usher sync` kind or a subcommand) is the builder's.
 - **Resumably.** A deploy restarts the container and kills a job running in it.
   So the pass keeps its position, and the next pass of the same source continues
   from it rather than starting over.
@@ -302,7 +311,7 @@ PRD changes ride each slice's commits:
   ranking.
 - Watch progress kept separately per version.
 - A listing that ungroups versions; none exists.
-- Scheduling the pass.
+- Scheduling the pass. The self-healing design decides that.
 - Multi-part files (`PartCount` is always 1 here).
 - Emby's own version labels, such as a source's `Name`, shown to clients.
 
