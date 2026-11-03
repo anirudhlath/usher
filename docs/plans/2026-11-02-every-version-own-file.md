@@ -12,7 +12,7 @@
 
 **Tech Stack:** Python 3.13, httpx, SQLAlchemy async over asyncpg, PostgreSQL 17 (testcontainers), loguru, OpenTelemetry metrics, pytest with strict mypy over `tests/`.
 
-**Spec:** `docs/specs/2026-10-28-every-version-playable-design.md` (commits e79f70a5 and a9ffb360), **slice 1 only**. Read it before any task. It is a point-in-time record, so never edit it. Slice 2, the versions pass, gets its own plan after slice 1 passes acceptance.
+**Spec:** `docs/specs/2026-10-28-every-version-playable-design.md`, **slice 1 only**. Read it before any task. It is a point-in-time record, so never edit it. Slice 2, the versions pass, gets its own plan after slice 1 passes acceptance.
 
 ## Decisions this plan makes
 
@@ -708,10 +708,8 @@ git commit -m "playback: /play offers copies in /ways' quality order"
 - The fake's listings ignore `Fields`, so the confirmation's fields are pinned on the wire, not by the contract (Task 3).
 - `test_docs_currency.py` names each status table's heading, so a new table needs a constant there.
 - The spec does not say that item-level `RunTimeTicks`, `Width` and `Height` belong to the version read. Task 1's Step 1 checks it.
-- Not this plan's: `progress.md`'s adaptive-page-size rows still read "🔨 in review (PR #108)", though #108 has merged.
 
 ## Residuals
 
 - Slice 2, the versions pass, gets its own plan once this slice's live numbers are in.
 - Self-healing is the owner's later design.
-- The adaptive-page-size rows are not this plan's to correct.
