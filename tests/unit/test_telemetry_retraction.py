@@ -12,7 +12,7 @@ from opentelemetry.sdk.metrics.export import InMemoryMetricReader, NumberDataPoi
 from tests.fakes.source_adapter import FakeSourceAdapter
 from usher.domain.enums import SourceKind
 from usher.domain.source import Source
-from usher.ports.source import SourceItem, SourceItemKind
+from usher.ports.source import Confirmation, SourceItem, SourceItemKind
 from usher.services.retraction import confirmed_gone
 
 T0 = datetime(2026, 7, 1, tzinfo=UTC)
@@ -69,11 +69,22 @@ def _serving(*external_ids: str) -> FakeSourceAdapter:
     return adapter
 
 
-class _StrayAdapter(FakeSourceAdapter):
-    """Answers with an id nobody asked about, as a misbehaving source might."""
+_STRAY = SourceItem(external_id="stray-2", name="Movie stray-2", kind=SourceItemKind.MOVIE)
 
-    async def confirm_gone(self, external_ids: Collection[str]) -> frozenset[str]:
-        return await super().confirm_gone(external_ids) | {"stray-1"}
+
+class _StrayAdapter(FakeSourceAdapter):
+    """Answers with two ids nobody asked about, one gone and one served."""
+
+    async def confirm_gone(self, external_ids: Collection[str]) -> Confirmation:
+        answer = await super().confirm_gone(external_ids)
+        return Confirmation(gone=answer.gone | {"stray-1"}, served=(*answer.served, _STRAY))
+
+
+class _UnmodelledAdapter(FakeSourceAdapter):
+    """Lists every asked id and models none, as a source listing only seasons would."""
+
+    async def confirm_gone(self, external_ids: Collection[str]) -> Confirmation:
+        return Confirmation()
 
 
 @pytest.mark.parametrize("path", ["sweep", "push"])
@@ -81,10 +92,11 @@ async def test_each_asked_id_is_counted_once_by_path_and_outcome(
     meter_reader: InMemoryMetricReader, path: Literal["sweep", "push"]
 ) -> None:
     adapter = _serving("kept-1")
-    gone = await confirmed_gone(
+    answer = await confirmed_gone(
         adapter, ["kept-1", "gone-1", "gone-2"], source=SOURCE.name, path=path
     )
-    assert gone == {"gone-1", "gone-2"}
+    assert answer.gone == {"gone-1", "gone-2"}
+    assert [item.external_id for item in answer.served] == ["kept-1"]
     assert retraction_checks(meter_reader) == {
         (SOURCE.name, path, "gone"): 2.0,
         (SOURCE.name, path, "served"): 1.0,
@@ -95,9 +107,24 @@ async def test_an_id_nobody_asked_about_is_neither_returned_nor_counted(
     meter_reader: InMemoryMetricReader,
 ) -> None:
     """And an outcome with no id adds nothing: no `served` series at all, not a zero."""
-    gone = await confirmed_gone(_StrayAdapter(SOURCE), ["gone-1"], source=SOURCE.name, path="sweep")
-    assert gone == {"gone-1"}
+    adapter = _StrayAdapter(SOURCE)
+    premise = await adapter.confirm_gone(["gone-1"])
+    assert "stray-1" in premise.gone, "the premise: the source names a stray gone"
+    assert _STRAY in premise.served, "the premise: and serves a stray"
+    answer = await confirmed_gone(adapter, ["gone-1"], source=SOURCE.name, path="sweep")
+    assert answer == Confirmation(gone=frozenset({"gone-1"}))
     assert retraction_checks(meter_reader) == {(SOURCE.name, "sweep", "gone"): 1.0}
+
+
+async def test_an_id_listed_but_not_modelled_is_counted_as_served(
+    meter_reader: InMemoryMetricReader,
+) -> None:
+    """The source still serves it, though no item describes it."""
+    answer = await confirmed_gone(
+        _UnmodelledAdapter(SOURCE), ["season-1"], source=SOURCE.name, path="push"
+    )
+    assert answer == Confirmation()
+    assert retraction_checks(meter_reader) == {(SOURCE.name, "push", "served"): 1.0}
 
 
 async def test_an_empty_question_asks_nothing_and_counts_nothing(
@@ -107,6 +134,6 @@ async def test_an_empty_question_asks_nothing_and_counts_nothing(
     await premise.confirm_gone([])
     assert premise.confirm_calls == [frozenset()], "the premise: the fake records an empty question"
     adapter = _serving()
-    assert await confirmed_gone(adapter, [], source=SOURCE.name, path="push") == frozenset()
+    assert await confirmed_gone(adapter, [], source=SOURCE.name, path="push") == Confirmation()
     assert adapter.confirm_calls == []
     assert retraction_checks(meter_reader) == {}

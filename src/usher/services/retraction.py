@@ -5,7 +5,7 @@ from typing import Literal
 
 from opentelemetry import metrics
 
-from usher.ports.source import SourceAdapter
+from usher.ports.source import Confirmation, SourceAdapter
 
 _meter = metrics.get_meter("usher.retraction")
 _retraction_checks = _meter.create_counter(
@@ -21,18 +21,22 @@ async def confirmed_gone(
     *,
     source: str,
     path: Literal["sweep", "push"],
-) -> frozenset[str]:
-    """The ids among `external_ids` the source confirms gone, each counted by outcome.
+) -> Confirmation:
+    """The source's answer about `external_ids`, kept to those ids, each counted by outcome.
 
-    Only an asked id is returned or counted, whatever the adapter answers. An empty
-    question asks nothing and counts nothing, and an outcome with no id adds nothing.
-    `source` is the source's name, the label `usher.sync.run.duration` carries too.
+    Only an asked id is returned or counted, whatever the adapter answers, and `served`
+    keeps the adapter's order. An asked id that is not gone counts as served, described
+    or not. An empty question asks nothing and counts nothing, and an outcome with no id
+    adds nothing. `source` is the source's name, the label `usher.sync.run.duration`
+    carries too.
     """
     asked = frozenset(external_ids)
     if not asked:
-        return frozenset()
-    gone = asked & await adapter.confirm_gone(asked)
+        return Confirmation()
+    answer = await adapter.confirm_gone(asked)
+    gone = asked & answer.gone
+    served = tuple(item for item in answer.served if item.external_id in asked)
     for outcome, count in (("gone", len(gone)), ("served", len(asked) - len(gone))):
         if count:
             _retraction_checks.add(count, {"source": source, "path": path, "outcome": outcome})
-    return gone
+    return Confirmation(gone=gone, served=served)

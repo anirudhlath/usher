@@ -891,10 +891,11 @@ class ReconcileService:
             # `AvailabilitySweepRefused` is a `UsherPortError`, so it lands
             # in the same branch a transport failure does.
             raise
-        gone = await self._beating(
+        confirmation = await self._beating(
             progress,
             confirmed_gone(adapter, unseen.external_ids, source=source_name, path="sweep"),
         )
+        gone = confirmation.gone
         retraction = await self._media_items.retract(
             run.source_id, gone, unseen_since=run.started_at
         )

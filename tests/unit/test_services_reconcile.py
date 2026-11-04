@@ -49,7 +49,7 @@ from usher.domain.sync import (
 from usher.ports.credentials import SourceCredentials
 from usher.ports.errors import PortDataMalformed, PortUnavailable, UsherPortError
 from usher.ports.events import ClientEventKind
-from usher.ports.source import SourceItem, SourceItemKind, UnitPage, WalkPlan
+from usher.ports.source import Confirmation, SourceItem, SourceItemKind, UnitPage, WalkPlan
 from usher.services.ingest import IngestService
 from usher.services.matching import MatchService
 from usher.services.reconcile import (
@@ -530,7 +530,7 @@ async def test_a_row_read_since_the_walk_began_survives_a_gone_answer(fixture: _
     fixture.adapter.forget("m9")
     original = fixture.adapter.confirm_gone
 
-    async def _read_back_first(external_ids: Collection[str]) -> frozenset[str]:
+    async def _read_back_first(external_ids: Collection[str]) -> Confirmation:
         await fixture.ingest.ingest_batch(
             fixture.source.id, [_item("m9")], observed_at=datetime.now(UTC)
         )
@@ -554,7 +554,7 @@ async def test_the_heartbeat_beats_while_the_source_confirms_removals() -> None:
     asked, release = asyncio.Event(), asyncio.Event()
     original = fixture.adapter.confirm_gone
 
-    async def _held(external_ids: Collection[str]) -> frozenset[str]:
+    async def _held(external_ids: Collection[str]) -> Confirmation:
         asked.set()
         await release.wait()
         return await original(external_ids)

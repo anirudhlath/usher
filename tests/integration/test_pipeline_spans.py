@@ -27,6 +27,7 @@ from usher.domain.source import Source
 from usher.domain.sync import SyncRunKind
 from usher.ports.source import (
     WHOLE_LIBRARY,
+    Confirmation,
     SourceItem,
     SourceItemKind,
     UnitPage,
@@ -64,8 +65,9 @@ class _Adapter:
     ) -> AsyncGenerator[UnitPage]:
         return pages_of(self._walk(), start_index=start_index)
 
-    async def confirm_gone(self, external_ids: Collection[str]) -> frozenset[str]:
-        return frozenset(external_ids).difference(item.external_id for item in self._items)
+    async def confirm_gone(self, external_ids: Collection[str]) -> Confirmation:
+        asked = frozenset(external_ids)
+        return Confirmation(gone=asked.difference(item.external_id for item in self._items))
 
 
 def _movie(external_id: str) -> SourceItem:

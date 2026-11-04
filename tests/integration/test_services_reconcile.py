@@ -42,6 +42,7 @@ from usher.ports.errors import PortUnavailable
 from usher.ports.source import (
     DEFAULT_UNIT_KEY,
     WHOLE_LIBRARY,
+    Confirmation,
     SourceItem,
     SourceItemKind,
     UnitPage,
@@ -182,8 +183,12 @@ class _Adapter:
     async def plan_walk(self) -> WalkPlan:
         return WHOLE_LIBRARY
 
-    async def confirm_gone(self, external_ids: Collection[str]) -> frozenset[str]:
-        return frozenset(external_ids).difference(self.items)
+    async def confirm_gone(self, external_ids: Collection[str]) -> Confirmation:
+        asked = frozenset(external_ids)
+        return Confirmation(
+            gone=asked.difference(self.items),
+            served=tuple(self.items[one] for one in sorted(asked) if one in self.items),
+        )
 
     def list_unit(
         self, key: str, *, start_index: int = 0, checkpoint: str | None = None

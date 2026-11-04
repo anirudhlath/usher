@@ -3,6 +3,7 @@
 import asyncio
 import uuid
 from abc import ABC, abstractmethod
+from collections import Counter
 from collections.abc import AsyncGenerator, AsyncIterator, Collection
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field, fields
@@ -101,6 +102,27 @@ class SourceItem:
     # and never interpreted above the adapter boundary. Every typed field above
     # exists so that nothing above the adapter has to read this one.
     raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class Confirmation:
+    """A source's answer to which of the ids it was asked it no longer serves.
+
+    `confirm_gone` says what each field holds. An item served twice, or an id both gone
+    and served, is refused: a caller could not tell which answer was the source's.
+    """
+
+    gone: frozenset[str] = frozenset()
+    served: tuple[SourceItem, ...] = ()
+
+    def __post_init__(self) -> None:
+        counts = Counter(item.external_id for item in self.served)
+        twice = sorted(external_id for external_id, count in counts.items() if count > 1)
+        if twice:
+            raise ValueError(f"no item may be served twice: {twice}")
+        both = sorted(self.gone.intersection(counts))
+        if both:
+            raise ValueError(f"no id may be both gone and served: {both}")
 
 
 @dataclass(frozen=True)
@@ -381,13 +403,17 @@ class SourceAdapter(ABC):
         """
 
     @abstractmethod
-    async def confirm_gone(self, external_ids: Collection[str]) -> frozenset[str]:
-        """The subset of `external_ids` this source no longer serves.
+    async def confirm_gone(self, external_ids: Collection[str]) -> Confirmation:
+        """Which of `external_ids` this source no longer serves, and the ones it still does.
 
-        "Serves" means the account can read the item by its id. Never returns an id the
-        source still serves, and raises a `UsherPortError` when it cannot decide: a
-        partial answer is never returned as a whole one. Only asked ids come back, and an
-        empty input returns an empty set without a request.
+        `gone` is what the source no longer serves. `served` holds each asked id the source
+        listed and Usher models, described as a walk describes a listed item. An id that is
+        listed but not modelled is in neither.
+
+        "Serves" means the account can read the item by its id. `gone` never holds an id
+        the source still serves, and this raises a `UsherPortError` when it cannot decide:
+        a partial answer is never returned as a whole one. Only asked ids come back, and an
+        empty input returns `Confirmation()` without a request.
 
         Abstract on purpose: a default answering "none gone" would quietly switch
         retraction off for a new adapter, and one built on `get_item` would read an item

@@ -68,6 +68,7 @@ from usher.ports.errors import (
 )
 from usher.ports.source import (
     DEFAULT_UNIT_KEY,
+    Confirmation,
     SourceAdapter,
     SourceEvent,
     SourceItem,
@@ -928,49 +929,58 @@ class EmbyAdapter(SourceAdapter):
             span.set_attribute("usher.found", payload is not None)
             return None if payload is None else to_source_item(payload)
 
-    async def confirm_gone(self, external_ids: Collection[str]) -> frozenset[str]:
-        """The asked ids Emby no longer lists for this account, read by `Ids` in rounds.
+    async def confirm_gone(self, external_ids: Collection[str]) -> Confirmation:
+        """Which asked ids Emby no longer lists for this account, read by `Ids` in rounds.
 
         An `Ids` listing names one member of a version group per request, so an id a round
         does not list is asked again in the next. A round whose listings are all empty
         proves the rest gone: it would have listed a member of every group with one still
         served. Only an id that was asked for counts.
+
+        `served` describes each listed id as a walk describes its entry, in the order the
+        rounds first listed them. An id whose entry the mapper does not model is in neither.
         """
         with _tracer.start_as_current_span("source.confirm_gone") as span:
             remaining = set(external_ids)
             span.set_attribute("usher.source", self._source.name)
             span.set_attribute("usher.confirm.asked", len(remaining))
+            served: list[SourceItem] = []
             while remaining:
-                listed: set[str] = set()
+                listed: dict[str, SourceItem | None] = {}
                 for chunk in batched(sorted(remaining), IDS_PER_REQUEST, strict=False):
                     listed |= await self._listed_of(chunk)
                 if not listed:
                     break
-                remaining -= listed
+                remaining -= listed.keys()
+                served.extend(item for item in listed.values() if item is not None)
             span.set_attribute("usher.confirm.gone", len(remaining))
-            return frozenset(remaining)
+            return Confirmation(gone=frozenset(remaining), served=tuple(served))
 
-    async def _listed_of(self, chunk: Sequence[str]) -> set[str]:
-        """Which of `chunk` one `Ids` listing names; `Limit` is the chunk's length.
+    async def _listed_of(self, chunk: Sequence[str]) -> dict[str, SourceItem | None]:
+        """Each id of `chunk` one `Ids` listing names, mapped as a walk maps its entry.
+
+        The listing asks for the walk's `Fields`, and `Limit` is the chunk's length. An id
+        maps to `None` when the mapper does not model its entry, and only the first entry
+        naming an id is read.
 
         An entry with no string `Id` raises, because it may be one of `chunk`. A string
         `Id` nobody asked for is skipped beside one that was asked for. A listing of only
         such ids raises: a server that answers `Ids` never sends one, so a server that
         does cannot say what is gone.
         """
-        params = {"Ids": ",".join(chunk), "Limit": str(len(chunk))}
+        params = {"Ids": ",".join(chunk), "Fields": ITEM_FIELDS, "Limit": str(len(chunk))}
         body = await self._page(await self._items_path(), params, 0, op="confirm")
         entries = body.get("Items")
         if not isinstance(entries, list):
             raise PortDataMalformed("Emby's Ids listing carried no Items array")
         asked = set(chunk)
-        listed: set[str] = set()
+        listed: dict[str, SourceItem | None] = {}
         for entry in entries:
             listed_id = entry.get("Id") if isinstance(entry, dict) else None
             if not isinstance(listed_id, str):
                 raise PortDataMalformed("Emby's Ids listing carried an entry with no string Id")
-            if listed_id in asked:
-                listed.add(listed_id)
+            if listed_id in asked and listed_id not in listed:
+                listed[listed_id] = to_source_item(entry)
         if entries and not listed:
             raise PortDataMalformed("Emby's Ids listing named none of the ids it was asked for")
         return listed
