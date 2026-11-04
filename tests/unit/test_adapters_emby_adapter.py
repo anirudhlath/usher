@@ -2393,7 +2393,7 @@ async def test_an_empty_object_for_an_unknown_id_is_a_deletion_not_an_item() -> 
 async def test_a_version_listed_ahead_of_the_items_own_never_wins(
     container: str | None, width: int, height: int
 ) -> None:
-    """The media-source selection through a real walk and a real `get_item`.
+    """The media-source selection through a real `get_item` and `stream_targets`.
 
     The fake server lists an alternate ahead of the seeded item's own entry, which is
     the order a `MediaSources[0]` rule gets wrong.
