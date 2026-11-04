@@ -36,8 +36,9 @@ them would test nothing.
 shape of the fallback alone. A real read by id of one version lists every
 version, each entry naming its version, and `version_group_by_id.json` is that
 shape. Most groups list one order whichever version is read, best first, but
-some list each read's own entry first, so an entry's position never says whose
-it is. A listing names an item with its own entry alone.
+some change their order with the read, so an entry's position never says whose
+it is. A listing names a movie with its own entry alone, and a series with no
+`MediaSources` at all.
 
 Recorded 2026-11-03. The shape came from `capture_emby_fixture.py --item`,
 type names only. A read-only script outside the repository, which printed
@@ -48,12 +49,16 @@ it; every read held an entry naming itself; and each read's item-level
 `RunTimeTicks`, `Width` and `Height` equalled its own entry's. A second such
 script read 60 version groups (122 reads): every read listed the group's
 every version, and 52 of the groups listed them in one order whichever
-version was read. Two earlier searches of listings, over disjoint slices
+version was read. A third read another 60 (126 reads): 55 listed one order,
+in each of them best to worst by pixels and then bytes, and of the 5 whose
+order changed with the read, 2 put each read's own entry first and 3 did not
+keep to either. Two earlier searches of listings, over disjoint slices
 totalling 1,400 movies, found every listed item carrying exactly one
 `MediaSource`, and two more such scripts checked whose it is: across two
 walk pages of 200 movies, and an `Ids` listing of each of 61 versions in 30
 version groups alone, every listed movie's one entry named the movie in its
-`ItemId`.
+`ItemId`, and each of 30 series an `Ids` listing named carried no
+`MediaSources` key.
 
 ## Push messages (M5)
 

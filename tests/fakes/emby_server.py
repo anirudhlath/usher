@@ -258,8 +258,8 @@ class FakeEmbyServer:
 
         Two divergences are recorded rather than modelled. Emby lists a transcode-only
         version too, as an entry with `Container: null`, where this fake drops a member
-        with no container from every read of its group. And some real groups list each
-        read's own entry first, where this fake lists one order whichever member is read.
+        with no container from every read of its group. And some real groups change
+        their order with the read, where this fake lists one order whichever member is read.
         """
         group = tuple(external_ids)
         for external_id in group:
@@ -646,8 +646,8 @@ class FakeEmbyServer:
         """One item, as the listing route or as the single-item route renders it.
 
         The two differ only in `UserData`, see `_user_data`, and in a grouped item's
-        `MediaSources`, which the single-item route lists for every version: see
-        `group_versions`.
+        `MediaSources`, which the single-item route lists for every held member with a
+        container: see `group_versions`.
         """
         item, _ = self._items[external_id]
         payload = load_emby_fixture(_TEMPLATES[item.kind])
