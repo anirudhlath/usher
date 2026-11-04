@@ -512,8 +512,8 @@ class FakeEmbyServer:
         """`GET /Users/{userId}/Items`, one page of what the request selects.
 
         One divergence is recorded rather than modelled: this fake ignores `Fields` and
-        renders every field whatever was asked, where Emby sends only those asked for, so a
-        request's `Fields` is checkable only on the wire.
+        renders every field whatever was asked, where Emby sends an optional field only when
+        asked, so a request's `Fields` is checkable only on the wire.
         """
         params = request.url.params
         self.listings += 1
