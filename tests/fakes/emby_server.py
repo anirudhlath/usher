@@ -221,17 +221,19 @@ class FakeEmbyServer:
         height: int,
         size_bytes: int = 0,
     ) -> None:
-        """Give an item a second `MediaSources` entry, listed **first**.
+        """Give an item another `MediaSources` entry, listed ahead of its own.
 
-        Emby holds one entry per version -- the same film at 4K and at
-        1080p is two of them, and a version it can only transcode is an
-        entry with `Container: null` -- and until this existed the fake
-        could only ever render one, so no test here could reach the code
-        that chooses between them. Seeding this way rather than through
-        `given_item` keeps `SourceHarness`'s round-trip contract intact:
-        the seeded item's own entry names it, so it still reads back as
-        itself, and what the alternate tests is that a worse or
-        unplayable entry listed ahead of it cannot win.
+        Emby holds one entry per version -- the same film at 4K and at 1080p is two of
+        them, and a version it can only transcode is an entry with `Container: null`. An
+        alternate is such an entry for a version this fake holds no item for: it carries
+        no `ItemId`, and its `Id` names no item. Seeding this way rather than through
+        `given_item` keeps `SourceHarness`'s round-trip contract intact: the seeded item's
+        own entry names it, which is the entry `primary_media_source` takes, so it still
+        reads back as itself. What an alternate tests is that an entry listed ahead of the
+        item's own never wins, whether it is better, worse or unplayable.
+
+        One divergence is recorded rather than modelled: this fake renders an alternate on
+        a listing too, where a real listing carries only the movie's own entry.
         """
         media = load_emby_fixture("movie_item")["MediaSources"][0]
         media["Id"] = f"{external_id}-alt-{len(self._alternates.get(external_id, ()))}"
@@ -259,7 +261,9 @@ class FakeEmbyServer:
         Two divergences are recorded rather than modelled. Emby lists a transcode-only
         version too, as an entry with `Container: null`, where this fake drops a member
         with no container from every read of its group. And some real groups change
-        their order with the read, where this fake lists one order whichever member is read.
+        their order with the read, where this fake lists the members' own entries in one
+        order whichever member is read: only the read member's alternates, listed ahead of
+        them, change with the read.
         """
         group = tuple(external_ids)
         for external_id in group:

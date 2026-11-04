@@ -602,6 +602,14 @@ client-facing contract).
 It carries **three** query parameters: `static=true`, `MediaSourceId` and
 `api_key`. It does not carry Usher's own `DeviceId`.
 
+**Each copy plays its own file.** An Emby item's own media source is the entry
+whose `ItemId` is the item's id, else the one whose `Id` is the item's id or
+`mediasource_` followed by it. A payload with one entry uses it.
+`MediaSourceId` names that entry, and the copy's description is read from it. A
+payload with several entries naming none plays its best version, the most
+pixels among those with a container and then the most bytes, and is logged as a
+WARNING and counted (`usher.source.versions.fallbacks`).
+
 `StreamTarget` also carries `scheme` (for deep links) and `audio` (a single
 composite token such as `truehd_atmos_7_1`, which is a different thing from the
 raw codec).

@@ -42,6 +42,19 @@ MOVIE = SourceItem(
     runtime_seconds=9360,
     added_at=datetime(2024, 3, 1, 18, 22, 11, tzinfo=UTC),
 )
+MOVIE_1080P = replace(
+    MOVIE,
+    external_id="movie-1-1080p",
+    container="mp4",
+    video_codec="h264",
+    audio_codec="eac3",
+    width=1920,
+    height=1080,
+    hdr_format=None,
+    audio_channels=6,
+    file_size_bytes=8_589_934_592,
+    runtime_seconds=9300,
+)
 SERIES = SourceItem(
     external_id="series-1",
     name="Example Series",
@@ -347,6 +360,16 @@ class SourceAdapterContract:
         with pytest.raises(PortUnavailable):
             await harness.adapter.get_item("movie-1")
 
+    async def test_get_item_reads_each_version_as_its_own_file(
+        self, harness: SourceHarness
+    ) -> None:
+        await harness.given_versions([MOVIE, MOVIE_1080P], changed_at=T0)
+        for version in (MOVIE, MOVIE_1080P):
+            item = await harness.adapter.get_item(version.external_id)
+            assert item is not None
+            # `raw` is the adapter's own copy of what it read, opaque to the port.
+            assert replace(item, raw={}) == version
+
     # --- confirming removals -------------------------------------------
 
     async def test_confirm_gone_returns_what_the_source_no_longer_serves(
@@ -461,6 +484,17 @@ class SourceAdapterContract:
         assert direct.audio is not None
         assert direct.audio.startswith("truehd")
         assert direct.scheme is None
+
+    async def test_stream_targets_play_each_version_from_its_own_file(
+        self, harness: SourceHarness
+    ) -> None:
+        await harness.given_versions([MOVIE, MOVIE_1080P], changed_at=T0)
+        for version in (MOVIE, MOVIE_1080P):
+            direct = (await harness.adapter.stream_targets(version.external_id))[0]
+            assert (direct.container, direct.resolution) == (
+                version.container,
+                f"{version.width}x{version.height}",
+            )
 
     async def test_stream_targets_include_a_deep_link_with_its_scheme(
         self, harness: SourceHarness

@@ -2393,8 +2393,8 @@ async def test_a_version_listed_first_does_not_win_by_being_first(
 ) -> None:
     """The media-source selection through a real walk and a real `get_item`.
 
-    A fixture cannot reach the choice: each has exactly one `MediaSources` entry, so
-    only a server rendering more than one exercises the selection at all.
+    The fake server lists an alternate ahead of the seeded item's own entry, which is
+    the order a `MediaSources[0]` rule gets wrong.
     """
     server = FakeEmbyServer()
     best = replace(_movie(0), width=3840, height=2160)

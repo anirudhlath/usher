@@ -253,8 +253,9 @@ class MediaItem(BaseModel):
     available: bool
 ```
 
-`(source_id, external_id)` is unique. A Title with several MediaItems is the
-same film available in more than one place.
+`(source_id, external_id)` is unique. A MediaItem is one version of a film or
+episode in one place, and describes that version's own file. A Title with
+several MediaItems is the same film in more than one version or place.
 
 `hdr_format` is a closed enum; a source's own vocabulary (Emby emits
 `"DolbyVision"`) is translated by its adapter.
