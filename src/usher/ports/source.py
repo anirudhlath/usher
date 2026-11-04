@@ -404,7 +404,7 @@ class SourceAdapter(ABC):
 
     @abstractmethod
     async def confirm_gone(self, external_ids: Collection[str]) -> Confirmation:
-        """Which of `external_ids` this source no longer serves, and the ones it still does.
+        """Which of `external_ids` are no longer served, and those still served that Usher models.
 
         `gone` is what the source no longer serves. `served` holds each asked id the source
         listed and Usher models, described as a walk describes a listed item. An id that is

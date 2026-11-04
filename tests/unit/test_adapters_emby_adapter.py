@@ -4896,6 +4896,24 @@ async def test_a_server_ignoring_ids_seeds_only_the_series_asked_for_and_warns()
     ]
 
 
+async def test_a_series_listing_with_no_items_array_raises_rather_than_reading_as_absent() -> None:
+    """Read as a listing of nothing, every series asked for would be logged as absent."""
+    server = FakeEmbyServer()
+    _watching(server)
+
+    def malformed(request: httpx.Request) -> httpx.Response:
+        if "Ids" in request.url.params:
+            return httpx.Response(200, json={"TotalRecordCount": 0})
+        return server.handle(request)
+
+    adapter = _on(malformed)
+    try:
+        with pytest.raises(PortDataMalformed, match="Emby's series listing carried no Items array"):
+            _ = [page async for page in adapter.list_unit(SEED_KEY)]
+    finally:
+        await adapter.aclose()
+
+
 async def test_the_seed_s_up_next_listing_is_not_judged_by_creation_time() -> None:
     """Up next is in watching order, so its creation times may fall, and it is never keyed.
 

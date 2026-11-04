@@ -509,6 +509,12 @@ class FakeEmbyServer:
         return next(member for member in group if member in present) == external_id
 
     def _list(self, request: httpx.Request) -> httpx.Response:
+        """`GET /Users/{userId}/Items`, one page of what the request selects.
+
+        One divergence is recorded rather than modelled: this fake ignores `Fields` and
+        renders every field whatever was asked, where Emby sends only those asked for, so a
+        request's `Fields` is checkable only on the wire.
+        """
         params = request.url.params
         self.listings += 1
         start = int(params.get("StartIndex", "0"))

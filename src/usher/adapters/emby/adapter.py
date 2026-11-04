@@ -779,6 +779,20 @@ class EmbyAdapter(SourceAdapter):
                         yielded.update(item.external_id for item in page)
                         yield UnitPage(page, resume_at=0)
 
+    async def _ids_listing(self, chunk: Sequence[str], *, op: str, what: str) -> list[Any]:
+        """The entries of one `Ids` listing of `chunk`, asked for with the walk's `Fields`.
+
+        `Limit` is the chunk's length, so a server that ignores `Ids` sends no more items
+        than were asked for. `op` labels the request's timing, and `what` names the listing
+        in the error a body with no `Items` array raises.
+        """
+        params = {"Ids": ",".join(chunk), "Fields": ITEM_FIELDS, "Limit": str(len(chunk))}
+        body = await self._page(await self._items_path(), params, 0, op=op)
+        entries = body.get("Items")
+        if not isinstance(entries, list):
+            raise PortDataMalformed(f"Emby's {what} listing carried no Items array")
+        return entries
+
     async def _series_for(self, items: Sequence[SourceItem], yielded: set[str]) -> list[SourceItem]:
         """The series of `items`' episodes that neither they nor an earlier page hold.
 
@@ -792,13 +806,7 @@ class EmbyAdapter(SourceAdapter):
         series: list[SourceItem] = []
         absent = 0
         for chunk in batched(missing, IDS_PER_REQUEST, strict=False):
-            # `Limit` is the chunk's length, so a server that ignores `Ids` sends no
-            # more items than were asked for.
-            params = {"Ids": ",".join(chunk), "Fields": ITEM_FIELDS, "Limit": str(len(chunk))}
-            body = await self._page(await self._items_path(), params, 0, op="series")
-            entries = body.get("Items")
-            if not isinstance(entries, list):
-                raise PortDataMalformed("Emby's series listing carried no Items array")
+            entries = await self._ids_listing(chunk, op="series", what="series")
             # Each series asked for is kept once; `asked` ends holding those that did not
             # come back.
             asked = set(chunk)
@@ -959,20 +967,15 @@ class EmbyAdapter(SourceAdapter):
     async def _listed_of(self, chunk: Sequence[str]) -> dict[str, SourceItem | None]:
         """Each id of `chunk` one `Ids` listing names, mapped as a walk maps its entry.
 
-        The listing asks for the walk's `Fields`, and `Limit` is the chunk's length. An id
-        maps to `None` when the mapper does not model its entry, and only the first entry
-        naming an id is read.
+        An id maps to `None` when the mapper does not model its entry, and only the first
+        entry naming an id is read.
 
         An entry with no string `Id` raises, because it may be one of `chunk`. A string
         `Id` nobody asked for is skipped beside one that was asked for. A listing of only
         such ids raises: a server that answers `Ids` never sends one, so a server that
         does cannot say what is gone.
         """
-        params = {"Ids": ",".join(chunk), "Fields": ITEM_FIELDS, "Limit": str(len(chunk))}
-        body = await self._page(await self._items_path(), params, 0, op="confirm")
-        entries = body.get("Items")
-        if not isinstance(entries, list):
-            raise PortDataMalformed("Emby's Ids listing carried no Items array")
+        entries = await self._ids_listing(chunk, op="confirm", what="Ids")
         asked = set(chunk)
         listed: dict[str, SourceItem | None] = {}
         for entry in entries:

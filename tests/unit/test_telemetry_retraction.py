@@ -87,6 +87,21 @@ class _UnmodelledAdapter(FakeSourceAdapter):
         return Confirmation()
 
 
+_ANSWER_ORDER = ("b-1", "c-1", "a-1")
+
+
+class _CycledAdapter(FakeSourceAdapter):
+    """Serves `_ANSWER_ORDER`, a 3-cycle, where the fake's own answer is always sorted."""
+
+    async def confirm_gone(self, external_ids: Collection[str]) -> Confirmation:
+        return Confirmation(
+            served=tuple(
+                SourceItem(external_id=external_id, name=external_id, kind=SourceItemKind.MOVIE)
+                for external_id in _ANSWER_ORDER
+            )
+        )
+
+
 @pytest.mark.parametrize("path", ["sweep", "push"])
 async def test_each_asked_id_is_counted_once_by_path_and_outcome(
     meter_reader: InMemoryMetricReader, path: Literal["sweep", "push"]
@@ -125,6 +140,16 @@ async def test_an_id_listed_but_not_modelled_is_counted_as_served(
     )
     assert answer == Confirmation()
     assert retraction_checks(meter_reader) == {(SOURCE.name, "push", "served"): 1.0}
+
+
+async def test_served_keeps_the_order_the_source_answered_in() -> None:
+    """Asked in sorted order and answered in a 3-cycle, so neither order can pass for the other."""
+    adapter = _CycledAdapter(SOURCE)
+    asked = sorted(_ANSWER_ORDER)
+    ids = [item.external_id for item in (await adapter.confirm_gone(asked)).served]
+    assert ids != sorted(ids), "the premise: the source answers out of sorted order"
+    answer = await confirmed_gone(adapter, asked, source=SOURCE.name, path="sweep")
+    assert [item.external_id for item in answer.served] == ids
 
 
 async def test_an_empty_question_asks_nothing_and_counts_nothing(

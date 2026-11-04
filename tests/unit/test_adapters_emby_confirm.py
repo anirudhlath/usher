@@ -14,14 +14,14 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from pydantic import SecretStr
 
 from tests.fakes.emby_server import FakeEmbyServer
-from usher.adapters.emby.adapter import IDS_PER_REQUEST, ITEM_FIELDS, EmbyAdapter
+from usher.adapters.emby.adapter import IDS_PER_REQUEST, EmbyAdapter
 from usher.adapters.emby.mapping import to_source_item
 from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
 from usher.domain.source import Source
 from usher.ports.credentials import SourceCredentials
 from usher.ports.errors import PortDataMalformed
-from usher.ports.source import SourceItem, SourceItemKind
+from usher.ports.source import Confirmation, SourceItem, SourceItemKind
 
 T0 = datetime(2026, 7, 20, 12, 0, 0, tzinfo=UTC)
 CREDENTIALS = SourceCredentials(username="usher", password=SecretStr("correct-horse-battery"))
@@ -84,17 +84,28 @@ async def test_a_served_version_its_sibling_hid_is_asked_again_and_kept() -> Non
 
 
 async def test_a_confirmation_asks_for_the_fields_a_walk_reads() -> None:
-    """Every `Ids` listing asks for the walk's `Fields`, so a served item reads as a walk's."""
+    """Every `Ids` listing sends the `Fields` a real walk sent, so a served item reads as one.
+
+    Both are read off the wire: the fake renders every field whatever was asked, so no answer
+    could show this, and a constant compared with itself would not move with the walk's query.
+    """
     server = FakeEmbyServer()
     server.add_item(_movie("kept-1"), T0)
     adapter, seen = _adapter(server)
     try:
+        _ = [item async for item in adapter.list_items()]
         answer = await adapter.confirm_gone(["gone-1", "kept-1"])
     finally:
         await adapter.aclose()
-    by_ids = [request for request in seen if "Ids" in request.url.params]
+    walk_fields = {
+        request.url.params.get("Fields")
+        for request in seen
+        if request.url.path.endswith("/Items") and "Ids" not in request.url.params
+    }
+    assert walk_fields and None not in walk_fields, "the premise: the walk's listing sent `Fields`"
+    by_ids = {request.url.params.get("Fields") for request in seen if "Ids" in request.url.params}
     assert by_ids, "the premise: the confirmation listed by Ids"
-    assert all(request.url.params["Fields"] == ITEM_FIELDS for request in by_ids)
+    assert by_ids == walk_fields
     assert [item.external_id for item in answer.served] == ["kept-1"]
     assert answer.gone == {"gone-1"}
 
@@ -195,6 +206,20 @@ async def test_an_id_listed_twice_is_served_as_its_first_entry() -> None:
     assert [item.name for item in answer.served] == ["First"]
 
 
+async def test_an_entry_listed_but_not_modelled_is_neither_gone_nor_served() -> None:
+    """The source lists it, so it is not gone; no `SourceItem` can describe it, so not served."""
+    entry = {"Id": "season-1", "Type": "Season", "Name": "Season 1"}
+    assert to_source_item(entry) is None, "the premise: the mapper does not model this entry"
+    adapter, _ = _adapter(FakeEmbyServer(), answer={"Items": [entry], "TotalRecordCount": 1})
+    try:
+        # Asked again for as long as it stayed undecided, it would be listed every round.
+        async with asyncio.timeout(5):
+            answer = await adapter.confirm_gone(["season-1"])
+    finally:
+        await adapter.aclose()
+    assert answer == Confirmation()
+
+
 async def test_a_hundred_and_one_ids_go_as_two_requests_each_limited_to_its_chunk() -> None:
     """`Limit` is each chunk's own length, so a server that ignores `Ids` sends back no more."""
     asked = [f"gone-{index:03d}" for index in range(IDS_PER_REQUEST + 1)]
@@ -211,7 +236,7 @@ async def test_a_hundred_and_one_ids_go_as_two_requests_each_limited_to_its_chun
 async def test_a_body_without_items_raises_rather_than_reading_as_gone() -> None:
     adapter, _ = _adapter(FakeEmbyServer(), answer={"TotalRecordCount": 0})
     try:
-        with pytest.raises(PortDataMalformed, match="no Items array"):
+        with pytest.raises(PortDataMalformed, match="Emby's Ids listing carried no Items array"):
             await adapter.confirm_gone(["kept-1"])
     finally:
         await adapter.aclose()
