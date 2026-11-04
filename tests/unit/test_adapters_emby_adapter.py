@@ -2386,9 +2386,11 @@ async def test_an_empty_object_for_an_unknown_id_is_a_deletion_not_an_item() -> 
         # A transcode-only version listed first: no container, so under
         # `MediaSources[0]` the whole item reports "not playable here".
         (None, 3840, 2160),
+        # A better version listed first: both `MediaSources[0]` and the best pick take it.
+        ("mkv", 7680, 4320),
     ],
 )
-async def test_a_version_listed_first_does_not_win_by_being_first(
+async def test_a_version_listed_ahead_of_the_items_own_never_wins(
     container: str | None, width: int, height: int
 ) -> None:
     """The media-source selection through a real walk and a real `get_item`.

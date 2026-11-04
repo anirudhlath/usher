@@ -5,10 +5,12 @@ import ast
 import inspect
 import logging
 import pathlib
+from collections.abc import Iterator
 from urllib.parse import parse_qs, unquote, urlparse
 
 import pytest
 from _pytest.logging import LogCaptureFixture
+from loguru import logger
 
 from tests.fakes.emby_fixtures import load_emby_fixture, own_entry_only
 from usher.adapters.emby.mapping import to_source_item
@@ -364,6 +366,29 @@ def test_an_item_with_no_id_has_no_targets() -> None:
     payload = load_emby_fixture("movie_item")
     del payload["Id"]
     assert build_stream_targets(payload, base_url=BASE, access_token=TOKEN) == []
+
+
+@pytest.fixture
+def warnings_logged() -> Iterator[list[str]]:
+    sink: list[str] = []
+    handler = logger.add(sink.append, level="WARNING", format="{message}")
+    try:
+        yield sink
+    finally:
+        logger.remove(handler)
+
+
+def test_an_item_with_no_id_chooses_no_version_and_logs_no_fallback(
+    warnings_logged: list[str],
+) -> None:
+    """With no `Id` there is no URL to build, so no version is chosen and none falls back."""
+    payload = load_emby_fixture("multi_version_movie")
+    del payload["Id"]
+    assert len(payload["MediaSources"]) > 1, (
+        "the premise: several versions, so choosing one would fall back"
+    )
+    assert build_stream_targets(payload, base_url=BASE, access_token=TOKEN) == []
+    assert warnings_logged == []
 
 
 # --- access-token handling rules --------------------------------------

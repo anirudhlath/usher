@@ -536,7 +536,10 @@ def meter_reader() -> Iterator[InMemoryMetricReader]:
 
 
 def _fallbacks(reader: InMemoryMetricReader) -> float:
-    """The summed value of every `usher.source.versions.fallbacks` point, `0.0` with none."""
+    """The summed value of every `usher.source.versions.fallbacks` point, `0.0` with none.
+
+    Each point must carry no attributes, since the counter has no labels.
+    """
     total = 0.0
     data = reader.get_metrics_data()
     for resource in data.resource_metrics if data is not None else []:
@@ -546,6 +549,7 @@ def _fallbacks(reader: InMemoryMetricReader) -> float:
                     continue
                 for point in metric.data.data_points:
                     assert isinstance(point, NumberDataPoint)
+                    assert not point.attributes, "the counter carries no labels"
                     total += point.value
     return total
 
@@ -586,7 +590,9 @@ def test_several_entries_naming_none_fall_back_to_the_best_and_say_so(
     assert _fallbacks(meter_reader) == 1.0
 
 
-def test_the_fallback_passes_over_a_better_version_it_cannot_play() -> None:
+def test_the_fallback_passes_over_a_better_version_it_cannot_play(
+    warnings_logged: list[str],
+) -> None:
     """With no entry its own, a version with no container loses even when it ranks first.
 
     The transcode-only entry is given one byte more than the 2160p file it ties on
@@ -598,10 +604,16 @@ def test_the_fallback_passes_over_a_better_version_it_cannot_play() -> None:
     assert max(payload["MediaSources"], key=_playback_rank) is transcode, (
         "the premise: a best pick blind to the container takes the transcode"
     )
-    assert primary_media_source(payload) is best
+    chosen = primary_media_source(payload)
+    assert [line.rstrip("\n") for line in warnings_logged] == [_FALLBACK], (
+        "the premise: no entry is the item's own, so the fallback answered"
+    )
+    assert chosen is best
 
 
-def test_the_fallback_with_no_version_it_can_play_takes_the_best_of_them() -> None:
+def test_the_fallback_with_no_version_it_can_play_takes_the_best_of_them(
+    warnings_logged: list[str],
+) -> None:
     """With no entry its own and none with a container, the best of them stands in.
 
     The copy is then described from its best file rather than the read failing for
@@ -614,7 +626,21 @@ def test_the_fallback_with_no_version_it_can_play_takes_the_best_of_them() -> No
     assert max(payload["MediaSources"], key=_playback_rank) is best, (
         "the premise: the best version is listed neither first nor last"
     )
-    assert primary_media_source(payload) is best
+    chosen = primary_media_source(payload)
+    assert [line.rstrip("\n") for line in warnings_logged] == [_FALLBACK], (
+        "the premise: no entry is the item's own, so the fallback answered"
+    )
+    assert chosen is best
+
+
+def test_the_fallback_warning_counts_only_the_entries_that_are_objects(
+    warnings_logged: list[str],
+) -> None:
+    """An entry that is not an object is no version, so the WARNING counts three, not four."""
+    payload = load_emby_fixture("multi_version_movie")
+    payload["MediaSources"].insert(1, "not-an-object")
+    primary_media_source(payload)
+    assert [line.rstrip("\n") for line in warnings_logged] == [_FALLBACK]
 
 
 @pytest.mark.parametrize("found_by", ["item-id", "plain-id", "media-source-id"])
@@ -654,16 +680,33 @@ def test_a_lone_entry_is_the_items_own_whatever_its_ids_say(
     assert warnings_logged == [] and _fallbacks(meter_reader) == 0.0
 
 
-def test_a_missing_item_id_matches_no_entry(
-    meter_reader: InMemoryMetricReader, warnings_logged: list[str]
+_ABSENT = object()
+
+
+@pytest.mark.parametrize(
+    ("own_id", "item_id"),
+    [(_ABSENT, None), ("", ""), (90000132, 90000132)],
+    ids=["missing", "empty", "number"],
+)
+def test_an_item_id_that_is_not_text_matches_no_entry(
+    own_id: object,
+    item_id: object,
+    meter_reader: InMemoryMetricReader,
+    warnings_logged: list[str],
 ) -> None:
-    """A payload with no `Id` names no entry, not even one whose `ItemId` is null."""
+    """An `Id` that is absent, empty or not a string names no entry, not even an equal one.
+
+    Every entry's `ItemId` is given the same value, so a match would take the first.
+    """
     payload = load_emby_fixture("multi_version_movie")
-    del payload["Id"]
+    if own_id is _ABSENT:
+        del payload["Id"]
+    else:
+        payload["Id"] = own_id
     for entry in payload["MediaSources"]:
-        entry["ItemId"] = None
+        entry["ItemId"] = item_id
     assert payload["MediaSources"][0]["Container"] is None, (
-        "the premise: a None match takes the first entry"
+        "the premise: a match takes the first entry, which has no container"
     )
     chosen = primary_media_source(payload)
     assert chosen is not None and chosen["Id"] == "0000000000000000000000000000b0f1"

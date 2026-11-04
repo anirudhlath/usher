@@ -22,7 +22,7 @@ _meter = metrics.get_meter("usher.source.emby")
 _versions_fallbacks = _meter.create_counter(
     "usher.source.versions.fallbacks",
     unit="1",
-    description="Items with several media sources and none their own, so the best stood in",
+    description="Reads of an item with several media sources, none its own, so the best stood in",
 )
 
 # Emby counts in 100-nanosecond ticks, everywhere: runtimes, playback

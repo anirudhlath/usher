@@ -34,10 +34,15 @@ def build_stream_targets(
     container *is* the URL's file extension, and guessing one would hand a
     client a link that fails at play time. The port documents `[]` as the
     answer for "no way to play this", so neither case is an error.
+
+    An item with no `Id` has none either. It is turned away before a version is
+    chosen, so it is never logged or counted as a fallback.
     """
     external_id = as_text(payload.get("Id"))
+    if external_id is None:
+        return []
     media_source = primary_media_source(payload)
-    if media_source is None or external_id is None:
+    if media_source is None:
         return []
     container = as_lower(media_source.get("Container"))
     if container is None:
