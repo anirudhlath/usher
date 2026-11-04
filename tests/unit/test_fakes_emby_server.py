@@ -1061,10 +1061,12 @@ async def test_a_version_group_read_by_id_lists_every_version_as_recorded(driver
 async def test_a_version_group_read_by_id_renders_each_present_version_from_its_own_facts(
     driver: _Driver,
 ) -> None:
-    """Each entry describes its own version's file, and a removed version lists none.
+    """Each entry is its own version's file, in group order, and a removed version lists none.
 
     Read as the 4K version, so an entry rendered from the read's facts rather than its
-    own version's shows up as a second 4K file.
+    own version's shows up as a second 4K file. The group's order is neither the order
+    its versions were added in nor their ids' lexical order, so an entry list in either
+    of those orders fails.
     """
     hd = replace(
         MOVIE,
@@ -1075,17 +1077,29 @@ async def test_a_version_group_read_by_id_renders_each_present_version_from_its_
         file_size_bytes=8_589_934_592,
         runtime_seconds=9300,
     )
-    for version in (replace(MOVIE, external_id="v0"), hd, replace(MOVIE, external_id="v2")):
+    added = (replace(MOVIE, external_id="v0"), hd, replace(MOVIE, external_id="v2"))
+    group = ("v1", "v2", "v0")
+    for version in added:
         driver.server.add_item(version, ADDED_AT)
-    driver.server.group_versions("v0", "v1", "v2")
+    driver.server.group_versions(*group)
     driver.server.remove_item("v2")
+    present = [member for member in group if member != "v2"]
+    in_added_order = [version.external_id for version in added if version.external_id in present]
+    assert present != in_added_order, "the premise: group order is not insertion order"
+    assert present != sorted(present), "the premise: group order is not lexical order"
+    assert hd.container != MOVIE.container, "the premise: the containers differ"
+    assert hd.file_size_bytes != MOVIE.file_size_bytes, "the premise: the sizes differ"
+    assert hd.runtime_seconds != MOVIE.runtime_seconds, "the premise: the runtimes differ"
+    assert MOVIE.runtime_seconds is not None
+    assert hd.runtime_seconds is not None
+    facts = {
+        "v0": (MOVIE.container, MOVIE.file_size_bytes, MOVIE.runtime_seconds * TICKS_PER_SECOND),
+        "v1": (hd.container, hd.file_size_bytes, hd.runtime_seconds * TICKS_PER_SECOND),
+    }
     entries = (await driver.payload("v0"))["MediaSources"]
     assert [
         (e.get("ItemId"), e.get("Container"), e.get("Size"), e.get("RunTimeTicks")) for e in entries
-    ] == [
-        ("v0", "mkv", 68_719_476_736, 9360 * TICKS_PER_SECOND),
-        ("v1", "mp4", 8_589_934_592, 9300 * TICKS_PER_SECOND),
-    ]
+    ] == [(member, *facts[member]) for member in present]
 
 
 def _given_next_up(driver: _Driver) -> None:

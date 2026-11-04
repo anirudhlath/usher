@@ -37,7 +37,10 @@ async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--type", default="Movie", help="Movie, Series, or Episode")
     parser.add_argument("--limit", type=int, default=1)
-    parser.add_argument("--item", help="read this one item by id instead of listing")
+    parser.add_argument(
+        "--item",
+        help="read this one item by id instead of listing; --type and --limit are then ignored",
+    )
     args = parser.parse_args()
 
     base_url = os.environ.get("USHER_EMBY_URL")
