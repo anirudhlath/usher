@@ -50,7 +50,10 @@ script read 60 version groups (122 reads): every read listed the group's
 every version, and 52 of the groups listed them in one order whichever
 version was read. Two earlier searches of listings, over disjoint slices
 totalling 1,400 movies, found every listed item carrying exactly one
-`MediaSource`.
+`MediaSource`, and two more such scripts checked whose it is: across two
+walk pages of 200 movies, and an `Ids` listing of each of 61 versions in 30
+version groups alone, every listed movie's one entry named the movie in its
+`ItemId`.
 
 ## Push messages (M5)
 
