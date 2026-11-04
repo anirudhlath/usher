@@ -1031,6 +1031,63 @@ async def test_a_version_group_lists_by_its_own_order_not_the_ids(driver: _Drive
     assert await _listed(driver, Ids="v0,v1", Limit="2") == ["v1"]
 
 
+async def test_a_version_group_read_by_id_lists_every_version_as_recorded(driver: _Driver) -> None:
+    reads = load_emby_fixture("version_group_by_id")["reads"]
+    group = [read["Id"] for read in reads]
+    for read in reads:
+        assert [(e["ItemId"], e["Id"]) for e in read["MediaSources"]] == [
+            (version, f"mediasource_{version}") for version in group
+        ], "the premise: every recorded read lists every version"
+    for version in ("v0", "v1"):
+        driver.server.add_item(replace(MOVIE, external_id=version), ADDED_AT)
+    driver.server.group_versions("v0", "v1")
+    for version in ("v0", "v1"):
+        payload = await driver.payload(version)
+        entries = payload["MediaSources"]
+        assert [(e.get("ItemId"), e.get("Id")) for e in entries] == [
+            ("v0", "mediasource_v0"),
+            ("v1", "mediasource_v1"),
+        ]
+        assert set(reads[0]) <= set(payload)
+        assert set(reads[0]["MediaSources"][0]) <= set(entries[0])
+        listed = await driver.session.json_body(
+            "GET", f"/Users/{USER_ID}/Items", params={"Ids": version, "Limit": "1"}, op="list"
+        )
+        assert [(e.get("ItemId"), e.get("Id")) for e in listed["Items"][0]["MediaSources"]] == [
+            (version, f"mediasource_{version}")
+        ]
+
+
+async def test_a_version_group_read_by_id_renders_each_present_version_from_its_own_facts(
+    driver: _Driver,
+) -> None:
+    """Each entry describes its own version's file, and a removed version lists none.
+
+    Read as the 4K version, so an entry rendered from the read's facts rather than its
+    own version's shows up as a second 4K file.
+    """
+    hd = replace(
+        MOVIE,
+        external_id="v1",
+        container="mp4",
+        width=1920,
+        height=1080,
+        file_size_bytes=8_589_934_592,
+        runtime_seconds=9300,
+    )
+    for version in (replace(MOVIE, external_id="v0"), hd, replace(MOVIE, external_id="v2")):
+        driver.server.add_item(version, ADDED_AT)
+    driver.server.group_versions("v0", "v1", "v2")
+    driver.server.remove_item("v2")
+    entries = (await driver.payload("v0"))["MediaSources"]
+    assert [
+        (e.get("ItemId"), e.get("Container"), e.get("Size"), e.get("RunTimeTicks")) for e in entries
+    ] == [
+        ("v0", "mkv", 68_719_476_736, 9360 * TICKS_PER_SECOND),
+        ("v1", "mp4", 8_589_934_592, 9300 * TICKS_PER_SECOND),
+    ]
+
+
 def _given_next_up(driver: _Driver) -> None:
     driver.server.add_item(
         SourceItem(external_id="s0", name="S 0", kind=SourceItemKind.SERIES), ADDED_AT

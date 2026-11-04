@@ -1,0 +1,210 @@
+{
+  "reads": [
+    {
+      "Name": "Example Two-Version Movie",
+      "OriginalTitle": "Example Two-Version Movie",
+      "ServerId": "0000000000000000000000000000feed",
+      "Id": "90000131",
+      "DateCreated": "2024-09-17T19:42:05.0000000Z",
+      "PremiereDate": "2020-05-22T00:00:00.0000000Z",
+      "ProductionYear": 2020,
+      "RunTimeTicks": 93600000000,
+      "Width": 3840,
+      "Height": 2160,
+      "Type": "Movie",
+      "IsFolder": false,
+      "MediaType": "Video",
+      "ProviderIds": { "Tmdb": "90000130", "Imdb": "tt99000130" },
+      "UserData": {
+        "PlaybackPositionTicks": 0,
+        "PlayCount": 0,
+        "IsFavorite": false,
+        "Played": false
+      },
+      "MediaSources": [
+        {
+          "Id": "mediasource_90000131",
+          "ItemId": "90000131",
+          "Name": "Example Two-Version Movie 2160p",
+          "Container": "mkv",
+          "Size": 68719476736,
+          "RunTimeTicks": 93600000000,
+          "MediaStreams": [
+            {
+              "Index": 0,
+              "Type": "Video",
+              "Codec": "hevc",
+              "Profile": "Main 10",
+              "BitDepth": 10,
+              "Width": 3840,
+              "Height": 2160,
+              "VideoRange": "DolbyVision",
+              "ExtendedVideoType": "DolbyVision",
+              "ExtendedVideoSubType": "DoviProfile81",
+              "ExtendedVideoSubTypeDescription": "Profile 8.1 (HDR10 compatible)"
+            },
+            {
+              "Index": 1,
+              "Type": "Audio",
+              "Codec": "aac",
+              "Profile": "LC",
+              "Channels": 2,
+              "Language": "eng",
+              "Title": "Commentary with the director",
+              "IsDefault": false
+            },
+            {
+              "Index": 2,
+              "Type": "Audio",
+              "Codec": "truehd",
+              "Profile": "TrueHD Atmos",
+              "Channels": 8,
+              "Language": "eng",
+              "IsDefault": true
+            },
+            {
+              "Index": 3,
+              "Type": "Subtitle",
+              "Codec": "subrip",
+              "Language": "eng",
+              "IsDefault": false
+            }
+          ]
+        },
+        {
+          "Id": "mediasource_90000132",
+          "ItemId": "90000132",
+          "Name": "Example Two-Version Movie 1080p",
+          "Container": "mp4",
+          "Size": 8589934592,
+          "RunTimeTicks": 93000000000,
+          "MediaStreams": [
+            {
+              "Index": 0,
+              "Type": "Video",
+              "Codec": "h264",
+              "Profile": "High",
+              "Width": 1920,
+              "Height": 1080,
+              "VideoRange": "SDR",
+              "ExtendedVideoType": "None",
+              "ExtendedVideoSubType": "None"
+            },
+            {
+              "Index": 1,
+              "Type": "Audio",
+              "Codec": "eac3",
+              "Profile": "Dolby Digital+",
+              "Channels": 6,
+              "Language": "eng",
+              "IsDefault": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "Name": "Example Two-Version Movie",
+      "OriginalTitle": "Example Two-Version Movie",
+      "ServerId": "0000000000000000000000000000feed",
+      "Id": "90000132",
+      "DateCreated": "2024-09-17T19:42:05.0000000Z",
+      "PremiereDate": "2020-05-22T00:00:00.0000000Z",
+      "ProductionYear": 2020,
+      "RunTimeTicks": 93000000000,
+      "Width": 1920,
+      "Height": 1080,
+      "Type": "Movie",
+      "IsFolder": false,
+      "MediaType": "Video",
+      "ProviderIds": { "Tmdb": "90000130", "Imdb": "tt99000130" },
+      "UserData": {
+        "PlaybackPositionTicks": 0,
+        "PlayCount": 0,
+        "IsFavorite": false,
+        "Played": false
+      },
+      "MediaSources": [
+        {
+          "Id": "mediasource_90000131",
+          "ItemId": "90000131",
+          "Name": "Example Two-Version Movie 2160p",
+          "Container": "mkv",
+          "Size": 68719476736,
+          "RunTimeTicks": 93600000000,
+          "MediaStreams": [
+            {
+              "Index": 0,
+              "Type": "Video",
+              "Codec": "hevc",
+              "Profile": "Main 10",
+              "BitDepth": 10,
+              "Width": 3840,
+              "Height": 2160,
+              "VideoRange": "DolbyVision",
+              "ExtendedVideoType": "DolbyVision",
+              "ExtendedVideoSubType": "DoviProfile81",
+              "ExtendedVideoSubTypeDescription": "Profile 8.1 (HDR10 compatible)"
+            },
+            {
+              "Index": 1,
+              "Type": "Audio",
+              "Codec": "aac",
+              "Profile": "LC",
+              "Channels": 2,
+              "Language": "eng",
+              "Title": "Commentary with the director",
+              "IsDefault": false
+            },
+            {
+              "Index": 2,
+              "Type": "Audio",
+              "Codec": "truehd",
+              "Profile": "TrueHD Atmos",
+              "Channels": 8,
+              "Language": "eng",
+              "IsDefault": true
+            },
+            {
+              "Index": 3,
+              "Type": "Subtitle",
+              "Codec": "subrip",
+              "Language": "eng",
+              "IsDefault": false
+            }
+          ]
+        },
+        {
+          "Id": "mediasource_90000132",
+          "ItemId": "90000132",
+          "Name": "Example Two-Version Movie 1080p",
+          "Container": "mp4",
+          "Size": 8589934592,
+          "RunTimeTicks": 93000000000,
+          "MediaStreams": [
+            {
+              "Index": 0,
+              "Type": "Video",
+              "Codec": "h264",
+              "Profile": "High",
+              "Width": 1920,
+              "Height": 1080,
+              "VideoRange": "SDR",
+              "ExtendedVideoType": "None",
+              "ExtendedVideoSubType": "None"
+            },
+            {
+              "Index": 1,
+              "Type": "Audio",
+              "Codec": "eac3",
+              "Profile": "Dolby Digital+",
+              "Channels": 6,
+              "Language": "eng",
+              "IsDefault": true
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

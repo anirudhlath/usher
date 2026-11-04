@@ -120,6 +120,11 @@ def _emby_stamp(value: datetime) -> str:
     return f"{moment.strftime('%Y-%m-%dT%H:%M:%S')}.{moment.microsecond:06d}0Z"
 
 
+def _runtime_ticks(item: SourceItem) -> int | None:
+    """An item's `RunTimeTicks`, at item level and on its own entry alike."""
+    return None if item.runtime_seconds is None else item.runtime_seconds * _TICKS_PER_SECOND
+
+
 def _sort_value(item: SourceItem, field: str) -> str:
     """One `SortBy` field's value for one item, as a sortable string.
 
@@ -224,8 +229,8 @@ class FakeEmbyServer:
         could only ever render one, so no test here could reach the code
         that chooses between them. Seeding this way rather than through
         `given_item` keeps `SourceHarness`'s round-trip contract intact:
-        the seeded item stays the *best* version, so it still reads back
-        as itself, and what the alternate tests is that a worse or
+        the seeded item's own entry names it, so it still reads back as
+        itself, and what the alternate tests is that a worse or
         unplayable entry listed ahead of it cannot win.
         """
         media = load_emby_fixture("movie_item")["MediaSources"][0]
@@ -248,7 +253,8 @@ class FakeEmbyServer:
         this order, of those the rest of the request matches, before paging. That is
         what `ids_version_group.json` records Emby doing. Emby's full listing shows one
         version per group too; this fake does not model that, and no walk test groups
-        versions.
+        versions. A read by id of any member lists every present member's own entry, in
+        group order, as `version_group_by_id.json` records.
         """
         group = tuple(external_ids)
         for external_id in group:
@@ -634,8 +640,9 @@ class FakeEmbyServer:
     def _payload(self, external_id: str, *, for_listing: bool) -> dict[str, Any]:
         """One item, as the listing route or as the single-item route renders it.
 
-        The two differ only in `UserData` -- see `_user_data`, which is the whole reason
-        this parameter exists.
+        The two differ only in `UserData`, see `_user_data`, and in a grouped item's
+        `MediaSources`, which the single-item route lists for every version: see
+        `group_versions`.
         """
         item, _ = self._items[external_id]
         payload = load_emby_fixture(_TEMPLATES[item.kind])
@@ -647,9 +654,7 @@ class FakeEmbyServer:
             _EMBY_PROVIDER_KEYS.get(key, key.title()): value
             for key, value in item.provider_ids.items()
         }
-        payload["RunTimeTicks"] = (
-            None if item.runtime_seconds is None else item.runtime_seconds * _TICKS_PER_SECOND
-        )
+        payload["RunTimeTicks"] = _runtime_ticks(item)
         if item.added_at is not None:
             payload["DateCreated"] = _emby_stamp(item.added_at)
         else:
@@ -662,26 +667,50 @@ class FakeEmbyServer:
         # Item-level dimensions, which Emby populates for video items
         # alongside the stream-level ones. They are also the only place
         # width and height can live for an item with no media source --
-        # without them, `_render_media`'s early return below drops both.
+        # without them, `_own_entry`'s early return below drops both.
         payload["Width"] = item.width
         payload["Height"] = item.height
-        self._render_media(payload, item)
+        self._render_media(payload, item, for_listing=for_listing)
         return payload
 
-    def _render_media(self, payload: dict[str, Any], item: SourceItem) -> None:
-        alternates = self._alternates.get(item.external_id, [])
+    def _render_media(
+        self, payload: dict[str, Any], item: SourceItem, *, for_listing: bool
+    ) -> None:
+        """`MediaSources`: the item's alternates, then its own entry, or no key with neither.
+
+        A read by id of a grouped item lists the own entry of every member still held, in
+        group order, where its own entry would be: see `group_versions`.
+        """
+        members: tuple[str, ...] = (item.external_id,)
+        if not for_listing:
+            members = self._groups.get(item.external_id, members)
+        held = (self._items[member][0] for member in members if member in self._items)
+        own = [entry for entry in map(self._own_entry, held) if entry is not None]
+        # Listed ahead of the own entries, which is the order that breaks a
+        # `MediaSources[0]` adapter.
+        entries = [*self._alternates.get(item.external_id, []), *own]
+        if entries:
+            payload["MediaSources"] = entries
+        else:
+            payload.pop("MediaSources", None)
+
+    def _own_entry(self, item: SourceItem) -> dict[str, Any] | None:
+        """The item's own `MediaSources` entry, from its own facts, or `None` with no container.
+
+        It names the item as Emby's own entries do: `ItemId` is the item's id and `Id` is
+        `mediasource_` plus it.
+        """
         if item.container is None:
-            if alternates:
-                payload["MediaSources"] = list(alternates)
-            else:
-                payload.pop("MediaSources", None)
-            return
-        media = payload.setdefault("MediaSources", load_emby_fixture("movie_item")["MediaSources"])[
-            0
-        ]
+            return None
+        template = load_emby_fixture(_TEMPLATES[item.kind])
+        media: dict[str, Any] = template.get(
+            "MediaSources", load_emby_fixture("movie_item")["MediaSources"]
+        )[0]
+        media["ItemId"] = item.external_id
+        media["Id"] = f"mediasource_{item.external_id}"
         media["Container"] = item.container
         media["Size"] = item.file_size_bytes
-        media["RunTimeTicks"] = payload["RunTimeTicks"]
+        media["RunTimeTicks"] = _runtime_ticks(item)
         for stream in media["MediaStreams"]:
             if stream["Type"] == "Video":
                 stream["Codec"] = item.video_codec
@@ -701,9 +730,7 @@ class FakeEmbyServer:
                 # function of codec and channel count. The Atmos/DTS-HD
                 # vocabulary is covered against the raw fixtures instead.
                 stream["Profile"] = ""
-        # Listed ahead of the seeded item's own entry, which is the order
-        # that breaks a `MediaSources[0]` adapter.
-        payload["MediaSources"] = [*alternates, media]
+        return media
 
     def _user_data(self, external_id: str, *, for_listing: bool) -> dict[str, Any]:
         """One item's `UserData`, rendered differently for the two routes that carry it.

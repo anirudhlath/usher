@@ -3,7 +3,7 @@
 Read [`../README.md`](../README.md) first: it states the licensing rule, the
 reserved identifier bands, and the guard that enforces them.
 
-**Every value in these nine files is invented**, including the `ProviderIds`,
+**Every value in these ten files is invented**, including the `ProviderIds`,
 which until 2026-08-01 carried real TMDb/IMDb/TVDb ids for four real works.
 That is a licensing constraint, not a style, and a doubled one: a real Emby
 response *embeds TMDb-sourced metadata*, which TMDb's terms forbid
@@ -30,12 +30,14 @@ them would test nothing.
 | `multi_version_movie.json` | three `MediaSources`, the first transcode-only (`Protocol: Http`, `Size: 0`, `SupportsDirectPlay: false`), so `primary_media_source`'s selection rule has something to select |
 | `view_item.json` | one library view from `/Users/{id}/Views`: `CollectionType` says what the library holds, and `boxsets`/`playlists` views are not libraries |
 | `ids_version_group.json` | an `Ids` listing naming two versions of one item, asked both ways round, then each version alone: the request lists one of them, the same one in either order, and each alone lists itself. Only `Id` keys, both invented |
+| `version_group_by_id.json` | one movie read by id as each of its two versions: both reads list the same two entries, 2160p first, each naming its version in `ItemId` and `mediasource_<id>` in `Id`; each read's `Id`, `RunTimeTicks`, `Width` and `Height` are its own version's |
 
-`multi_version_movie.json` has been looked for twice against the live server,
-over disjoint slices totalling 1,400 movies, and has never met a real
-payload — every one carried exactly one `MediaSource`. It stays: another
-deployment will have them and the rule is cheap. `CLAUDE.md` records both
-searches.
+`multi_version_movie.json` names none of its entries as its own, so it is the
+shape of the fallback alone. A real read by id of one version lists every
+version, each entry naming its version, and `version_group_by_id.json` is that
+shape. Most groups list one order whichever version is read, best first, but
+some list each read's own entry first, so an entry's position never says whose
+it is.
 
 ## Push messages (M5)
 
@@ -164,6 +166,7 @@ a fixture to commit:
 ```bash
 export USHER_EMBY_URL=... USHER_EMBY_USER=... USHER_EMBY_PASSWORD=...
 uv run python scripts/capture_emby_fixture.py --type Episode > /tmp/shape.json
+uv run python scripts/capture_emby_fixture.py --item ID > /tmp/shape.json
 ```
 
 Diff that against the committed file and hand-add any missing **key** with an
