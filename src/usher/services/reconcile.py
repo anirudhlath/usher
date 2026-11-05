@@ -850,14 +850,14 @@ class ReconcileService:
     ) -> SyncRun:
         """Keep or retract the rows a finished full walk did not list, as the source answers.
 
-        They are the candidates, and the ceiling is applied to them before the source is
-        asked anything. Then, in order: the source is asked; the entries it served are
-        ingested as a walk ingests them, in `batch_size` chunks at the run's `started_at`;
-        what it no longer serves is retracted; and every id it still serves is stamped as
-        seen at that instant, modelled or not. All three writes commit with the run's
-        completing row, and the run's counters stay the walk's own. A source that cannot
-        answer raises before any of them, so nothing changes; a chunk that fails raises
-        before the retraction and the stamp. Either way the run fails resumable.
+        They are the candidates, and the ceiling is applied to them before the source is asked
+        anything. Then, in order: the source is asked; the entries it served that are still
+        available are ingested as a walk ingests them, in `batch_size` chunks at the run's
+        `started_at`; what it no longer serves is retracted; and every available id it still
+        serves is stamped as seen at that instant, modelled or not. All three writes commit with
+        the run's completing row, and `items_seen` and the match counters stay the walk's own. A
+        source that cannot answer raises before any of them, so nothing changes; a chunk that
+        fails raises before the retraction and the stamp. Either way the run fails resumable.
         """
         run = progress.run
         if kind is not SyncRunKind.FULL:
@@ -892,11 +892,17 @@ class ReconcileService:
             confirmed_gone(adapter, unseen.external_ids, source=source_name, path="sweep"),
         )
         gone = confirmation.gone
+        # A push may have retracted one since the source answered, and a walk's upsert would
+        # make it available again.
+        available = await self._media_items.available_among(
+            run.source_id, [item.external_id for item in confirmation.served]
+        )
+        entries = [item for item in confirmation.served if item.external_id in available]
         # Not `_flush` or `_beating`, which both commit: these chunks, the retraction and the
-        # stamp all ride the run's completing commit. These are alternate versions: Emby's full
-        # listing names one version of each group, and which one can change between walks, so
-        # there can be thousands with no page missed.
-        for chunk in batched(confirmation.served, self._batch_size, strict=False):
+        # stamp all ride the run's completing commit. What it still serves are alternate
+        # versions: Emby's full listing names one version of each group, and which one can
+        # change between walks, so there can be thousands with no page missed.
+        for chunk in batched(entries, self._batch_size, strict=False):
             await self._ingest.ingest_batch(run.source_id, chunk, observed_at=run.started_at)
         retraction = await self._media_items.retract(
             run.source_id, gone, unseen_since=run.started_at

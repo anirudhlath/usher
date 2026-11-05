@@ -238,10 +238,10 @@ stage is fetched until every unit of the stages before it has committed, so an
 episode always finds its series. A walk's units are kept in `sync_run_units`
 with the position each has committed to, and the run's `heartbeat_at` moves on
 every commit and at least once a minute between commits, also while the watch
-lane runs after the seed. A unit that fails stops the walk: it is marked
-`failed` at its committed position, and pages fetched but not yet committed are
-dropped. A delta with a cursor, a bounded walk and the gap-closer keep the
-single walk.
+lane runs after the seed, except while a sweep re-describes what it keeps. A
+unit that fails stops the walk: it is marked `failed` at its committed
+position, and pages fetched but not yet committed are dropped. A delta with a
+cursor, a bounded walk and the gap-closer keep the single walk.
 
 **An unfinished whole-library walk is resumed in place.** The next
 whole-library walk of the same kind continues the same `sync_runs` row, with
@@ -263,8 +263,9 @@ resumes. A process killed outright cannot, and its run counts as live until its
 heartbeat is 10 minutes old; a close that cannot finish within 10 seconds is
 given up with a WARNING, and a second Ctrl-C abandons it.
 Every item walk moves its heartbeat with every commit and at least once a minute
-between commits, and before it starts closes its source's item walks still
-`running` whose heartbeat is 10 minutes old or missing, `failed` with
+between commits, except while a sweep re-describes what it keeps, and before it
+starts closes its source's item walks still `running` whose heartbeat is 10
+minutes old or missing, `failed` with
 `abandoned: its process stopped before it finished`, logging a WARNING that
 counts them; a whole-library walk closed this way is resumed all the same. A
 process paused that long rather than stopped — its machine suspended, say — is
@@ -327,7 +328,10 @@ did not ask about counts as no answer.
 An item that reappears in a walk is available again at that moment. An item
 keeps the latest instant it was seen at — a walk's start, or the moment a push
 event read it — so a walk that began earlier and reads it again never exposes
-it to a later full walk's sweep. The sweep only ever sets `false`.
+it to a later full walk's sweep. The sweep only ever sets `false`, and a row a
+push retracted after the source answered stays retracted. The one gap is a
+walk's too: a retraction landing while those rows are being written is undone
+until the next full walk's sweep.
 
 **A source is either a library this deployment owns or a *view* of somebody
 else's, and Usher does not model the difference.** Pointing Usher at a server

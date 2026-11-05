@@ -735,6 +735,69 @@ async def test_no_beat_commits_while_a_sweep_ingests() -> None:
     assert fixture.commits == at_ingest[0] + 1
 
 
+async def test_no_beat_commits_while_a_sweep_reads_what_is_still_available() -> None:
+    """The read touches the session, which a beat commits from another task."""
+    fixture = _Fixture(heartbeat_seconds=0.01)
+    for index in range(10):
+        fixture.adapter.seed(_mkv(f"m{index}"), T0)
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    fixture.adapter.unlist("m8")
+    original = fixture.media_items.available_among
+    at_read: list[int] = []
+
+    async def _slow(source_id: uuid.UUID, external_ids: Collection[str]) -> frozenset[str]:
+        at_read.append(fixture.commits)
+        # Five heartbeats, so a beat beside this read falls due while it runs.
+        await asyncio.sleep(0.05)
+        return await original(source_id, external_ids)
+
+    fixture.media_items.available_among = _slow  # type: ignore[method-assign]
+
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+
+    assert len(at_read) == 1, "the sweep never read what is still available"
+    assert fixture.commits == at_read[0] + 1
+
+
+async def test_a_sweep_leaves_a_row_a_push_retracted_after_the_source_answered() -> None:
+    """The source serves m7 and m8, then a push retracts m8 before either is written."""
+    fixture = _Fixture()
+    for index in range(10):
+        fixture.adapter.seed(_mkv(f"m{index}"), T0)
+    first = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    for external_id in ("m7", "m8"):
+        fixture.adapter.seed(_mp4(external_id), T0)
+        fixture.adapter.unlist(external_id)
+    original = fixture.adapter.confirm_gone
+
+    async def _retracted_once_answered(external_ids: Collection[str]) -> Confirmation:
+        answer = await original(external_ids)
+        assert "m8" in {item.external_id for item in answer.served}, "the premise: m8 was served"
+        retraction = await fixture.media_items.retract(
+            fixture.source.id, {"m8"}, unseen_since=LATER + timedelta(days=1)
+        )
+        assert retraction.retracted == 1, "the premise: the push retracted m8"
+        return answer
+
+    fixture.adapter.confirm_gone = _retracted_once_answered  # type: ignore[method-assign]
+
+    second = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+
+    assert second.status is SyncRunStatus.COMPLETED
+    retracted = await fixture.media_items.get_by_external_id(fixture.source.id, "m8")
+    assert retracted is not None
+    assert retracted.available is False
+    assert (retracted.last_seen_at, retracted.container, retracted.width, retracted.height) == (
+        first.started_at,
+        "mkv",
+        3840,
+        2160,
+    )
+    kept = await fixture.media_items.get_by_external_id(fixture.source.id, "m7")
+    assert kept is not None
+    assert (kept.available, kept.container, kept.last_seen_at) == (True, "mp4", second.started_at)
+
+
 async def test_a_served_id_whose_entry_is_not_modelled_is_still_stamped() -> None:
     """The source still serves m8 and sends no entry to write, so its row keeps its description."""
     fixture = _Fixture()
@@ -799,6 +862,58 @@ async def test_a_sweep_whose_ingest_fails_retracts_and_stamps_nothing() -> None:
     kept = await fixture.media_items.get_by_external_id(fixture.source.id, "m8")
     assert kept is not None
     assert (kept.container, kept.last_seen_at) == ("mkv", first.started_at)
+
+
+async def test_a_sweep_whose_later_chunk_fails_keeps_the_earlier_and_resumes_the_rest() -> None:
+    """m17 and m18 commit with the failure, no rollback, and the resume asks about the rest."""
+    fixture = _Fixture(batch_size=2)
+    for index in range(20):
+        fixture.adapter.seed(_mkv(f"m{index}"), T0)
+    first = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    for external_id in ("m17", "m18", "m19"):
+        fixture.adapter.seed(_mp4(external_id), T0)
+        fixture.adapter.unlist(external_id)
+    fixture.adapter.forget("m16")
+    original = fixture.ingest.ingest_batch
+    catalog_down = True
+
+    async def _fails_on_m19(
+        source_id: uuid.UUID, items: Sequence[SourceItem], *, observed_at: AwareDatetime
+    ) -> IngestResult:
+        if catalog_down and any(item.external_id == "m19" for item in items):
+            raise PortUnavailable("the catalog went away")
+        return await original(source_id, items, observed_at=observed_at)
+
+    fixture.ingest.ingest_batch = _fails_on_m19  # type: ignore[method-assign]
+
+    failed = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+
+    assert (failed.status, failed.error) == (SyncRunStatus.FAILED, "the catalog went away")
+    assert failed.items_retracted == 0
+    assert fixture.rollbacks == 0
+    for external_id in ("m17", "m18"):
+        stored = await fixture.media_items.get_by_external_id(fixture.source.id, external_id)
+        assert stored is not None
+        assert (stored.container, stored.last_seen_at) == ("mp4", failed.started_at), external_id
+    unwritten = await fixture.media_items.get_by_external_id(fixture.source.id, "m19")
+    assert unwritten is not None
+    assert (unwritten.container, unwritten.last_seen_at) == ("mkv", first.started_at)
+    gone = await fixture.media_items.get_by_external_id(fixture.source.id, "m16")
+    assert gone is not None and gone.available is True
+
+    catalog_down = False
+    fixture.adapter.confirm_calls.clear()
+    fixture.adapter.unit_starts.clear()
+    resumed = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+
+    assert (resumed.id, resumed.started_at) == (failed.id, failed.started_at)
+    assert resumed.status is SyncRunStatus.COMPLETED
+    assert fixture.adapter.confirm_calls == [frozenset({"m16", "m19"})]
+    assert fixture.adapter.unit_starts == [], "the resume walked a unit again"
+    assert resumed.items_retracted == 1
+    rewritten = await fixture.media_items.get_by_external_id(fixture.source.id, "m19")
+    assert rewritten is not None
+    assert (rewritten.container, rewritten.last_seen_at) == ("mp4", resumed.started_at)
 
 
 # -- the delta lane ---------------------------------------------------------
