@@ -753,7 +753,7 @@ def test_each_version_read_by_id_describes_its_own_file(index: int) -> None:
 
 
 def test_a_transcode_only_item_is_still_catalogued() -> None:
-    """The fallback half of the rule: a transcode-only item is still catalogued.
+    """The lone-entry half of the rule: a transcode-only item is still catalogued.
 
     It has no container and so no direct URL, but it has a real codec, resolution and
     runtime, and reporting `None` for all of them would put a hole in the catalogue over

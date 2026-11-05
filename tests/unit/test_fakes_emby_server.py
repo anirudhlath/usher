@@ -1102,6 +1102,36 @@ async def test_a_version_group_read_by_id_renders_each_present_version_from_its_
     ] == [(member, *facts[member]) for member in present]
 
 
+async def test_a_member_with_no_own_entry_is_refused_rather_than_read_as_the_entry_beside_it(
+    driver: _Driver,
+) -> None:
+    """A real read lists its own `Container: null` entry, which this fake does not model.
+
+    Beside a sibling or an alternate it would read as that entry. Beside nothing it renders no
+    key, as does a listing of a grouped member, and a sibling beside one reads as itself.
+    """
+    refused = "does not model a transcode-only version's entry"
+    transcode_only = replace(MOVIE, container=None, width=1280, height=720)
+    driver.server.add_item(replace(transcode_only, external_id="lone"), ADDED_AT)
+    assert "MediaSources" not in await driver.payload("lone"), "the premise: beside nothing"
+
+    driver.server.add_item(replace(MOVIE, external_id="uhd"), ADDED_AT)
+    driver.server.add_item(replace(transcode_only, external_id="hd"), ADDED_AT)
+    driver.server.group_versions("uhd", "hd")
+    entries = (await driver.payload("uhd"))["MediaSources"]
+    assert [entry["ItemId"] for entry in entries] == ["uhd"], "the sibling reads as itself"
+    with pytest.raises(ValueError, match=refused):
+        await driver.payload("hd")
+    listed = await driver.session.json_body(
+        "GET", f"/Users/{USER_ID}/Items", params={"Ids": "hd", "Limit": "1"}, op="list"
+    )
+    assert ["MediaSources" in entry for entry in listed["Items"]] == [False]
+
+    driver.server.add_alternate_version("lone", container="mkv", width=3840, height=2160)
+    with pytest.raises(ValueError, match=refused):
+        await driver.payload("lone")
+
+
 def _given_next_up(driver: _Driver) -> None:
     driver.server.add_item(
         SourceItem(external_id="s0", name="S 0", kind=SourceItemKind.SERIES), ADDED_AT

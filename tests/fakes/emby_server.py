@@ -233,7 +233,9 @@ class FakeEmbyServer:
         item's own never wins, whether it is better, worse or unplayable.
 
         One divergence is recorded rather than modelled: this fake renders an alternate on
-        a listing too, where a real listing carries only the movie's own entry.
+        a listing too, where a real listing carries only the movie's own entry. An item with
+        no container has no own entry, so reading it beside an alternate raises, as
+        `group_versions` records.
         """
         media = load_emby_fixture("movie_item")["MediaSources"][0]
         media["Id"] = f"{external_id}-alt-{len(self._alternates.get(external_id, ()))}"
@@ -255,15 +257,16 @@ class FakeEmbyServer:
         this order, of those the rest of the request matches, before paging. That is
         what `ids_version_group.json` records Emby doing. Emby's full listing shows one
         version per group too; this fake does not model that, and no walk test groups
-        versions. A read by id of any member lists the own entry of every present member
-        with a container, in group order, as `version_group_by_id.json` records.
+        versions. A read by id of a member with a container lists the own entry of every
+        present member with one, in group order, as `version_group_by_id.json` records.
 
         Two divergences are recorded rather than modelled. Emby lists a transcode-only
-        version too, as an entry with `Container: null`, where this fake drops a member
-        with no container from every read of its group. And some real groups change
-        their order with the read, where this fake lists the members' own entries in one
-        order whichever member is read: only the read member's alternates, listed ahead of
-        them, change with the read.
+        version too, as an entry with `Container: null`, where this fake leaves a member with
+        no container out of its siblings' reads and raises on a read by id of that member,
+        which would otherwise read as a sibling. And some real groups change their order with
+        the read, where this fake lists the members' own entries in one order whichever
+        member is read: only the read member's alternates, listed ahead of them, change with
+        the read.
         """
         group = tuple(external_ids)
         for external_id in group:
@@ -694,7 +697,8 @@ class FakeEmbyServer:
         """`MediaSources`: the item's alternates, then its own entry, or no key with neither.
 
         A read by id of a grouped item lists the own entry of every member still held that
-        has one, in group order, where its own entry would be: see `group_versions`.
+        has one, in group order, where its own entry would be: see `group_versions`. An item
+        with no own entry raises rather than reading as the entries beside it.
         """
         members: tuple[str, ...] = (item.external_id,)
         if not for_listing:
@@ -704,6 +708,11 @@ class FakeEmbyServer:
         # Listed ahead of the own entries, which is the order that breaks a
         # `MediaSources[0]` adapter.
         entries = [*self._alternates.get(item.external_id, []), *own]
+        if entries and item.container is None:
+            raise ValueError(
+                f"{item.external_id} has no container, and this fake does not model a "
+                "transcode-only version's entry: it would read as the entry beside it"
+            )
         if entries:
             payload["MediaSources"] = entries
         else:
