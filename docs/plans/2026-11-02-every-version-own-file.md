@@ -676,14 +676,16 @@ git commit -m "playback: /play offers copies in /ways' quality order"
 
 **Preconditions:** the PR is merged and deployed, and the owner has said go for one full walk of the shared Emby source. Shared Emby gets GETs only.
 
-- [ ] **Step 1: The walk.** Run one full walk, so every listed copy is re-described by Task 2's rule and every hidden one by Task 4's sweep.
-- [ ] **Step 2: The sample.** Re-run the spec's sample over the id files in `/var/tmp/versions/`, which are never committed or posted. For each held copy in a version group, check:
+- [ ] **Step 1: The walk.** Run one full walk, so every listed copy is re-described by Task 2's rule and every hidden one by Task 4's sweep. Before it and after it, count the retracted rows Emby still serves (`confirm_gone` over the source's `available = false` rows): no sweep asks about them, so they are reported apart and are not a failure of Step 2. Read the run row's last heartbeat against its finish: that gap is how long the heartbeat stood still during the sweep's ingest, and it is weighed against both the 10-minute stale window and the console's 120-second "No heartbeat" line.
+- [ ] **Step 2: The sample.** Re-run the spec's sample over the id files in `/var/tmp/versions/`, which are never committed or posted. For each held and available copy in a version group, check:
   1. its stored description equals `to_source_item(own_entry_only(<its by-id read>))`;
   2. `/play`'s direct target for it carries `MediaSourceId=mediasource_<its own id>`.
-- [ ] **Step 3: The bytes.** For 20 groups, send a one-byte ranged GET (`Range: bytes=0-0`) to one copy's direct target. The `Content-Range` total must equal that copy's own entry's `Size`.
-- [ ] **Step 4: The fallbacks.** Read the walk's `usher.source.versions.fallbacks` total. A nonzero count goes on the PR with the rest, and the rows stay 🔨 until the owner rules on it.
+
+  Count the by-id reads in which no entry's `ItemId` names the item. For the groups whose copies differ in quality, check that `/play` now offers the better copy first: stored facts converge only at this walk and its sweep, and until then two versions tie.
+- [ ] **Step 3: The bytes.** Take 20 groups whose copies' own `Size`s differ, asserting that premise, since a group of equal sizes could pass on the group's best file. Send a one-byte ranged GET (`Range: bytes=0-0`) to each copy's direct target. Each `Content-Range` total must equal that copy's own entry's `Size`.
+- [ ] **Step 4: The fallbacks.** Read the server's `usher.source.versions.fallbacks` total after Step 2's `/play` requests, and the version-fallbacks panel's query beside it. The walk and the sweep add nothing by construction, since a listing names one entry per item, and the write-up says so. A nonzero count goes on the PR with the rest, and the rows stay 🔨 until the owner rules on it.
 - [ ] **Step 5: Post the raw output** on the PR: counts and booleans only, with no ids, names, paths, hosts or tokens.
-- [ ] **Step 6: The status tables.** Turn both to ✅ on a fresh docs branch from `main`, never on the merged one, and the owner merges it.
+- [ ] **Step 6: The status tables.** Turn both to ✅, and move PRD 10's version-fallbacks panel to the panels backed by real data, on a fresh docs branch from `main`, never on the merged one, and the owner merges it.
 
 ## Spec premises, checked against the tree
 
