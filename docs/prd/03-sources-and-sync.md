@@ -324,8 +324,9 @@ completes the run, since the source still serves them. If writing those entries
 fails partway, the batches already written are kept, committed with the failed
 run, and nothing is retracted; the next full walk resumes it and asks only about
 what is left. If the source cannot answer, the sweep changes nothing and the run
-fails; the next full walk resumes it and only sweeps. On either path, an Emby
-listing that names only items Usher did not ask about counts as no answer.
+fails; the next full walk resumes it and only sweeps. For a sweep and a push
+removal alike, an Emby listing that names only items Usher did not ask about
+counts as no answer.
 
 An item that reappears in a walk is available again at that moment. An item
 keeps the latest instant it was seen at — a walk's start, or the moment a push

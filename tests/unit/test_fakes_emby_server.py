@@ -1130,6 +1130,10 @@ async def test_a_member_with_no_own_entry_is_refused_rather_than_read_as_the_ent
     driver.server.add_alternate_version("lone", container="mkv", width=3840, height=2160)
     with pytest.raises(ValueError, match=refused):
         await driver.payload("lone")
+    with pytest.raises(ValueError, match=refused):
+        await driver.session.json_body(
+            "GET", f"/Users/{USER_ID}/Items", params={"Ids": "lone", "Limit": "1"}, op="list"
+        )
 
 
 def _given_next_up(driver: _Driver) -> None:
