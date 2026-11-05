@@ -447,7 +447,8 @@ async def test_a_sweep_retracts_what_the_source_confirms_gone_and_stamps_what_it
     assert served is not None
     assert (served.available, served.last_seen_at) == (True, second.started_at)
     assert [line.rstrip("\n") for line in lines if "sweep found" in line] == [
-        "Living Room Emby's sweep found 2 rows the walk did not list: 1 gone, 1 still served"
+        "Living Room Emby's sweep found 2 rows the walk did not list: "
+        "1 gone, 1 still served, 1 re-described"
     ]
 
 
@@ -484,7 +485,8 @@ async def test_a_sweep_with_nothing_unseen_asks_nothing_and_says_so(fixture: _Fi
     assert run.status is SyncRunStatus.COMPLETED
     assert fixture.adapter.confirm_calls == []
     assert [line.rstrip("\n") for line in lines if "sweep found" in line] == [
-        "Living Room Emby's sweep found 0 rows the walk did not list: 0 gone, 0 still served"
+        "Living Room Emby's sweep found 0 rows the walk did not list: "
+        "0 gone, 0 still served, 0 re-described"
     ]
 
 
@@ -772,7 +774,9 @@ async def test_a_sweep_leaves_a_row_a_push_retracted_after_the_source_answered()
 
     async def _retracted_once_answered(external_ids: Collection[str]) -> Confirmation:
         answer = await original(external_ids)
-        assert "m8" in {item.external_id for item in answer.served}, "the premise: m8 was served"
+        assert {item.external_id for item in answer.served} == {"m7", "m8"}, (
+            "the premise: the source served both"
+        )
         retraction = await fixture.media_items.retract(
             fixture.source.id, {"m8"}, unseen_since=LATER + timedelta(days=1)
         )
@@ -780,10 +784,18 @@ async def test_a_sweep_leaves_a_row_a_push_retracted_after_the_source_answered()
         return answer
 
     fixture.adapter.confirm_gone = _retracted_once_answered  # type: ignore[method-assign]
-
-    second = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    lines: list[str] = []
+    sink = logger.add(lines.append, level="INFO", format="{message}")
+    try:
+        second = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    finally:
+        logger.remove(sink)
 
     assert second.status is SyncRunStatus.COMPLETED
+    assert [line.rstrip("\n") for line in lines if "sweep found" in line] == [
+        "Living Room Emby's sweep found 2 rows the walk did not list: "
+        "0 gone, 2 still served, 1 re-described"
+    ]
     retracted = await fixture.media_items.get_by_external_id(fixture.source.id, "m8")
     assert retracted is not None
     assert retracted.available is False
@@ -828,8 +840,10 @@ async def test_a_served_id_whose_entry_is_not_modelled_is_still_stamped() -> Non
         True,
         "mkv",
     )
+    assert fixture.adapter.confirm_calls == [frozenset({"m8"})], "the premise: m8 alone was asked"
     assert [line.rstrip("\n") for line in lines if "sweep found" in line] == [
-        "Living Room Emby's sweep found 1 rows the walk did not list: 0 gone, 1 still served"
+        "Living Room Emby's sweep found 1 rows the walk did not list: "
+        "0 gone, 1 still served, 0 re-described"
     ]
 
 

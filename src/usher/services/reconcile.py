@@ -858,6 +858,10 @@ class ReconcileService:
         the run's completing row, and `items_seen` and the match counters stay the walk's own. A
         source that cannot answer raises before any of them, so nothing changes; a chunk that
         fails raises before the retraction and the stamp. Either way the run fails resumable.
+
+        The chunks hold their rows and the job rows they enqueue until the run commits, so a push
+        writing those rows can deadlock with them, and Postgres aborts one. A sweep's run closes as
+        abandoned and the next full walk sweeps again; a push lane stays down until Usher restarts.
         """
         run = progress.run
         if kind is not SyncRunKind.FULL:
@@ -912,11 +916,12 @@ class ReconcileService:
         )
         logger.info(
             "{source}'s sweep found {candidates} rows the walk did not list: "
-            "{gone} gone, {served} still served",
+            "{gone} gone, {served} still served, {described} re-described",
             source=source_name,
             candidates=len(unseen.external_ids),
             gone=len(gone),
             served=len(unseen.external_ids) - len(gone),
+            described=len(entries),
         )
         # By name, as `usher.sync.run.duration` beside it is labelled: the run holds only a
         # `source_id`, and a second per-source identity in telemetry is one identity too many.
