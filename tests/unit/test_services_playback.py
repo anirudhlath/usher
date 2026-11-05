@@ -854,6 +854,43 @@ async def test_a_better_copy_seen_earlier_is_offered_before_a_worse_one_seen_lat
     ]
 
 
+async def test_a_better_picture_is_offered_before_a_better_container() -> None:
+    """The score's parts keep their priority, with two of them seeded to disagree.
+
+    Attic's 1080p copy has the better container, is seen last and is seeded first, so only the
+    score read in its own order puts the 4K copy in front.
+    """
+    household = _Household()
+    attic = await household.add_source("Attic Emby")
+    living_room = await household.add_source("Living Room Emby")
+    await household.add_copy(attic, external_id="e1", last_seen_at=LATER, width=1920, height=1080)
+    await household.add_copy(living_room, external_id="e2", last_seen_at=T0, container="mp4")
+    household.factory.script(attic, targets=_emby_shaped_targets(DIRECT_URL))
+    household.factory.script(living_room, targets=_emby_shaped_targets(SECOND_URL))
+
+    copies = {
+        copy.source_id: copy
+        for copy in await household.media_items.list_for_title(household.title_id)
+    }
+    attic_score = quality_of(copies[attic.id]).score
+    living_room_score = quality_of(copies[living_room.id]).score
+    assert attic_score[-1] > living_room_score[-1], "the premise: the container favours Attic"
+    assert attic_score[0] < living_room_score[0], "the premise: the resolution favours Living Room"
+    assert copies[attic.id].last_seen_at > copies[living_room.id].last_seen_at, (
+        "the premise: recency puts Attic first"
+    )
+    assert copies[attic.id].id < copies[living_room.id].id, (
+        "the premise: id order puts Attic first too"
+    )
+
+    resolution = await household.service().for_title(household.title_id, name=NAME)
+
+    assert list(dict.fromkeys(t.source_name for t in resolution.targets)) == [
+        "Living Room Emby",
+        "Attic Emby",
+    ]
+
+
 async def test_an_available_copy_is_offered_before_a_retracted_one_of_better_quality() -> None:
     """Availability outranks quality: a retracted copy is a fallback, however good its file.
 
@@ -1069,7 +1106,7 @@ async def test_sources_are_asked_and_named_in_the_order_copies_are_offered() -> 
 
 
 async def test_two_versions_on_one_source_are_asked_for_and_offered_best_first() -> None:
-    """The slice's own scenario: the sort works per copy, not per source.
+    """The sort works per copy, not per source.
 
     Recency and id order both favour the 1080p version. Its source answers per copy here, since
     a real one does and one answer for both would leave the targets showing no order at all.
@@ -1114,8 +1151,9 @@ async def test_two_versions_on_one_source_are_asked_for_and_offered_best_first()
 async def test_play_order_reuses_ways_quality(monkeypatch: pytest.MonkeyPatch) -> None:
     """`/play`'s order follows whatever `quality_of` answers.
 
-    Recency, id order and today's score all put Living Room first, so only a sort that asks this
-    name for its `score` puts Attic first once that answer is turned around.
+    Recency, id order and today's score all put Living Room first, so a sort on any of them fails
+    here. One that asks this name for its `score` puts Attic first once that answer is turned
+    around. The answer has two parts, so a sort reading only the first part of it fails too.
     """
     assert vars(usher.services.playback)["quality_of"] is quality_of, (
         "the premise: the name is the domain's own function"
@@ -1144,7 +1182,7 @@ async def test_play_order_reuses_ways_quality(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(
         usher.services.playback,
         "quality_of",
-        lambda item: SimpleNamespace(score=(-item.height,)),
+        lambda item: SimpleNamespace(score=(0, -item.height)),
     )
 
     resolution = await household.service().for_title(household.title_id, name=NAME)
