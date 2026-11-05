@@ -683,9 +683,9 @@ git commit -m "playback: /play offers copies in /ways' quality order"
 
   Count the by-id reads in which no entry's `ItemId` names the item. For the groups whose copies differ in quality, check that `/play` now offers the better copy first: stored facts converge only at this walk and its sweep, and until then two versions tie.
 - [ ] **Step 3: The bytes.** Take 20 groups whose copies' own `Size`s differ, asserting that premise, since a group of equal sizes could pass on the group's best file. Send a one-byte ranged GET (`Range: bytes=0-0`) to each copy's direct target. Each `Content-Range` total must equal that copy's own entry's `Size`.
-- [ ] **Step 4: The fallbacks.** Read the server's `usher.source.versions.fallbacks` total after Step 2's `/play` requests, and the version-fallbacks panel's query beside it. The walk and the sweep add nothing by construction, since a listing names one entry per item, and the write-up says so. A nonzero count goes on the PR with the rest, and the rows stay 🔨 until the owner rules on it.
+- [ ] **Step 4: The fallbacks.** Read the server's `usher.source.versions.fallbacks` total after Step 2's `/play` requests, and the version-fallbacks panel's query beside it. Read the walk's own process with `max_over_time`, confirming or correcting what section 14 of `dashboards/README.md` says about a walk's series disappearing. The walk and the sweep add nothing by construction, since a listing names one entry per item, and the write-up says so. A nonzero count goes on the PR with the rest, and the rows stay 🔨 until the owner rules on it.
 - [ ] **Step 5: Post the raw output** on the PR: counts and booleans only, with no ids, names, paths, hosts or tokens.
-- [ ] **Step 6: The status tables.** Turn both to ✅, and move PRD 10's version-fallbacks panel to the panels backed by real data, on a fresh docs branch from `main`, never on the merged one, and the owner merges it.
+- [ ] **Step 6: The status tables.** Turn both to ✅, move PRD 10's version-fallbacks panel to the panels backed by real data, and give section 14 of `dashboards/README.md` its "Returned" line, on a fresh docs branch from `main`, never on the merged one, and the owner merges it.
 
 ## Spec premises, checked against the tree
 
