@@ -320,10 +320,12 @@ for that source, not of the source itself. Otherwise it asks the source about
 each candidate. It marks unavailable those the source confirms gone, and
 re-describes the rest from the entries the source returned, as a walk writes a
 listed item, recording them as seen at the walk's start in the commit that
-completes the run, since the source still serves them. If the source cannot
-answer, the sweep changes nothing and the run fails; the next full walk resumes
-it and only sweeps. On either path, an Emby listing that names only items Usher
-did not ask about counts as no answer.
+completes the run, since the source still serves them. If writing those entries
+fails partway, the batches already written are kept, committed with the failed
+run, and nothing is retracted; the next full walk resumes it and asks only about
+what is left. If the source cannot answer, the sweep changes nothing and the run
+fails; the next full walk resumes it and only sweeps. On either path, an Emby
+listing that names only items Usher did not ask about counts as no answer.
 
 An item that reappears in a walk is available again at that moment. An item
 keeps the latest instant it was seen at — a walk's start, or the moment a push
@@ -331,7 +333,9 @@ event read it — so a walk that began earlier and reads it again never exposes
 it to a later full walk's sweep. The sweep only ever sets `false`, and a row a
 push retracted after the source answered stays retracted. The one gap is a
 walk's too: a retraction landing while those rows are being written is undone
-until the next full walk's sweep.
+until the next full walk's sweep. The sweep asks only about available rows, so a
+row already retracted stays retracted until a walk lists it or a push event reads
+it, even while the source still serves it.
 
 **A source is either a library this deployment owns or a *view* of somebody
 else's, and Usher does not model the difference.** Pointing Usher at a server
@@ -614,7 +618,8 @@ whose `ItemId` is the item's id, else the one whose `Id` is the item's id or
 `MediaSourceId` names that entry, and the copy's description is read from it. A
 payload with several entries naming none plays its best version, the most
 pixels among those with a container and then the most bytes, and is logged as a
-WARNING and counted (`usher.source.versions.fallbacks`).
+WARNING and counted (`usher.source.versions.fallbacks`). When none of them has a
+container it is logged and counted the same, and it has no target.
 
 `StreamTarget` also carries `scheme` (for deep links) and `audio` (a single
 composite token such as `truehd_atmos_7_1`, which is a different thing from the
