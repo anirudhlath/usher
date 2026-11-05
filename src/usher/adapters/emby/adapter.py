@@ -953,7 +953,8 @@ class EmbyAdapter(SourceAdapter):
             span.set_attribute("usher.source", self._source.name)
             span.set_attribute("usher.confirm.asked", len(remaining))
             served: list[SourceItem] = []
-            while remaining:
+            # Bounded by the ids asked: a round that goes on lists at least one of them.
+            for _ in range(len(remaining)):
                 listed: dict[str, SourceItem | None] = {}
                 for chunk in batched(sorted(remaining), IDS_PER_REQUEST, strict=False):
                     listed |= await self._listed_of(chunk)
