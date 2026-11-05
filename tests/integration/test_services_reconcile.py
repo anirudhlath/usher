@@ -6,6 +6,7 @@ For the things the fakes cannot say: a refused sweep, and the sweep's own SQL.
 import asyncio
 import functools
 from collections.abc import AsyncGenerator, Awaitable, Callable, Collection, Iterator
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -428,6 +429,40 @@ async def test_a_walk_retracts_only_what_the_source_confirms_gone(
     served = await media_items.get_by_external_id(source.id, "m7")
     assert served is not None
     assert (served.available, served.last_seen_at) == (True, second.started_at)
+
+
+async def test_a_sweep_re_describes_the_hidden_versions_it_keeps(
+    service: ReconcileService,
+    media_items: PostgresMediaItemRepository,
+    source: Source,
+    adapter: _Adapter,
+) -> None:
+    """Against the real table, in two chunks: m16 to m18 are in no listing, and m19 is gone."""
+    for index in range(20):
+        adapter.items[f"m{index}"] = _item(f"m{index}")
+    await service.reconcile(source, SyncRunKind.FULL, adapter)  # type: ignore[arg-type]
+    kept = ("m16", "m17", "m18")
+    for external_id in kept:
+        adapter.items[external_id] = replace(
+            _item(external_id), container="mp4", width=1920, height=1080
+        )
+        adapter.unlisted.add(external_id)
+    del adapter.items["m19"]
+    second = await service.reconcile(source, SyncRunKind.FULL, adapter)  # type: ignore[arg-type]
+    assert second.status is SyncRunStatus.COMPLETED
+    assert second.items_seen == 16
+    assert second.items_retracted == 1
+    for external_id in kept:
+        stored = await media_items.get_by_external_id(source.id, external_id)
+        assert stored is not None
+        assert (stored.container, stored.width, stored.height, stored.last_seen_at) == (
+            "mp4",
+            1920,
+            1080,
+            second.started_at,
+        ), external_id
+    gone = await media_items.get_by_external_id(source.id, "m19")
+    assert gone is not None and gone.available is False
 
 
 async def test_a_walk_that_raises_leaves_every_row_available(

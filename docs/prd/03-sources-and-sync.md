@@ -317,10 +317,12 @@ refuses, raising and changing nothing, before asking the source anything.
 `1.0` disables the ceiling. The ceiling is a fraction of what *Usher* holds
 for that source, not of the source itself. Otherwise it asks the source about
 each candidate. It marks unavailable those the source confirms gone, and
-records the rest as seen at the walk's start, since the source still serves
-them. If the source cannot answer, the sweep changes nothing and the run
-fails; the next full walk resumes it and only sweeps. On either path, an
-Emby listing that names only items Usher did not ask about counts as no answer.
+re-describes the rest from the entries the source returned, as a walk writes a
+listed item, recording them as seen at the walk's start in the commit that
+completes the run, since the source still serves them. If the source cannot
+answer, the sweep changes nothing and the run fails; the next full walk resumes
+it and only sweeps. On either path, an Emby listing that names only items Usher
+did not ask about counts as no answer.
 
 An item that reappears in a walk is available again at that moment. An item
 keeps the latest instant it was seen at — a walk's start, or the moment a push

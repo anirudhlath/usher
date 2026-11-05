@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from itertools import batched
 from typing import Any
 
 from loguru import logger
@@ -847,21 +848,16 @@ class ReconcileService:
     async def _sweep(
         self, progress: _Progress, kind: SyncRunKind, source_name: str, adapter: SourceAdapter
     ) -> SyncRun:
-        """Retract what the source confirms gone -- full walks only, after one finished.
+        """Keep or retract the rows a finished full walk did not list, as the source answers.
 
-        The rows the walk did not list are the candidates, and the ceiling is applied to
-        them before the source is asked anything. Of the rest, those the source no longer
-        serves are retracted, and those it still serves are stamped as seen at the run's
-        `started_at`. Those are alternate versions: Emby's full listing names one version
-        of each group, and which one can change between walks, so a sweep can find
-        thousands still served with no page missed. Both writes commit with the run's
-        completing row. A source that cannot answer raises before either, so nothing
-        changes and the run fails resumable.
-
-        `source_name` is carried in for the metric's label rather than read off the run,
-        which holds only a `source_id`: `usher.sync.run.duration` beside it is already
-        labelled by name, and a second per-source identity in telemetry is one identity
-        too many.
+        They are the candidates, and the ceiling is applied to them before the source is
+        asked anything. Then, in order: the source is asked; the entries it served are
+        ingested as a walk ingests them, in `batch_size` chunks at the run's `started_at`;
+        what it no longer serves is retracted; and every id it still serves is stamped as
+        seen at that instant, modelled or not. All three writes commit with the run's
+        completing row, and the run's counters stay the walk's own. A source that cannot
+        answer raises before any of them, so nothing changes; a chunk that fails raises
+        before the retraction and the stamp. Either way the run fails resumable.
         """
         run = progress.run
         if kind is not SyncRunKind.FULL:
@@ -896,6 +892,12 @@ class ReconcileService:
             confirmed_gone(adapter, unseen.external_ids, source=source_name, path="sweep"),
         )
         gone = confirmation.gone
+        # Not `_flush` or `_beating`, which both commit: these chunks, the retraction and the
+        # stamp all ride the run's completing commit. These are alternate versions: Emby's full
+        # listing names one version of each group, and which one can change between walks, so
+        # there can be thousands with no page missed.
+        for chunk in batched(confirmation.served, self._batch_size, strict=False):
+            await self._ingest.ingest_batch(run.source_id, chunk, observed_at=run.started_at)
         retraction = await self._media_items.retract(
             run.source_id, gone, unseen_since=run.started_at
         )
@@ -910,6 +912,8 @@ class ReconcileService:
             gone=len(gone),
             served=len(unseen.external_ids) - len(gone),
         )
+        # By name, as `usher.sync.run.duration` beside it is labelled: the run holds only a
+        # `source_id`, and a second per-source identity in telemetry is one identity too many.
         _retraction_fraction.record(
             _fraction(retraction.retracted, unseen.total),
             {"source": source_name, "outcome": "swept"},
