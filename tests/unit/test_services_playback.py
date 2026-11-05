@@ -7,12 +7,12 @@ import json
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from urllib.parse import quote
 
 import pytest
 from pydantic import SecretStr
 
-import usher.domain.ways
 import usher.services.playback
 from tests.fakes.credential_store import FakeCredentialStore
 from tests.fakes.media_item_repository import FakeMediaItemRepository
@@ -96,6 +96,7 @@ class _Script:
 
     targets: list[StreamTarget] = field(default_factory=list)
     error: Exception | None = None
+    by_copy: dict[str, list[StreamTarget]] = field(default_factory=dict)
 
 
 class RecordingFactory(SourceAdapterFactory):
@@ -118,8 +119,9 @@ class RecordingFactory(SourceAdapterFactory):
         *,
         targets: list[StreamTarget] | None = None,
         error: Exception | None = None,
+        by_copy: dict[str, list[StreamTarget]] | None = None,
     ) -> None:
-        self.scripts[source.id] = _Script(targets=targets or [], error=error)
+        self.scripts[source.id] = _Script(targets=targets or [], error=error, by_copy=by_copy or {})
 
     def build(self, source: Source, credentials: SourceCredentials) -> SourceAdapter:
         self.built.append(source.id)
@@ -143,7 +145,7 @@ class _ScriptedAdapter(FakeSourceAdapter):
         self._factory.asked.append((self._source.id, external_id))
         if self._script.error is not None:
             raise self._script.error
-        return list(self._script.targets)
+        return list(self._script.by_copy.get(external_id, self._script.targets))
 
     async def aclose(self) -> None:
         self._factory.closed.append(self._source.id)
@@ -1066,9 +1068,88 @@ async def test_sources_are_asked_and_named_in_the_order_copies_are_offered() -> 
     assert resolution.detail.rpartition(": ")[2] == "Living Room Emby, Attic Emby"
 
 
-def test_play_order_reuses_ways_quality() -> None:
-    """One quality order, so `/play` and `/ways` cannot come to score a copy differently."""
-    assert usher.services.playback.quality_of is usher.domain.ways.quality_of  # type: ignore[attr-defined]
+async def test_two_versions_on_one_source_are_asked_for_and_offered_best_first() -> None:
+    """The slice's own scenario: the sort works per copy, not per source.
+
+    Recency and id order both favour the 1080p version. Its source answers per copy here, since
+    a real one does and one answer for both would leave the targets showing no order at all.
+    """
+    household = _Household()
+    source = await household.add_source("Living Room Emby")
+    await household.add_copy(source, external_id="e1", last_seen_at=LATER, width=1920, height=1080)
+    await household.add_copy(source, external_id="e2", last_seen_at=T0)
+    household.factory.script(
+        source,
+        by_copy={
+            "e1": _emby_shaped_targets(DIRECT_URL),
+            "e2": _emby_shaped_targets(SECOND_URL),
+        },
+    )
+
+    stored = await household.media_items.list_for_title(household.title_id)
+    assert [copy.source_id for copy in stored] == [source.id, source.id], (
+        "the premise: two copies, on one source"
+    )
+    copies = {copy.external_id: copy for copy in stored}
+    assert copies["e1"].last_seen_at > copies["e2"].last_seen_at, (
+        "the premise: recency puts e1 first"
+    )
+    assert copies["e1"].id < copies["e2"].id, "the premise: id order puts e1 first too"
+    assert quality_of(copies["e2"]).score > quality_of(copies["e1"]).score, (
+        "the premise: quality puts e2 first"
+    )
+
+    resolution = await household.service().for_title(household.title_id, name=NAME)
+
+    assert household.factory.asked == [(source.id, "e2"), (source.id, "e1")]
+    assert household.mint.calls == [SECOND_URL, DIRECT_URL], "so tkt1a is e2's file and tkt2a e1's"
+    assert [entry.target.url for entry in resolution.targets] == [
+        "tkt1a",
+        wrap_deep_link("tkt1a"),
+        "tkt2a",
+        wrap_deep_link("tkt2a"),
+    ]
+
+
+async def test_play_order_reuses_ways_quality(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`/play`'s order follows whatever `quality_of` answers.
+
+    Recency, id order and today's score all put Living Room first, so only a sort that asks this
+    name for its `score` puts Attic first once that answer is turned around.
+    """
+    assert vars(usher.services.playback)["quality_of"] is quality_of, (
+        "the premise: the name is the domain's own function"
+    )
+    household = _Household()
+    attic = await household.add_source("Attic Emby")
+    living_room = await household.add_source("Living Room Emby")
+    await household.add_copy(living_room, external_id="e1", last_seen_at=LATER)
+    await household.add_copy(attic, external_id="e2", last_seen_at=T0, width=1920, height=1080)
+    household.factory.script(attic, targets=_emby_shaped_targets(DIRECT_URL))
+    household.factory.script(living_room, targets=_emby_shaped_targets(SECOND_URL))
+
+    copies = {
+        copy.source_id: copy
+        for copy in await household.media_items.list_for_title(household.title_id)
+    }
+    assert copies[living_room.id].last_seen_at > copies[attic.id].last_seen_at, (
+        "the premise: recency puts Living Room first"
+    )
+    assert copies[living_room.id].id < copies[attic.id].id, (
+        "the premise: id order puts Living Room first too"
+    )
+    assert quality_of(copies[living_room.id]).score > quality_of(copies[attic.id]).score, (
+        "the premise: so does today's score"
+    )
+    monkeypatch.setattr(
+        usher.services.playback,
+        "quality_of",
+        lambda item: SimpleNamespace(score=(-item.height,)),
+    )
+
+    resolution = await household.service().for_title(household.title_id, name=NAME)
+
+    assert resolution.targets[0].source_name == "Attic Emby"
 
 
 # -- adapter lifetime ---------------------------------------------------
