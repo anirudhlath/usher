@@ -363,14 +363,16 @@ applied, by kind**, which separates "the lane is up" from "the lane is doing
 anything" · Emby request latency · TMDb requests/sec against the
 `USHER_TMDB_REQUESTS_PER_SECOND` ceiling, with 429 count · **whole-library
 walks: the listing limit and the mean unit duration, by stage** · **listing
-page size, by source** · **retraction checks, by path and outcome**.
+page size, by source** · **retraction checks, by path and outcome** · **version
+fallbacks**.
 
-✅ **Every panel here is backed by real data as of M9, the whole-library walk
-panel as of the fast first sync's acceptance walk, the retraction-checks panel
-as of confirmed retraction's acceptance, and the listing-page-size panel as of
-adaptive page size's acceptance walk.** ⚠️ A panel that
-drains the whole unmatched queue should page with the keyset cursor; the
-`OFFSET` form is quadratic in queue depth.
+✅ **Every panel here but version fallbacks is backed by real data as of M9, the
+whole-library walk panel as of the fast first sync's acceptance walk, the
+retraction-checks panel as of confirmed retraction's acceptance, and the
+listing-page-size panel as of adaptive page size's acceptance walk.** ⏳ The
+version-fallbacks panel is unread until every version playable's acceptance.
+⚠️ A panel that drains the whole unmatched queue should page with the keyset
+cursor; the `OFFSET` form is quadratic in queue depth.
 
 ### 4 — Performance
 

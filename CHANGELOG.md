@@ -155,6 +155,7 @@ Versioning is `0.x` while the wire contract may still move —
   order: available copies first, then the best, then the most recently seen. A
   read that lists several versions, none of them the item's own, falls back to
   the best with a WARNING and the counter `usher.source.versions.fallbacks`.
+  Dashboard 3 draws it.
 - **A full walk no longer marks items unavailable that the server still
   serves.** Emby's full listing shows one version of a film with several, so
   every full walk retracted the alternate versions a delta or a push event had
