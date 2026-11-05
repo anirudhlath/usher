@@ -32,7 +32,8 @@ Versioning is `0.x` while the wire contract may still move —
   each unit's position is kept in `sync_run_units`, and the run is marked as a
   whole-library walk (`sync_runs.planned`, migration `m10h`). Every item walk,
   single walks included, moves its run's `heartbeat_at` with every commit and at
-  least once a minute between commits, to show it is alive.
+  least once a minute between commits, except while a sweep re-describes what it
+  keeps, to show it is alive.
 - A whole-library walk that fails or is killed resumes where it stopped, even
   once the next full or delta walk has closed it as abandoned: the same run,
   each unit from the position it committed. While one is alive — its
@@ -143,6 +144,15 @@ Versioning is `0.x` while the wire contract may still move —
 
 ### Fixed
 
+- **Every version of a title now plays as itself.** Reading one version of a
+  group answered with the group's best file, so a copy could describe and stream
+  another version's. A copy now takes its description and its stream from its
+  own file, and a full walk's sweep re-describes the versions Emby's listing
+  hides, so stored descriptions come right at the first full walk after
+  upgrading. `/play` offers copies in `/ways`' quality order: available copies
+  first, then the best, then the most recently seen. A read that lists several
+  versions, none of them the item's own, falls back to the best with a WARNING
+  and the counter `usher.source.versions.fallbacks`.
 - **A full walk no longer marks items unavailable that the server still
   serves.** Emby's full listing shows one version of a film with several, so
   every full walk retracted the alternate versions a delta or a push event had
