@@ -1,7 +1,7 @@
 {
   "uid": "usher-pipeline",
   "title": "Usher \u2014 3 Pipeline",
-  "description": "Thirteen panels, mixed by design: Prometheus for rates and depths, Postgres for the queue's and the reconciler's own breakdowns. Two of these panels read a series whose label is not the one a reader of the title assumes \u2014 the queue-depth pair is two panels because usher.jobs.queued is labelled kind and a priority band exists only in the jobs table, and the enrichment panel splits on outcome because the demand/background split does not exist on that histogram at all.",
+  "description": "Fourteen panels, mixed by design: Prometheus for rates and depths, Postgres for the queue's and the reconciler's own breakdowns. Two of these panels read a series whose label is not the one a reader of the title assumes \u2014 the queue-depth pair is two panels because usher.jobs.queued is labelled kind and a priority band exists only in the jobs table, and the enrichment panel splits on outcome because the demand/background split does not exist on that histogram at all.",
   "tags": [
     "usher",
     "pipeline"
@@ -767,7 +767,7 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 24,
+        "w": 12,
         "x": 0,
         "y": 40
       },
@@ -866,6 +866,64 @@
           },
           "expr": "max by (source) (usher_source_listing_page_size_ratio)",
           "legendFormat": "{{source}} \u00b7 page size",
+          "range": true,
+          "instant": false
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Version fallbacks",
+      "description": "usher.source.versions.fallbacks, as usher_source_versions_fallbacks_total, with no labels of its own: the reads of an item listing several media sources, none of them its own, so the best stood in and the copy reads as that file. **A climbing line means a source's reads have stopped naming versions.** The cumulative counter is plotted rather than its rate, so the first fallback draws. It restarts from zero when Usher restarts. A walk counts in its own usher sync process, so what it counted disappears about five minutes after the walk ends, as panel 12's sweep lines do: read a walk's count with max_over_time over its window.\n\n**There is no series until the first fallback**, so an empty panel is the healthy reading.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "usher-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 40
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "showPoints": "never",
+            "fillOpacity": 8
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "editorMode": "code",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "usher-prometheus"
+          },
+          "expr": "sum(usher_source_versions_fallbacks_total)",
+          "legendFormat": "fallbacks",
           "range": true,
           "instant": false
         }

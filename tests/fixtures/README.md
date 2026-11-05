@@ -20,9 +20,11 @@ Nothing under `src/` or `tests/` carries a third-party **identifier** or a
 third-party **record**.
 
 - **Identifiers.** Every IMDb id is in the reserved band `tt99` + 6 digits
-  (`nm99` for a name id); every TMDb, TVDb and TVRage id in a fixture is at
-  or above **90,000,000**; every TMDb `credit_id`/`_id` and every Emby object
-  id is zero-filled. The bands are chosen to be unreachable: real tconsts sat
+  (`nm99` for a name id). In a fixture, every TMDb, TVDb and TVRage id and
+  every numeric Emby id is at or above **90,000,000**, a media source's
+  `mediasource_<id>` counting as the id it carries; every TMDb
+  `credit_id`/`_id` and every 32-hex Emby object id is zero-filled. The bands
+  are chosen to be unreachable: real tconsts sat
   around `tt3xxxxxxx` in 2026, TMDb's own daily export tops out near 1.4M
   movie ids and 230k series ids, and the largest TVDb id this project has
   observed live is a seven-digit episode id.
@@ -80,6 +82,7 @@ can be matched up by eye.
 | `tt99000100` / TMDb `90000100` | `emby/movie_item.json` |
 | `tt99000110` / TVDb `91000110` | `emby/episode_item.json` |
 | `tt99000120` / TMDb `90000120` | `emby/multi_version_movie.json` |
+| `tt99000130` / TMDb `90000130` / Emby `90000131`–`90000132` | `emby/version_group_by_id.json` |
 | `tt99000150` | the Greek-final-sigma title, where Postgres `lower()`, Python `str.lower()` and `str.casefold()` disagree |
 | `tt99000160` | the `ß` title, where both `lower()`s agree and `casefold()` does not |
 | `tt99000210` | the title already carrying TMDb's own figures, over which `apply_ratings` must write only the `imdb_*` pair |

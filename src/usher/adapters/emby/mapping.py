@@ -10,11 +10,20 @@ from functools import partial
 from typing import Any
 
 from loguru import logger
+from opentelemetry import metrics
 from pydantic import AwareDatetime
 
 from usher.domain.enums import HdrFormat
 from usher.ports.errors import PortDataMalformed
 from usher.ports.source import INT32_MAX, SourceItem, SourceItemKind, SourceWatchState
+
+_meter = metrics.get_meter("usher.source.emby")
+# PRD 10's catalogue. No labels: the mapping never learns which source it maps for.
+_versions_fallbacks = _meter.create_counter(
+    "usher.source.versions.fallbacks",
+    unit="1",
+    description="Reads of an item with several media sources, none its own, so the best stood in",
+)
 
 # Emby counts in 100-nanosecond ticks, everywhere: runtimes, playback
 # positions, durations.
@@ -208,13 +217,36 @@ def _playback_rank(media_source: Mapping[str, Any]) -> tuple[int, int]:
 
 
 def primary_media_source(payload: Mapping[str, Any]) -> Mapping[str, Any] | None:
-    """The version Usher describes and plays, or `None` for a folder item."""
+    """The item's own `MediaSources` entry, which Usher describes and plays.
+
+    Decided in this order: no entry that is an object is `None`, a folder item; exactly
+    one is that one; else the entry whose `ItemId` is the item's `Id`; else the one whose
+    `Id` is the item's `Id` or `mediasource_` followed by it; else the best version by
+    `_playback_rank`, among those with a container if any has one, logged as a WARNING
+    and counted. A payload with no `Id` names no entry its own.
+    """
     sources = payload.get("MediaSources")
     if not isinstance(sources, list):
         return None
     candidates = [source for source in sources if isinstance(source, Mapping)]
     if not candidates:
         return None
+    if len(candidates) == 1:
+        return candidates[0]
+    own_id = as_text(payload.get("Id"))
+    if own_id is not None:
+        for source in candidates:
+            if source.get("ItemId") == own_id:
+                return source
+        for source in candidates:
+            if source.get("Id") in (own_id, f"mediasource_{own_id}"):
+                return source
+    logger.warning(
+        "Emby listed {count} media sources for an item and none is its own, so the best "
+        "version stands in",
+        count=len(candidates),
+    )
+    _versions_fallbacks.add(1)
     playable = [source for source in candidates if as_lower(source.get("Container"))]
     return max(playable or candidates, key=_playback_rank)
 

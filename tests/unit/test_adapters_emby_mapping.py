@@ -1,14 +1,20 @@
 # tests/unit/test_adapters_emby_mapping.py
 """Emby's JSON -> the port's DTOs, against the committed fixtures."""
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
+from typing import Any
 
 import pytest
 from loguru import logger
+from opentelemetry import metrics
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader, NumberDataPoint
 
-from tests.fakes.emby_fixtures import load_emby_fixture
+from tests.fakes.emby_fixtures import load_emby_fixture, own_entry_only
 from usher.adapters.emby.mapping import (
+    _playback_rank,
     as_int,
     audio_token,
     emby_datetime,
@@ -23,7 +29,7 @@ from usher.adapters.emby.mapping import (
 )
 from usher.domain.enums import HdrFormat
 from usher.ports.errors import PortDataMalformed
-from usher.ports.source import SourceItemKind
+from usher.ports.source import SourceItem, SourceItemKind
 
 
 def test_a_movie_maps_every_field_the_port_promises() -> None:
@@ -516,7 +522,54 @@ def test_a_malformed_item_reports_a_truncated_name_not_a_payload_dump() -> None:
     assert len(exc_info.value.detail) == 60
 
 
-def test_a_multi_version_item_is_catalogued_at_its_best_playable_version() -> None:
+_FALLBACK = (
+    "Emby listed 3 media sources for an item and none is its own, so the best version stands in"
+)
+
+
+@pytest.fixture
+def meter_reader() -> Iterator[InMemoryMetricReader]:
+    """A provider of this test's own; `tests/conftest.py` resets the set-once global."""
+    reader = InMemoryMetricReader()
+    metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
+    yield reader
+
+
+def _fallbacks(reader: InMemoryMetricReader) -> float:
+    """The summed value of every `usher.source.versions.fallbacks` point, `0.0` with none.
+
+    Each point must carry no attributes, since the counter has no labels.
+    """
+    total = 0.0
+    data = reader.get_metrics_data()
+    for resource in data.resource_metrics if data is not None else []:
+        for scope in resource.scope_metrics:
+            for metric in scope.metrics:
+                if metric.name != "usher.source.versions.fallbacks":
+                    continue
+                for point in metric.data.data_points:
+                    assert isinstance(point, NumberDataPoint)
+                    assert not point.attributes, "the counter carries no labels"
+                    total += point.value
+    return total
+
+
+def _pixels(entry: Mapping[str, Any]) -> int:
+    """An entry's video stream's width times its height, read off the fixture."""
+    [video] = [stream for stream in entry["MediaStreams"] if stream["Type"] == "Video"]
+    return int(video["Width"]) * int(video["Height"])
+
+
+def _described(payload: dict[str, Any]) -> SourceItem:
+    """`to_source_item` with `raw` set aside, since `raw` is the payload itself."""
+    item = to_source_item(payload)
+    assert item is not None
+    return replace(item, raw={})
+
+
+def test_several_entries_naming_none_fall_back_to_the_best_and_say_so(
+    meter_reader: InMemoryMetricReader, warnings_logged: list[str]
+) -> None:
     """`multi_version_movie.json` lists transcode-only, 2160p, 1080p, in that order.
 
     "First wins" catalogues a version with no container at all and "last wins"
@@ -533,10 +586,174 @@ def test_a_multi_version_item_is_catalogued_at_its_best_playable_version() -> No
     assert item.audio_channels == 8
     assert item.file_size_bytes == 61_847_529_062
     assert item.hdr_format is HdrFormat.HDR10
+    assert [line.rstrip("\n") for line in warnings_logged] == [_FALLBACK]
+    assert _fallbacks(meter_reader) == 1.0
+
+
+def test_the_fallback_passes_over_a_better_version_it_cannot_play(
+    warnings_logged: list[str],
+) -> None:
+    """With no entry its own, a version with no container loses even when it ranks first.
+
+    The transcode-only entry is given one byte more than the 2160p file it ties on
+    pixels, so a best pick blind to the container would take it.
+    """
+    payload = load_emby_fixture("multi_version_movie")
+    transcode, best, _ = payload["MediaSources"]
+    transcode["Size"] = best["Size"] + 1
+    assert max(payload["MediaSources"], key=_playback_rank) is transcode, (
+        "the premise: a best pick blind to the container takes the transcode"
+    )
+    chosen = primary_media_source(payload)
+    assert [line.rstrip("\n") for line in warnings_logged] == [_FALLBACK], (
+        "the premise: no entry is the item's own, so the fallback answered"
+    )
+    assert chosen is best
+
+
+def test_the_fallback_with_no_version_it_can_play_takes_the_best_of_them(
+    warnings_logged: list[str],
+) -> None:
+    """With no entry its own and none with a container, the best of them stands in.
+
+    The copy is then described from its best file rather than the read failing for
+    want of a playable one.
+    """
+    payload = load_emby_fixture("multi_version_movie")
+    for entry in payload["MediaSources"]:
+        entry["Container"] = None
+    _, best, _ = payload["MediaSources"]
+    assert max(payload["MediaSources"], key=_playback_rank) is best, (
+        "the premise: the best version is listed neither first nor last"
+    )
+    chosen = primary_media_source(payload)
+    assert [line.rstrip("\n") for line in warnings_logged] == [_FALLBACK], (
+        "the premise: no entry is the item's own, so the fallback answered"
+    )
+    assert chosen is best
+
+
+def test_the_fallback_warning_counts_only_the_entries_that_are_objects(
+    warnings_logged: list[str],
+) -> None:
+    """An entry that is not an object is no version, so the WARNING counts three, not four."""
+    payload = load_emby_fixture("multi_version_movie")
+    payload["MediaSources"].insert(1, "not-an-object")
+    primary_media_source(payload)
+    assert [line.rstrip("\n") for line in warnings_logged] == [_FALLBACK]
+
+
+@pytest.mark.parametrize("found_by", ["item-id", "plain-id", "media-source-id"])
+def test_the_own_entry_wins_over_a_better_version_found_by(found_by: str) -> None:
+    """Read as the 1080p version, whose own entry is listed second and is the worse file.
+
+    Found by its `ItemId`, as recorded, or with no `ItemId` on either entry by an `Id`
+    that is the item's own or `mediasource_` followed by it.
+    """
+    read = load_emby_fixture("version_group_by_id")["reads"][1]
+    sibling, own = read["MediaSources"]
+    if found_by != "item-id":
+        del sibling["ItemId"], own["ItemId"]
+    if found_by == "plain-id":
+        own["Id"] = read["Id"]
+    assert _pixels(own) < _pixels(sibling), "the premise: the best pick takes the sibling"
+    assert primary_media_source(read) is own
+
+
+def test_an_item_id_match_outranks_an_id_match() -> None:
+    """A sibling listed first whose `Id` is the item's still loses to the `ItemId` match."""
+    read = load_emby_fixture("version_group_by_id")["reads"][1]
+    sibling, own = read["MediaSources"]
+    sibling["Id"] = read["Id"]
+    assert primary_media_source(read) is own
+
+
+def test_a_lone_entry_is_the_items_own_whatever_its_ids_say(
+    meter_reader: InMemoryMetricReader, warnings_logged: list[str]
+) -> None:
+    """One entry is the item's own even when it names another version, and is no fallback."""
+    read = load_emby_fixture("version_group_by_id")["reads"][1]
+    sibling, _ = read["MediaSources"]
+    read["MediaSources"] = [sibling]
+    assert sibling["ItemId"] != read["Id"], "the premise: the lone entry names another version"
+    assert primary_media_source(read) is read["MediaSources"][0]
+    assert warnings_logged == [] and _fallbacks(meter_reader) == 0.0
+
+
+_ABSENT = object()
+
+
+@pytest.mark.parametrize(
+    ("own_id", "item_id"),
+    [(_ABSENT, None), ("", ""), (90000132, 90000132)],
+    ids=["missing", "empty", "number"],
+)
+def test_an_item_id_that_is_not_text_matches_no_entry(
+    own_id: object,
+    item_id: object,
+    meter_reader: InMemoryMetricReader,
+    warnings_logged: list[str],
+) -> None:
+    """An `Id` that is absent, empty or not a string names no entry, not even an equal one.
+
+    Every entry's `ItemId` is given the same value, so a match would take the first.
+    """
+    payload = load_emby_fixture("multi_version_movie")
+    if own_id is _ABSENT:
+        del payload["Id"]
+    else:
+        payload["Id"] = own_id
+    for entry in payload["MediaSources"]:
+        entry["ItemId"] = item_id
+    assert payload["MediaSources"][0]["Container"] is None, (
+        "the premise: a match takes the first entry, which has no container"
+    )
+    chosen = primary_media_source(payload)
+    assert chosen is not None and chosen["Id"] == "0000000000000000000000000000b0f1"
+    assert [line.rstrip("\n") for line in warnings_logged] == [_FALLBACK]
+    assert _fallbacks(meter_reader) == 1.0
+
+
+def test_an_own_entry_with_no_container_still_describes_the_copy() -> None:
+    """The copy is its own entry's file, even one it cannot play beside a sibling it can."""
+    read = load_emby_fixture("version_group_by_id")["reads"][1]
+    del read["MediaSources"][1]["Container"]
+    item = to_source_item(read)
+    assert item is not None and (item.container, item.width, item.height) == (None, 1920, 1080)
+
+
+def test_a_folder_item_has_no_entry_and_counts_no_fallback(
+    meter_reader: InMemoryMetricReader,
+) -> None:
+    assert primary_media_source(load_emby_fixture("series_item")) is None
+    assert primary_media_source({"Id": "90000131", "MediaSources": []}) is None
+    assert _fallbacks(meter_reader) == 0.0
+
+
+@pytest.mark.parametrize("index", [0, 1])
+def test_each_version_read_by_id_describes_its_own_file(index: int) -> None:
+    """Each read is described as its own entry alone describes it, wherever that is listed."""
+    reads = load_emby_fixture("version_group_by_id")["reads"]
+    alone = [_described(own_entry_only(read)) for read in reads]
+    for field in (
+        "container",
+        "video_codec",
+        "audio_codec",
+        "width",
+        "height",
+        "hdr_format",
+        "audio_channels",
+        "file_size_bytes",
+        "runtime_seconds",
+    ):
+        assert getattr(alone[0], field) != getattr(alone[1], field), (
+            f"the premise: the versions differ in {field}"
+        )
+    assert _described(reads[index]) == alone[index]
 
 
 def test_a_transcode_only_item_is_still_catalogued() -> None:
-    """The fallback half of the rule: a transcode-only item is still catalogued.
+    """The lone-entry half of the rule: a transcode-only item is still catalogued.
 
     It has no container and so no direct URL, but it has a real codec, resolution and
     runtime, and reporting `None` for all of them would put a hole in the catalogue over

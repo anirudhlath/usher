@@ -49,7 +49,8 @@ from usher.domain.sync import (
 from usher.ports.credentials import SourceCredentials
 from usher.ports.errors import PortDataMalformed, PortUnavailable, UsherPortError
 from usher.ports.events import ClientEventKind
-from usher.ports.source import SourceItem, SourceItemKind, UnitPage, WalkPlan
+from usher.ports.ingest import IngestResult
+from usher.ports.source import Confirmation, SourceItem, SourceItemKind, UnitPage, WalkPlan
 from usher.services.ingest import IngestService
 from usher.services.matching import MatchService
 from usher.services.reconcile import (
@@ -446,7 +447,8 @@ async def test_a_sweep_retracts_what_the_source_confirms_gone_and_stamps_what_it
     assert served is not None
     assert (served.available, served.last_seen_at) == (True, second.started_at)
     assert [line.rstrip("\n") for line in lines if "sweep found" in line] == [
-        "Living Room Emby's sweep found 2 rows the walk did not list: 1 gone, 1 still served"
+        "Living Room Emby's sweep found 2 rows the walk did not list: "
+        "1 gone, 1 still served, 1 re-described"
     ]
 
 
@@ -483,7 +485,8 @@ async def test_a_sweep_with_nothing_unseen_asks_nothing_and_says_so(fixture: _Fi
     assert run.status is SyncRunStatus.COMPLETED
     assert fixture.adapter.confirm_calls == []
     assert [line.rstrip("\n") for line in lines if "sweep found" in line] == [
-        "Living Room Emby's sweep found 0 rows the walk did not list: 0 gone, 0 still served"
+        "Living Room Emby's sweep found 0 rows the walk did not list: "
+        "0 gone, 0 still served, 0 re-described"
     ]
 
 
@@ -530,7 +533,7 @@ async def test_a_row_read_since_the_walk_began_survives_a_gone_answer(fixture: _
     fixture.adapter.forget("m9")
     original = fixture.adapter.confirm_gone
 
-    async def _read_back_first(external_ids: Collection[str]) -> frozenset[str]:
+    async def _read_back_first(external_ids: Collection[str]) -> Confirmation:
         await fixture.ingest.ingest_batch(
             fixture.source.id, [_item("m9")], observed_at=datetime.now(UTC)
         )
@@ -554,7 +557,7 @@ async def test_the_heartbeat_beats_while_the_source_confirms_removals() -> None:
     asked, release = asyncio.Event(), asyncio.Event()
     original = fixture.adapter.confirm_gone
 
-    async def _held(external_ids: Collection[str]) -> frozenset[str]:
+    async def _held(external_ids: Collection[str]) -> Confirmation:
         asked.set()
         await release.wait()
         return await original(external_ids)
@@ -616,6 +619,315 @@ async def test_a_run_that_could_not_reach_the_source_at_all_is_recorded(
     assert isinstance(run.error, str) and run.error
     stored = await fixture.runs.get(run.id)
     assert stored is not None and stored.status is SyncRunStatus.FAILED
+
+
+# -- the sweep re-describes what it keeps ------------------------------------
+
+
+def _mkv(external_id: str) -> SourceItem:
+    return _item(external_id, container="mkv", width=3840, height=2160)
+
+
+def _mp4(external_id: str) -> SourceItem:
+    return _item(external_id, container="mp4", width=1920, height=1080)
+
+
+class _CommitWitness(_Fixture):
+    """Reads back, at every commit, the newest run's status and m18's stored container."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.seen: list[tuple[SyncRunStatus, str | None]] = []
+
+    async def _commit(self) -> None:
+        await super()._commit()
+        newest = await self.runs.list_for_source(self.source.id, limit=1)
+        stored = await self.media_items.get_by_external_id(self.source.id, "m18")
+        self.seen.append((newest[0].status, stored.container if stored is not None else None))
+
+
+async def test_a_sweep_re_describes_a_kept_hidden_version_in_the_stamping_commit() -> None:
+    """m18 is served in no listing and has changed, and m19 is gone."""
+    fixture = _CommitWitness()
+    for index in range(20):
+        fixture.adapter.seed(_mkv(f"m{index}"), T0)
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    fixture.adapter.seed(_mp4("m18"), T0)
+    fixture.adapter.unlist("m18")
+    fixture.adapter.forget("m19")
+
+    second = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+
+    seen = fixture.seen
+    assert any(container == "mp4" for _, container in seen), "no commit held m18 re-described"
+    first_mp4 = next(index for index, (_, container) in enumerate(seen) if container == "mp4")
+    assert seen[first_mp4 - 1] == (SyncRunStatus.RUNNING, "mkv"), (
+        "the premise: the run committed before it completed"
+    )
+    assert seen[first_mp4][0] is SyncRunStatus.COMPLETED
+    assert (second.items_seen, second.items_retracted) == (18, 1)
+    assert second.items_matched + second.items_unmatched == 18
+    kept = await fixture.media_items.get_by_external_id(fixture.source.id, "m18")
+    assert kept is not None
+    assert (kept.container, kept.width, kept.height, kept.last_seen_at) == (
+        "mp4",
+        1920,
+        1080,
+        second.started_at,
+    )
+    gone = await fixture.media_items.get_by_external_id(fixture.source.id, "m19")
+    assert gone is not None and gone.available is False
+
+
+async def test_a_sweep_ingests_what_it_keeps_in_batches_inside_one_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Three kept at a batch of two: two chunks, no commit between, then the stamping commit."""
+    fixture = _Fixture(batch_size=2)
+    for index in range(20):
+        fixture.adapter.seed(_mkv(f"m{index}"), T0)
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    for external_id in ("m17", "m18", "m19"):
+        fixture.adapter.seed(_mp4(external_id), T0)
+        fixture.adapter.unlist(external_id)
+    original = fixture.ingest.ingest_batch
+    calls: list[tuple[list[str], int]] = []
+
+    async def _recorder(
+        source_id: uuid.UUID, items: Sequence[SourceItem], *, observed_at: AwareDatetime
+    ) -> IngestResult:
+        calls.append(([item.external_id for item in items], fixture.commits))
+        return await original(source_id, items, observed_at=observed_at)
+
+    monkeypatch.setattr(fixture.ingest, "ingest_batch", _recorder)
+
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+
+    sweep = [call for call in calls if set(call[0]) <= {"m17", "m18", "m19"}]
+    assert len(sweep) < len(calls), "the premise: the walk ingested through the recorder too"
+    assert [ids for ids, _ in sweep] == [["m17", "m18"], ["m19"]]
+    assert sweep[0][1] == sweep[1][1]
+    assert fixture.commits == sweep[-1][1] + 1
+
+
+async def test_no_beat_commits_while_a_sweep_ingests() -> None:
+    """A beat would commit the chunk beside it, ahead of the run's completing commit."""
+    fixture = _Fixture(heartbeat_seconds=0.01)
+    for index in range(10):
+        fixture.adapter.seed(_mkv(f"m{index}"), T0)
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    fixture.adapter.unlist("m8")
+    original = fixture.ingest.ingest_batch
+    at_ingest: list[int] = []
+
+    async def _slow(
+        source_id: uuid.UUID, items: Sequence[SourceItem], *, observed_at: AwareDatetime
+    ) -> IngestResult:
+        if [item.external_id for item in items] == ["m8"]:
+            at_ingest.append(fixture.commits)
+            # Five heartbeats, so a beat beside this ingest falls due while it runs.
+            await asyncio.sleep(0.05)
+        return await original(source_id, items, observed_at=observed_at)
+
+    fixture.ingest.ingest_batch = _slow  # type: ignore[method-assign]
+
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+
+    assert len(at_ingest) == 1, "the sweep never ingested m8"
+    assert fixture.commits == at_ingest[0] + 1
+
+
+async def test_no_beat_commits_while_a_sweep_reads_what_is_still_available() -> None:
+    """The read touches the session, which a beat commits from another task."""
+    fixture = _Fixture(heartbeat_seconds=0.01)
+    for index in range(10):
+        fixture.adapter.seed(_mkv(f"m{index}"), T0)
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    fixture.adapter.unlist("m8")
+    original = fixture.media_items.available_among
+    at_read: list[int] = []
+
+    async def _slow(source_id: uuid.UUID, external_ids: Collection[str]) -> frozenset[str]:
+        at_read.append(fixture.commits)
+        # Five heartbeats, so a beat beside this read falls due while it runs.
+        await asyncio.sleep(0.05)
+        return await original(source_id, external_ids)
+
+    fixture.media_items.available_among = _slow  # type: ignore[method-assign]
+
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+
+    assert len(at_read) == 1, "the sweep never read what is still available"
+    assert fixture.commits == at_read[0] + 1
+
+
+async def test_a_sweep_leaves_a_row_a_push_retracted_after_the_source_answered() -> None:
+    """The source serves m7 and m8, then a push retracts m8 before either is written."""
+    fixture = _Fixture()
+    for index in range(10):
+        fixture.adapter.seed(_mkv(f"m{index}"), T0)
+    first = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    for external_id in ("m7", "m8"):
+        fixture.adapter.seed(_mp4(external_id), T0)
+        fixture.adapter.unlist(external_id)
+    original = fixture.adapter.confirm_gone
+
+    async def _retracted_once_answered(external_ids: Collection[str]) -> Confirmation:
+        answer = await original(external_ids)
+        assert {item.external_id for item in answer.served} == {"m7", "m8"}, (
+            "the premise: the source served both"
+        )
+        retraction = await fixture.media_items.retract(
+            fixture.source.id, {"m8"}, unseen_since=LATER + timedelta(days=1)
+        )
+        assert retraction.retracted == 1, "the premise: the push retracted m8"
+        return answer
+
+    fixture.adapter.confirm_gone = _retracted_once_answered  # type: ignore[method-assign]
+    lines: list[str] = []
+    sink = logger.add(lines.append, level="INFO", format="{message}")
+    try:
+        second = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    finally:
+        logger.remove(sink)
+
+    assert second.status is SyncRunStatus.COMPLETED
+    assert [line.rstrip("\n") for line in lines if "sweep found" in line] == [
+        "Living Room Emby's sweep found 2 rows the walk did not list: "
+        "0 gone, 2 still served, 1 re-described"
+    ]
+    retracted = await fixture.media_items.get_by_external_id(fixture.source.id, "m8")
+    assert retracted is not None
+    assert retracted.available is False
+    assert (retracted.last_seen_at, retracted.container, retracted.width, retracted.height) == (
+        first.started_at,
+        "mkv",
+        3840,
+        2160,
+    )
+    kept = await fixture.media_items.get_by_external_id(fixture.source.id, "m7")
+    assert kept is not None
+    assert (kept.available, kept.container, kept.last_seen_at) == (True, "mp4", second.started_at)
+
+
+async def test_a_served_id_whose_entry_is_not_modelled_is_still_stamped() -> None:
+    """The source still serves m8 and sends no entry to write, so its row keeps its description."""
+    fixture = _Fixture()
+    for index in range(10):
+        fixture.adapter.seed(_mkv(f"m{index}"), T0)
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    fixture.adapter.seed(_mp4("m8"), T0)
+    fixture.adapter.unlist("m8")
+    original = fixture.adapter.confirm_gone
+
+    async def _no_entries(external_ids: Collection[str]) -> Confirmation:
+        answer = await original(external_ids)
+        return Confirmation(gone=answer.gone)
+
+    fixture.adapter.confirm_gone = _no_entries  # type: ignore[method-assign]
+    lines: list[str] = []
+    sink = logger.add(lines.append, level="INFO", format="{message}")
+    try:
+        second = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    finally:
+        logger.remove(sink)
+
+    assert second.status is SyncRunStatus.COMPLETED
+    stored = await fixture.media_items.get_by_external_id(fixture.source.id, "m8")
+    assert stored is not None
+    assert (stored.last_seen_at, stored.available, stored.container) == (
+        second.started_at,
+        True,
+        "mkv",
+    )
+    assert fixture.adapter.confirm_calls == [frozenset({"m8"})], "the premise: m8 alone was asked"
+    assert [line.rstrip("\n") for line in lines if "sweep found" in line] == [
+        "Living Room Emby's sweep found 1 rows the walk did not list: "
+        "0 gone, 1 still served, 0 re-described"
+    ]
+
+
+async def test_a_sweep_whose_ingest_fails_retracts_and_stamps_nothing() -> None:
+    """The ingest runs first, and the failure handler commits whatever is pending."""
+    fixture = _Fixture()
+    for index in range(10):
+        fixture.adapter.seed(_mkv(f"m{index}"), T0)
+    first = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    fixture.adapter.seed(_mp4("m8"), T0)
+    fixture.adapter.unlist("m8")
+    fixture.adapter.forget("m9")
+    original = fixture.ingest.ingest_batch
+
+    async def _fails_on_m8(
+        source_id: uuid.UUID, items: Sequence[SourceItem], *, observed_at: AwareDatetime
+    ) -> IngestResult:
+        if any(item.external_id == "m8" for item in items):
+            raise PortUnavailable("the catalog went away")
+        return await original(source_id, items, observed_at=observed_at)
+
+    fixture.ingest.ingest_batch = _fails_on_m8  # type: ignore[method-assign]
+
+    second = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+
+    assert (second.status, second.error) == (SyncRunStatus.FAILED, "the catalog went away")
+    assert second.items_retracted == 0
+    gone = await fixture.media_items.get_by_external_id(fixture.source.id, "m9")
+    assert gone is not None and gone.available is True
+    kept = await fixture.media_items.get_by_external_id(fixture.source.id, "m8")
+    assert kept is not None
+    assert (kept.container, kept.last_seen_at) == ("mkv", first.started_at)
+
+
+async def test_a_sweep_whose_later_chunk_fails_keeps_the_earlier_and_resumes_the_rest() -> None:
+    """m17 and m18 commit with the failure, no rollback, and the resume asks about the rest."""
+    fixture = _Fixture(batch_size=2)
+    for index in range(20):
+        fixture.adapter.seed(_mkv(f"m{index}"), T0)
+    first = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    for external_id in ("m17", "m18", "m19"):
+        fixture.adapter.seed(_mp4(external_id), T0)
+        fixture.adapter.unlist(external_id)
+    fixture.adapter.forget("m16")
+    original = fixture.ingest.ingest_batch
+    catalog_down = True
+
+    async def _fails_on_m19(
+        source_id: uuid.UUID, items: Sequence[SourceItem], *, observed_at: AwareDatetime
+    ) -> IngestResult:
+        if catalog_down and any(item.external_id == "m19" for item in items):
+            raise PortUnavailable("the catalog went away")
+        return await original(source_id, items, observed_at=observed_at)
+
+    fixture.ingest.ingest_batch = _fails_on_m19  # type: ignore[method-assign]
+
+    failed = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+
+    assert (failed.status, failed.error) == (SyncRunStatus.FAILED, "the catalog went away")
+    assert failed.items_retracted == 0
+    assert fixture.rollbacks == 0
+    for external_id in ("m17", "m18"):
+        stored = await fixture.media_items.get_by_external_id(fixture.source.id, external_id)
+        assert stored is not None
+        assert (stored.container, stored.last_seen_at) == ("mp4", failed.started_at), external_id
+    unwritten = await fixture.media_items.get_by_external_id(fixture.source.id, "m19")
+    assert unwritten is not None
+    assert (unwritten.container, unwritten.last_seen_at) == ("mkv", first.started_at)
+    gone = await fixture.media_items.get_by_external_id(fixture.source.id, "m16")
+    assert gone is not None and gone.available is True
+
+    catalog_down = False
+    fixture.adapter.confirm_calls.clear()
+    fixture.adapter.unit_starts.clear()
+    resumed = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+
+    assert (resumed.id, resumed.started_at) == (failed.id, failed.started_at)
+    assert resumed.status is SyncRunStatus.COMPLETED
+    assert fixture.adapter.confirm_calls == [frozenset({"m16", "m19"})]
+    assert fixture.adapter.unit_starts == [], "the resume walked a unit again"
+    assert resumed.items_retracted == 1
+    rewritten = await fixture.media_items.get_by_external_id(fixture.source.id, "m19")
+    assert rewritten is not None
+    assert (rewritten.container, rewritten.last_seen_at) == ("mp4", resumed.started_at)
 
 
 # -- the delta lane ---------------------------------------------------------

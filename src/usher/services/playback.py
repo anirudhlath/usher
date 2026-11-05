@@ -14,6 +14,7 @@ from usher.domain.enums import TitleKind
 from usher.domain.episode import Episode
 from usher.domain.source import MediaItem, Source
 from usher.domain.title import Title
+from usher.domain.ways import quality_of
 from usher.ports.credentials import CredentialStore
 from usher.ports.errors import UsherPortError
 from usher.ports.repository import MediaItemRepository, SourceRepository
@@ -93,9 +94,9 @@ class PlaybackTarget:
 
     A wrapper rather than two more fields on `StreamTarget`: that is a port
     DTO an adapter builds, and it has no idea which configured source it is
-    speaking for. PRD 07's `/play` example carries a `source` object, and a
-    household with two copies has two -- so the attribution is per target
-    rather than per response.
+    speaking for. PRD 07's `/play` example carries a `source` object, and
+    copies of one film can sit on two sources -- so the attribution is per
+    target rather than per response.
 
     `target.url` is a ticket, or a deep link wrapping one. Never a source URL:
     see the module docstring.
@@ -172,7 +173,10 @@ class PlaybackService:
     async def _resolve(
         self, copies: Sequence[MediaItem], span: Span, name: str
     ) -> PlaybackResolution:
-        """Ask every copy's source, in the order the repository ranked them.
+        """Ask every copy's source, best first.
+
+        Available copies first, then `/ways`' quality order, then the most recently seen,
+        which is the repository's own order and survives because the sort is stable.
 
         One batched read of the source list rather than one `get` per copy --
         a household has sources in the single digits, and `TitleReadService`
@@ -185,7 +189,10 @@ class PlaybackService:
         # on one unreachable source must name it once in the detail, in the
         # order the ranking met them.
         failed: dict[str, None] = {}
-        for copy in copies:
+        ranked = sorted(
+            copies, key=lambda copy: (copy.available, quality_of(copy).score), reverse=True
+        )
+        for copy in ranked:
             source = sources.get(copy.source_id)
             if source is None:
                 # `media_items.source_id` is `ON DELETE CASCADE`, so a source

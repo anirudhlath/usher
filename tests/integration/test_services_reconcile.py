@@ -6,6 +6,7 @@ For the things the fakes cannot say: a refused sweep, and the sweep's own SQL.
 import asyncio
 import functools
 from collections.abc import AsyncGenerator, Awaitable, Callable, Collection, Iterator
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -28,6 +29,7 @@ from usher.db.repositories.sync import PostgresSyncRunRepository
 from usher.db.repositories.title import PostgresTitleRepository
 from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
+from usher.domain.jobs import JobKind
 from usher.domain.source import Source
 from usher.domain.sync import (
     ABANDONED_ERROR,
@@ -42,6 +44,7 @@ from usher.ports.errors import PortUnavailable
 from usher.ports.source import (
     DEFAULT_UNIT_KEY,
     WHOLE_LIBRARY,
+    Confirmation,
     SourceItem,
     SourceItemKind,
     UnitPage,
@@ -182,8 +185,12 @@ class _Adapter:
     async def plan_walk(self) -> WalkPlan:
         return WHOLE_LIBRARY
 
-    async def confirm_gone(self, external_ids: Collection[str]) -> frozenset[str]:
-        return frozenset(external_ids).difference(self.items)
+    async def confirm_gone(self, external_ids: Collection[str]) -> Confirmation:
+        asked = frozenset(external_ids)
+        return Confirmation(
+            gone=asked.difference(self.items),
+            served=tuple(self.items[one] for one in sorted(asked) if one in self.items),
+        )
 
     def list_unit(
         self, key: str, *, start_index: int = 0, checkpoint: str | None = None
@@ -423,6 +430,130 @@ async def test_a_walk_retracts_only_what_the_source_confirms_gone(
     served = await media_items.get_by_external_id(source.id, "m7")
     assert served is not None
     assert (served.available, served.last_seen_at) == (True, second.started_at)
+
+
+async def test_a_sweep_re_describes_the_hidden_versions_it_keeps(
+    service: ReconcileService,
+    media_items: PostgresMediaItemRepository,
+    source: Source,
+    adapter: _Adapter,
+) -> None:
+    """Against the real table, in two chunks: m16 to m18 are in no listing, and m19 is gone."""
+    for index in range(20):
+        adapter.items[f"m{index}"] = _item(f"m{index}")
+    await service.reconcile(source, SyncRunKind.FULL, adapter)  # type: ignore[arg-type]
+    kept = ("m16", "m17", "m18")
+    for external_id in kept:
+        adapter.items[external_id] = replace(
+            _item(external_id), container="mp4", width=1920, height=1080
+        )
+        adapter.unlisted.add(external_id)
+    del adapter.items["m19"]
+    second = await service.reconcile(source, SyncRunKind.FULL, adapter)  # type: ignore[arg-type]
+    assert second.status is SyncRunStatus.COMPLETED
+    assert second.items_seen == 16
+    assert second.items_retracted == 1
+    for external_id in kept:
+        stored = await media_items.get_by_external_id(source.id, external_id)
+        assert stored is not None
+        assert (stored.container, stored.width, stored.height, stored.last_seen_at) == (
+            "mp4",
+            1920,
+            1080,
+            second.started_at,
+        ), external_id
+    gone = await media_items.get_by_external_id(source.id, "m19")
+    assert gone is not None and gone.available is False
+
+
+async def test_a_sweep_re_describes_a_hidden_series_and_its_episodes_across_chunks(
+    session: AsyncSession,
+    runs: PostgresSyncRunRepository,
+    media_items: PostgresMediaItemRepository,
+    source: Source,
+    adapter: _Adapter,
+) -> None:
+    """Five episode copies written in chunks apart from their series keep what they hang off.
+
+    Served in sorted order, so the series comes last and the first chunks resolve it from the
+    store. The upsert keeps an id it is handed NULL for, so a chunk that could not resolve it
+    says so only by queueing a re-match, which is why the queue's depth is asserted.
+    """
+    batch_size = 2
+    service = _service(session, runs, media_items, batch_size=batch_size)
+    for index in range(20):
+        adapter.items[f"m{index}"] = _item(f"m{index}")
+    series = SourceItem(
+        external_id="s1",
+        name="Series s1",
+        kind=SourceItemKind.SERIES,
+        year=2021,
+        provider_ids={"tmdb": "95000"},
+        runtime_seconds=1500,
+    )
+    adapter.items[series.external_id] = series
+    copies = {"e1a": 1, "e1b": 1, "e2": 2, "e3": 3, "e4": 4}
+    for external_id, number in copies.items():
+        adapter.items[external_id] = SourceItem(
+            external_id=external_id,
+            name=f"Episode {number}",
+            kind=SourceItemKind.EPISODE,
+            container="mkv",
+            width=3840,
+            height=2160,
+            runtime_seconds=1500,
+            series_external_id=series.external_id,
+            season_number=1,
+            episode_number=number,
+        )
+    queue = PostgresJobQueue(session, max_attempts=5, backoff_seconds=30.0)
+    first = await service.reconcile(source, SyncRunKind.FULL, adapter)  # type: ignore[arg-type]
+    assert first.status is SyncRunStatus.COMPLETED
+    assert (await queue.depth())[JobKind.MATCH] == 0, "the premise: the first walk attached all"
+    hidden = sorted([series.external_id, *copies])
+    assert len(hidden) > batch_size, "the premise: they take more than one chunk"
+    assert hidden[:batch_size] == ["e1a", "e1b"], "the premise: one episode's copies, one chunk"
+    assert hidden[-1] == series.external_id, "the premise: the series is in the last chunk"
+    attached: dict[str, tuple[object, object]] = {}
+    for external_id in hidden:
+        stored = await media_items.get_by_external_id(source.id, external_id)
+        assert stored is not None, external_id
+        assert stored.runtime_seconds == 1500, external_id
+        attached[external_id] = (stored.title_id, stored.episode_id)
+    titles = {title_id for title_id, _ in attached.values()}
+    assert len(titles) == 1 and None not in titles, "the premise: all hang off the series"
+    assert attached[series.external_id][1] is None, "the premise: the series is no episode"
+    episode_ids = [attached[external_id][1] for external_id in copies]
+    assert None not in episode_ids and len(set(episode_ids)) == len(set(copies.values()))
+
+    adapter.items[series.external_id] = replace(series, runtime_seconds=1560)
+    for external_id in copies:
+        adapter.items[external_id] = replace(
+            adapter.items[external_id],
+            container="mp4",
+            width=1920,
+            height=1080,
+            runtime_seconds=1560,
+        )
+    adapter.unlisted.update(hidden)
+    second = await service.reconcile(source, SyncRunKind.FULL, adapter)  # type: ignore[arg-type]
+
+    assert second.status is SyncRunStatus.COMPLETED
+    assert second.items_seen == 20, "the premise: the walk listed none of them"
+    assert second.items_retracted == 0
+    for external_id in hidden:
+        stored = await media_items.get_by_external_id(source.id, external_id)
+        served = adapter.items[external_id]
+        assert stored is not None, external_id
+        assert (stored.container, stored.width, stored.height, stored.runtime_seconds) == (
+            served.container,
+            served.width,
+            served.height,
+            1560,
+        ), external_id
+        assert (stored.title_id, stored.episode_id) == attached[external_id], external_id
+        assert (stored.available, stored.last_seen_at) == (True, second.started_at), external_id
+    assert (await queue.depth())[JobKind.MATCH] == 0, "a chunk lost an episode's series"
 
 
 async def test_a_walk_that_raises_leaves_every_row_available(

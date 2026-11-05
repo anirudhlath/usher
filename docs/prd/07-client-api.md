@@ -520,8 +520,10 @@ and a player that matches its own metadata by that name finds the right one:
 lacks, with any `/` written as `∕`. A series carries no id tag. The name is
 never read, and the same ticket redeems without it.
 
-**`source` is per target, not per response.** A household with two copies of
-one film has two sources and one list of targets ranked across both.
+**`source` is per target, not per response.** Copies of one film, whether two
+versions or one film in two places, give one list of targets ranked across
+them: available copies first, then in `/ways`' quality order, then the most
+recently seen. Each target names its own copy's source.
 
 **`StreamTarget` carries `scheme`** (set only for `deep_link` targets, so a
 client can check whether it handles the link without parsing the URL) and

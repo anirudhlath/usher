@@ -12,6 +12,7 @@ from usher.domain.enums import HdrFormat
 from usher.domain.sync import WalkStage
 from usher.ports.errors import PortAuthFailed, PortDataMalformed, PortUnavailable
 from usher.ports.source import (
+    Confirmation,
     SourceEvent,
     SourceEventKind,
     SourceItem,
@@ -41,6 +42,19 @@ MOVIE = SourceItem(
     file_size_bytes=68_719_476_736,
     runtime_seconds=9360,
     added_at=datetime(2024, 3, 1, 18, 22, 11, tzinfo=UTC),
+)
+MOVIE_1080P = replace(
+    MOVIE,
+    external_id="movie-1-1080p",
+    container="mp4",
+    video_codec="h264",
+    audio_codec="eac3",
+    width=1920,
+    height=1080,
+    hdr_format=None,
+    audio_channels=6,
+    file_size_bytes=8_589_934_592,
+    runtime_seconds=9300,
 )
 SERIES = SourceItem(
     external_id="series-1",
@@ -347,6 +361,16 @@ class SourceAdapterContract:
         with pytest.raises(PortUnavailable):
             await harness.adapter.get_item("movie-1")
 
+    async def test_get_item_reads_each_version_as_its_own_file(
+        self, harness: SourceHarness
+    ) -> None:
+        await harness.given_versions([MOVIE, MOVIE_1080P], changed_at=T0)
+        for version in (MOVIE, MOVIE_1080P):
+            item = await harness.adapter.get_item(version.external_id)
+            assert item is not None
+            # `raw` is the adapter's own copy of what it read, opaque to the port.
+            assert replace(item, raw={}) == version
+
     # --- confirming removals -------------------------------------------
 
     async def test_confirm_gone_returns_what_the_source_no_longer_serves(
@@ -356,8 +380,8 @@ class SourceAdapterContract:
         await harness.given_item(MOVIE, changed_at=T0)
         await harness.given_item(_filler(0), changed_at=T0)
         await harness.remove_item("movie-1")
-        gone = await harness.adapter.confirm_gone(["movie-1", "filler-0", "never-existed"])
-        assert gone == {"movie-1", "never-existed"}
+        answer = await harness.adapter.confirm_gone(["movie-1", "filler-0", "never-existed"])
+        assert answer.gone == {"movie-1", "never-existed"}
 
     async def test_confirm_gone_returns_none_of_a_served_items_versions(
         self, harness: SourceHarness
@@ -365,8 +389,18 @@ class SourceAdapterContract:
         """Three versions asked together: a listing that names one must not condemn two."""
         versions = [replace(MOVIE, external_id=f"movie-1-v{index}") for index in range(3)]
         await harness.given_versions(versions, changed_at=T0)
-        gone = await harness.adapter.confirm_gone([version.external_id for version in versions])
-        assert gone == frozenset()
+        answer = await harness.adapter.confirm_gone([version.external_id for version in versions])
+        assert answer.gone == frozenset()
+
+    async def test_confirm_gone_describes_each_served_version_as_its_own_file(
+        self, harness: SourceHarness
+    ) -> None:
+        await harness.given_versions([MOVIE, MOVIE_1080P], changed_at=T0)
+        answer = await harness.adapter.confirm_gone(["movie-1", "movie-1-1080p", "never-existed"])
+        assert answer.gone == {"never-existed"}
+        served = sorted(answer.served, key=lambda item: item.external_id)
+        # `raw` is the adapter's own copy of what it read, opaque to the port.
+        assert [replace(item, raw={}) for item in served] == [MOVIE, MOVIE_1080P]
 
     async def test_confirm_gone_returns_a_removed_version_beside_a_served_one(
         self, harness: SourceHarness
@@ -374,13 +408,13 @@ class SourceAdapterContract:
         versions = [replace(MOVIE, external_id=f"movie-1-v{index}") for index in range(2)]
         await harness.given_versions(versions, changed_at=T0)
         await harness.remove_item("movie-1-v0")
-        gone = await harness.adapter.confirm_gone(["movie-1-v0", "movie-1-v1"])
-        assert gone == {"movie-1-v0"}
+        answer = await harness.adapter.confirm_gone(["movie-1-v0", "movie-1-v1"])
+        assert answer.gone == {"movie-1-v0"}
 
     async def test_confirm_gone_of_nothing_asks_nothing(self, harness: SourceHarness) -> None:
         """Offline first: an implementation that asked anyway would raise, not answer."""
         await harness.go_offline()
-        assert await harness.adapter.confirm_gone([]) == frozenset()
+        assert await harness.adapter.confirm_gone([]) == Confirmation()
 
     async def test_confirm_gone_raises_when_the_source_is_unreachable(
         self, harness: SourceHarness
@@ -461,6 +495,17 @@ class SourceAdapterContract:
         assert direct.audio is not None
         assert direct.audio.startswith("truehd")
         assert direct.scheme is None
+
+    async def test_stream_targets_play_each_version_from_its_own_file(
+        self, harness: SourceHarness
+    ) -> None:
+        await harness.given_versions([MOVIE, MOVIE_1080P], changed_at=T0)
+        for version in (MOVIE, MOVIE_1080P):
+            direct = (await harness.adapter.stream_targets(version.external_id))[0]
+            assert (direct.container, direct.resolution) == (
+                version.container,
+                f"{version.width}x{version.height}",
+            )
 
     async def test_stream_targets_include_a_deep_link_with_its_scheme(
         self, harness: SourceHarness

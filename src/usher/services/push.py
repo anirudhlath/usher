@@ -294,7 +294,7 @@ class PushApplyService:
         if not external_ids:
             return frozenset()
         await self._commit()
-        return await confirmed_gone(adapter, external_ids, source=source.name, path="push")
+        return (await confirmed_gone(adapter, external_ids, source=source.name, path="push")).gone
 
 
 # The three units of work a lane needs, each opening its own session.

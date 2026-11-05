@@ -57,7 +57,7 @@ PYTHONPATH=/var/tmp/usher-netguard uv run pytest                # Docker for int
 # One contract on both arms. Name the *class*, not a word — a selection wider
 # than you meant reads as coverage. `-k TestFake` is every fake arm, no Docker.
 uv run pytest tests/unit tests/integration -k TitleRepositoryCandidates
-grep -rn 'more forgiving\|Where this diverges\|^Divergences from' tests/fakes/  # diff vs. this file
+grep -rn 'more forgiving\|Where this diverges\|^Divergences from\|recorded rather than modelled' tests/fakes/  # diff vs. this file
 
 set -a; . ./.env; set +a                          # never a literal credential
 uv run python scripts/capture_emby_fixture.py --type Episode > /tmp/shape.json

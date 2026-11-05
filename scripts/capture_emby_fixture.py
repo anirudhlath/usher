@@ -37,6 +37,10 @@ async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--type", default="Movie", help="Movie, Series, or Episode")
     parser.add_argument("--limit", type=int, default=1)
+    parser.add_argument(
+        "--item",
+        help="read this one item by id instead of listing; --type and --limit are then ignored",
+    )
     args = parser.parse_args()
 
     base_url = os.environ.get("USHER_EMBY_URL")
@@ -58,19 +62,27 @@ async def main() -> int:
             device_id="usher-fixture-capture",
         )
         user_id = await session.user_id()
-        body = await session.json_body(
-            "GET",
-            f"/Users/{user_id}/Items",
-            params={
-                "Recursive": "true",
-                "IncludeItemTypes": args.type,
-                "Fields": ITEM_FIELDS,
-                "Limit": str(args.limit),
-                "SortBy": SORT_BY,
-                "SortOrder": "Ascending",
-            },
-            op="capture",
-        )
+        if args.item:
+            body = await session.json_body(
+                "GET",
+                f"/Users/{user_id}/Items/{args.item}",
+                params={"Fields": ITEM_FIELDS},
+                op="capture",
+            )
+        else:
+            body = await session.json_body(
+                "GET",
+                f"/Users/{user_id}/Items",
+                params={
+                    "Recursive": "true",
+                    "IncludeItemTypes": args.type,
+                    "Fields": ITEM_FIELDS,
+                    "Limit": str(args.limit),
+                    "SortBy": SORT_BY,
+                    "SortOrder": "Ascending",
+                },
+                op="capture",
+            )
     print(json.dumps(_shape(body), indent=2))
     return 0
 

@@ -106,7 +106,7 @@ control that does nothing.
 
 ### Metrics — OpenTelemetry → Prometheus
 
-**Every row is emitted today. 46 rows: 45 instruments Usher declares, plus one
+**Every row is emitted today. 47 rows: 46 instruments Usher declares, plus one
 `FastAPIInstrumentor` supplies.**
 
 | Metric | Type | Labels | Emitted |
@@ -140,6 +140,7 @@ control that does nothing.
 | `usher.source.push.connected` | gauge | source | ✅ M5 |
 | `usher.source.push.reconnects` | counter | source | ✅ M5 |
 | `usher.source.push.events` | counter | source, kind | ✅ M5 |
+| `usher.source.versions.fallbacks` | counter | — | ✅ every version playable |
 | `usher.provider.requests` | counter | provider, status | ✅ M4 |
 | `usher.metadata.request.duration` | histogram | status | ✅ M4 |
 | `usher.embedding.duration` | histogram | — | ✅ M6 |
@@ -362,14 +363,16 @@ applied, by kind**, which separates "the lane is up" from "the lane is doing
 anything" · Emby request latency · TMDb requests/sec against the
 `USHER_TMDB_REQUESTS_PER_SECOND` ceiling, with 429 count · **whole-library
 walks: the listing limit and the mean unit duration, by stage** · **listing
-page size, by source** · **retraction checks, by path and outcome**.
+page size, by source** · **retraction checks, by path and outcome** · **version
+fallbacks**.
 
-✅ **Every panel here is backed by real data as of M9, the whole-library walk
-panel as of the fast first sync's acceptance walk, the retraction-checks panel
-as of confirmed retraction's acceptance, and the listing-page-size panel as of
-adaptive page size's acceptance walk.** ⚠️ A panel that
-drains the whole unmatched queue should page with the keyset cursor; the
-`OFFSET` form is quadratic in queue depth.
+✅ **Every panel here but version fallbacks is backed by real data as of M9, the
+whole-library walk panel as of the fast first sync's acceptance walk, the
+retraction-checks panel as of confirmed retraction's acceptance, and the
+listing-page-size panel as of adaptive page size's acceptance walk.** ⏳ The
+version-fallbacks panel is unread until every version playable's acceptance.
+⚠️ A panel that drains the whole unmatched queue should page with the keyset
+cursor; the `OFFSET` form is quadratic in queue depth.
 
 ### 4 — Performance
 

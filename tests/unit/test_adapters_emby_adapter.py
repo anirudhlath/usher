@@ -2386,15 +2386,17 @@ async def test_an_empty_object_for_an_unknown_id_is_a_deletion_not_an_item() -> 
         # A transcode-only version listed first: no container, so under
         # `MediaSources[0]` the whole item reports "not playable here".
         (None, 3840, 2160),
+        # A better version listed first: both `MediaSources[0]` and the best pick take it.
+        ("mkv", 7680, 4320),
     ],
 )
-async def test_a_version_listed_first_does_not_win_by_being_first(
+async def test_a_version_listed_ahead_of_the_items_own_never_wins(
     container: str | None, width: int, height: int
 ) -> None:
-    """The media-source selection through a real walk and a real `get_item`.
+    """The media-source selection through a real `get_item` and `stream_targets`.
 
-    A fixture cannot reach the choice: each has exactly one `MediaSources` entry, so
-    only a server rendering more than one exercises the selection at all.
+    The fake server lists an alternate ahead of the seeded item's own entry, which is
+    the order a `MediaSources[0]` rule gets wrong.
     """
     server = FakeEmbyServer()
     best = replace(_movie(0), width=3840, height=2160)
@@ -4892,6 +4894,24 @@ async def test_a_server_ignoring_ids_seeds_only_the_series_asked_for_and_warns()
         "Living Room Emby did not return 1 of the 2 series the seed asked for by Ids; "
         "their episodes are seeded without them"
     ]
+
+
+async def test_a_series_listing_with_no_items_array_raises_rather_than_reading_as_absent() -> None:
+    """Read as a listing of nothing, every series asked for would be logged as absent."""
+    server = FakeEmbyServer()
+    _watching(server)
+
+    def malformed(request: httpx.Request) -> httpx.Response:
+        if "Ids" in request.url.params:
+            return httpx.Response(200, json={"TotalRecordCount": 0})
+        return server.handle(request)
+
+    adapter = _on(malformed)
+    try:
+        with pytest.raises(PortDataMalformed, match="Emby's series listing carried no Items array"):
+            _ = [page async for page in adapter.list_unit(SEED_KEY)]
+    finally:
+        await adapter.aclose()
 
 
 async def test_the_seed_s_up_next_listing_is_not_judged_by_creation_time() -> None:

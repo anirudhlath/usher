@@ -3,7 +3,7 @@
 Read [`../README.md`](../README.md) first: it states the licensing rule, the
 reserved identifier bands, and the guard that enforces them.
 
-**Every value in these nine files is invented**, including the `ProviderIds`,
+**Every value in these ten files is invented**, including the `ProviderIds`,
 which until 2026-08-01 carried real TMDb/IMDb/TVDb ids for four real works.
 That is a licensing constraint, not a style, and a doubled one: a real Emby
 response *embeds TMDb-sourced metadata*, which TMDb's terms forbid
@@ -30,12 +30,35 @@ them would test nothing.
 | `multi_version_movie.json` | three `MediaSources`, the first transcode-only (`Protocol: Http`, `Size: 0`, `SupportsDirectPlay: false`), so `primary_media_source`'s selection rule has something to select |
 | `view_item.json` | one library view from `/Users/{id}/Views`: `CollectionType` says what the library holds, and `boxsets`/`playlists` views are not libraries |
 | `ids_version_group.json` | an `Ids` listing naming two versions of one item, asked both ways round, then each version alone: the request lists one of them, the same one in either order, and each alone lists itself. Only `Id` keys, both invented |
+| `version_group_by_id.json` | one movie read by id as each of its two versions: both reads list the same two entries, 2160p first, each naming its version in `ItemId` and `mediasource_<id>` in `Id`; each read's `Id`, `RunTimeTicks`, `Width` and `Height` are its own version's |
 
-`multi_version_movie.json` has been looked for twice against the live server,
-over disjoint slices totalling 1,400 movies, and has never met a real
-payload — every one carried exactly one `MediaSource`. It stays: another
-deployment will have them and the rule is cheap. `CLAUDE.md` records both
-searches.
+`multi_version_movie.json` names none of its entries as its own, so it is the
+shape of the fallback alone. A real read by id of one version lists every
+version, each entry naming its version, and `version_group_by_id.json` is that
+shape. Most groups list one order whichever version is read, best first, but
+some change their order with the read, so an entry's position never says whose
+it is. A listing names a movie with its own entry alone, and a series with no
+`MediaSources` at all.
+
+Recorded 2026-11-03. The shape came from `capture_emby_fixture.py --item`,
+type names only. A read-only script outside the repository, which printed
+counts and booleans only, never an id, a host, a user id or a token, read 20
+version groups (19 of two versions, one of three; 41 reads). Every entry's
+`ItemId` named a version of its group, with `Id` being `mediasource_` plus
+it; every read held an entry naming itself; and each read's item-level
+`RunTimeTicks`, `Width` and `Height` equalled its own entry's. A second such
+script read 60 version groups (122 reads): every read listed the group's
+every version, and 52 of the groups listed them in one order whichever
+version was read. A third read another 60 (126 reads): 55 listed one order,
+in each of them best to worst by pixels and then bytes, and of the 5 whose
+order changed with the read, 2 put each read's own entry first and 3 did not
+keep to either. Two earlier searches of listings, over disjoint slices
+totalling 1,400 movies, found every listed item carrying exactly one
+`MediaSource`, and two more such scripts checked whose it is: across two
+walk pages of 200 movies, and an `Ids` listing of each of 61 versions in 30
+version groups alone, every listed movie's one entry named the movie in its
+`ItemId`, and each of 30 series an `Ids` listing named carried no
+`MediaSources` key.
 
 ## Push messages (M5)
 
@@ -79,12 +102,13 @@ in this project's history, 12 `LibraryChanged`**. Four guesses were
 | **`"0,1000"` in `SessionsStart` is `initialDelayMs,intervalMs`, i.e. a one-second cadence** | **confirmed, and it does not apply to an authenticated socket** | An *unauthenticated* connection receives `Sessions` at ~1 Hz (53 and 55 frames in 45 s) carrying the whole server's 83 sessions; the authenticated one received **one** in the same 45 s, carrying a 5-session row-filtered view. The timer is real; the filtered stream is sent when the filtered view changes. |
 | **A working channel says something within 15 seconds** | **too tight on this deployment** | `SourceAdapter.probe_push`'s default `timeout_seconds`, against a median gap of 23.3 s, so `usher push --probe` will report `delivering=False` on a healthy idle source more often than not. It is a diagnostic default rather than a correctness property and the CLI takes an override; recorded here rather than changed, because raising it makes an operator wait longer for every answer including the true negatives. |
 
-**The ids here are short numeric strings, and the item fixtures beside them
-use 32-hex GUIDs.** That is deliberate and it is the *push* files that are
+**The ids here are short numeric strings, and the older item fixtures beside
+them use 32-hex GUIDs.** That is deliberate and it is the *push* files that are
 right: `src/usher/adapters/emby/mapping.py`'s module docstring records, from
 the 2026-07-31 live diff, that "this server's item ids are short numeric
 strings rather than 32-hex GUIDs" — the older fixtures get that wrong in a
-way nothing depends on, and a new file had no reason to inherit it. They are
+way nothing depends on, and a new file had no reason to inherit it, so
+`version_group_by_id.json` uses numeric ids too. They are
 still inside the reserved band (≥ 90,000,000), so
 `tests/unit/test_no_third_party_data.py` covers them as it covers every
 other id here.
@@ -164,14 +188,16 @@ a fixture to commit:
 ```bash
 export USHER_EMBY_URL=... USHER_EMBY_USER=... USHER_EMBY_PASSWORD=...
 uv run python scripts/capture_emby_fixture.py --type Episode > /tmp/shape.json
+uv run python scripts/capture_emby_fixture.py --item ID > /tmp/shape.json
 ```
 
 Diff that against the committed file and hand-add any missing **key** with an
 invented value.
 
 `tests/fakes/emby_server.py` uses these files as templates and overwrites the
-identity fields from the seeded `SourceItem` — the item routes from the four
-item fixtures, `/Users/{id}/Views` from `view_item.json`, and
+identity fields from the seeded `SourceItem` — the item routes from
+`movie_item.json`, `series_item.json` and `episode_item.json`,
+`/Users/{id}/Views` from `view_item.json`, and
 `user_data_changed_frame`/`library_changed_frame`/
 `sessions_frame` from the three push ones — so the contract suite is not
 coupled to the values here. Rendering the push frames *from* these files

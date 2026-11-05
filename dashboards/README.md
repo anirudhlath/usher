@@ -786,7 +786,7 @@ renderer.
 
 # Dashboard 3 — Pipeline
 
-Thirteen panels, and the mixed one: Prometheus for rates and depths, Postgres
+Fourteen panels, and the mixed one: Prometheus for rates and depths, Postgres
 for the queue's and the reconciler's own breakdowns. Dashboard 1's principle
 ("the catalog *is* the record") does not decide this dashboard on its own,
 because half of what a pipeline does leaves no row behind — a completed job is
@@ -1308,6 +1308,32 @@ climb from 1,000 at 22:22:39–22:23:51 and the settle at 8,000 at 22:24:31.
 So it trails a change by up to a minute, and a size held for less than a minute
 can vanish: this walk's 2,000 and 4,000 never drew, nor its first trial's
 2,000 at 22:20:52. The INFO lines are the record of a climb.
+
+### 14 — Version fallbacks
+
+`timeseries`, Prometheus, beside panel 12.
+
+```
+sum(usher_source_versions_fallbacks_total)
+```
+
+`usher.source.versions.fallbacks`, with no labels of its own: the reads of an
+item listing several media sources, none of them its own, so the best stood in
+and the copy reads as that file. **A climbing line means a source's reads have
+stopped naming versions.** The cumulative counter is plotted rather than its
+rate, because a counter whose series begins at 1 has risen by nothing inside a
+`rate()` window, and the first fallback has to draw.
+
+**An empty panel is the healthy reading**, because a counter exports nothing
+until its first fallback. The one exception is a walk: it counts in its own
+`usher sync` process, so what it counted disappears about five minutes after the
+walk ends, as panel 12's sweep lines do (#104). Read a walk's count with
+`max_over_time` over its window. The running server's line starts again from
+zero at every deploy or restart.
+
+⏳ **This panel has not been read against real data.** No query has been issued
+for it, so nothing is recorded here as returned. Every version playable's
+acceptance reads it.
 
 ## ⚠️ Three Dashboard 3 panels plot a mean, not a quantile, and the reason is an instrument
 

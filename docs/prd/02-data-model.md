@@ -253,8 +253,9 @@ class MediaItem(BaseModel):
     available: bool
 ```
 
-`(source_id, external_id)` is unique. A Title with several MediaItems is the
-same film available in more than one place.
+`(source_id, external_id)` is unique. A MediaItem is one version of a film or
+episode in one place, and describes that version's own file. A Title with
+several MediaItems is the same film in more than one version or place.
 
 `hdr_format` is a closed enum; a source's own vocabulary (Emby emits
 `"DolbyVision"`) is translated by its adapter.
@@ -342,7 +343,7 @@ the top ten billed plus every stored crew name.
 | `title_neighbors` | Precomputed similarity: `(title_id, neighbor_id, score, rank, blend_fingerprint, computed_at)`. A batch artefact, rebuilt rather than repaired. `blend_fingerprint` hashes the blend's constants and **not** the embedding model, so a model swap needs the table emptied |
 | `genome_scores` | One title's MovieLens tag-genome vector: `(title_id, relevance halfvec(1128), genome_revision, computed_at)`. One dense vector per title |
 | `genome_tags` | What each of that vector's 1,128 lanes means: `(tag_id PK, tag, genome_revision)`, loaded by `bootstrap --phase movielens` and stamped with the same revision |
-| `sync_runs` | Per-source run bookkeeping: kind, cursor, status, stats, `heartbeat_at`, which every walk moves when it starts, with every commit and at least once a minute between commits ([03](03-sources-and-sync.md)); and `planned`, true for a whole-library walk. One row per walk: an attempt that resumes an unfinished whole-library walk continues its row, and every other attempt starts one. `error` is prose and `error_code` is the kind — a nullable `VARCHAR(32)` holding `availability_ceiling` or `gap_delta_ceiling`, null for every failure an operator has no command for |
+| `sync_runs` | Per-source run bookkeeping: kind, cursor, status, stats, `heartbeat_at`, which every walk moves when it starts, with every commit and at least once a minute between commits, except while a sweep re-describes what it keeps ([03](03-sources-and-sync.md)); and `planned`, true for a whole-library walk. One row per walk: an attempt that resumes an unfinished whole-library walk continues its row, and every other attempt starts one. `error` is prose and `error_code` is the kind — a nullable `VARCHAR(32)` holding `availability_ceiling` or `gap_delta_ceiling`, null for every failure an operator has no command for |
 | `sync_run_units` | A whole-library walk's plan: `(run_id, unit_key, stage, label, position, checkpoint, expected_items, items_seen, status)`, keyed on `(run_id, unit_key)` and deleted with its run. `unit_key` is the adapter's own opaque key and never leaves the database. `position` only rises and `completed` is final; `checkpoint` is the adapter's own opaque note of where `position` stands (for Emby, the creation time of the last item read), written only with a position at least as far |
 | `jobs` | Priority work queue ([03](03-sources-and-sync.md)). A completed job's row is deleted, so the table's size is the outstanding work |
 | `raw_payloads` | JSONB cache of **provider** responses, so reprocessing never refetches. `fetched_at` enforces TMDb's ≤ 6-month cache term. Source payloads are not stored here |

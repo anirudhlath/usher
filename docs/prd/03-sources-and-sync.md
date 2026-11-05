@@ -238,10 +238,10 @@ stage is fetched until every unit of the stages before it has committed, so an
 episode always finds its series. A walk's units are kept in `sync_run_units`
 with the position each has committed to, and the run's `heartbeat_at` moves on
 every commit and at least once a minute between commits, also while the watch
-lane runs after the seed. A unit that fails stops the walk: it is marked
-`failed` at its committed position, and pages fetched but not yet committed are
-dropped. A delta with a cursor, a bounded walk and the gap-closer keep the
-single walk.
+lane runs after the seed, except while a sweep re-describes what it keeps. A
+unit that fails stops the walk: it is marked `failed` at its committed
+position, and pages fetched but not yet committed are dropped. A delta with a
+cursor, a bounded walk and the gap-closer keep the single walk.
 
 **An unfinished whole-library walk is resumed in place.** The next
 whole-library walk of the same kind continues the same `sync_runs` row, with
@@ -263,8 +263,9 @@ resumes. A process killed outright cannot, and its run counts as live until its
 heartbeat is 10 minutes old; a close that cannot finish within 10 seconds is
 given up with a WARNING, and a second Ctrl-C abandons it.
 Every item walk moves its heartbeat with every commit and at least once a minute
-between commits, and before it starts closes its source's item walks still
-`running` whose heartbeat is 10 minutes old or missing, `failed` with
+between commits, except while a sweep re-describes what it keeps, and before it
+starts closes its source's item walks still `running` whose heartbeat is 10
+minutes old or missing, `failed` with
 `abandoned: its process stopped before it finished`, logging a WARNING that
 counts them; a whole-library walk closed this way is resumed all the same. A
 process paused that long rather than stopped — its machine suspended, say — is
@@ -317,15 +318,25 @@ refuses, raising and changing nothing, before asking the source anything.
 `1.0` disables the ceiling. The ceiling is a fraction of what *Usher* holds
 for that source, not of the source itself. Otherwise it asks the source about
 each candidate. It marks unavailable those the source confirms gone, and
-records the rest as seen at the walk's start, since the source still serves
-them. If the source cannot answer, the sweep changes nothing and the run
-fails; the next full walk resumes it and only sweeps. On either path, an
-Emby listing that names only items Usher did not ask about counts as no answer.
+re-describes the rest from the entries the source returned, as a walk writes a
+listed item, recording them as seen at the walk's start in the commit that
+completes the run, since the source still serves them. If writing those entries
+fails partway, the batches already written are kept, committed with the failed
+run, and nothing is retracted; the next full walk resumes it and asks only about
+what is left. If the source cannot answer, the sweep changes nothing and the run
+fails; the next full walk resumes it and only sweeps. For a sweep and a push
+removal alike, an Emby listing that names only items Usher did not ask about
+counts as no answer.
 
 An item that reappears in a walk is available again at that moment. An item
 keeps the latest instant it was seen at — a walk's start, or the moment a push
 event read it — so a walk that began earlier and reads it again never exposes
-it to a later full walk's sweep. The sweep only ever sets `false`.
+it to a later full walk's sweep. The sweep only ever sets `false`, and a row a
+push retracted after the source answered stays retracted. The one gap is a
+walk's too: a retraction landing while those rows are being written is undone
+until the next full walk's sweep. The sweep asks only about available rows, so a
+row already retracted stays retracted until a walk lists it or a push event reads
+it, even while the source still serves it.
 
 **A source is either a library this deployment owns or a *view* of somebody
 else's, and Usher does not model the difference.** Pointing Usher at a server
@@ -601,6 +612,15 @@ client-facing contract).
 
 It carries **three** query parameters: `static=true`, `MediaSourceId` and
 `api_key`. It does not carry Usher's own `DeviceId`.
+
+**Each copy plays its own file.** An Emby item's own media source is the entry
+whose `ItemId` is the item's id, else the one whose `Id` is the item's id or
+`mediasource_` followed by it. A payload with one entry uses it.
+`MediaSourceId` names that entry, and the copy's description is read from it. A
+payload with several entries naming none plays its best version, the most
+pixels among those with a container and then the most bytes, and is logged as a
+WARNING and counted (`usher.source.versions.fallbacks`). When none of them has a
+container it is logged and counted the same, and it has no target.
 
 `StreamTarget` also carries `scheme` (for deep links) and `audio` (a single
 composite token such as `truehd_atmos_7_1`, which is a different thing from the

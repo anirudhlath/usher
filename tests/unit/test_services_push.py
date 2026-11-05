@@ -35,6 +35,7 @@ from usher.ports.errors import PortUnavailable
 from usher.ports.events import ClientEvent, ClientEventKind
 from usher.ports.ingest import MediaItemUpsert, Retraction
 from usher.ports.source import (
+    Confirmation,
     SourceAdapter,
     SourceEvent,
     SourceEventKind,
@@ -636,7 +637,7 @@ async def test_a_row_read_since_the_removal_arrived_survives_a_gone_answer(
     fixture.adapter.forget("back-1")
     original = fixture.adapter.confirm_gone
 
-    async def _read_back_first(external_ids: Collection[str]) -> frozenset[str]:
+    async def _read_back_first(external_ids: Collection[str]) -> Confirmation:
         await fixture.ingest.ingest_batch(
             fixture.source.id, [_item("back-1")], observed_at=datetime.now(UTC)
         )
@@ -731,7 +732,7 @@ async def test_a_removal_ends_each_reads_transaction_before_asking_the_source(
     commits_at_ask: list[int] = []
     original = fixture.adapter.confirm_gone
 
-    async def _recording(external_ids: Collection[str]) -> frozenset[str]:
+    async def _recording(external_ids: Collection[str]) -> Confirmation:
         commits_at_ask.append(fixture.commits)
         return await original(external_ids)
 

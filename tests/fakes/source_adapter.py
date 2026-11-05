@@ -17,6 +17,7 @@ from usher.ports.errors import PortAuthFailed, PortDataMalformed, PortUnavailabl
 from usher.ports.source import (
     DEFAULT_UNIT_KEY,
     WHOLE_LIBRARY,
+    Confirmation,
     SourceAdapter,
     SourceEvent,
     SourceEventKind,
@@ -389,17 +390,19 @@ class FakeSourceAdapter(SourceAdapter):
         await self._ready()
         return self._items.get(external_id)
 
-    async def confirm_gone(self, external_ids: Collection[str]) -> frozenset[str]:
+    async def confirm_gone(self, external_ids: Collection[str]) -> Confirmation:
         asked = frozenset(external_ids)
         self.confirm_calls.append(asked)
         if not asked:
-            return frozenset()
+            return Confirmation()
         await self._ready()
         if self._confirm_fails:
             raise PortUnavailable("source went away while confirming removals")
         # A turn of the loop, as a request gives, so a caller's heartbeat can run.
         await asyncio.sleep(0)
-        return frozenset(external_id for external_id in asked if external_id not in self._items)
+        gone = frozenset(external_id for external_id in asked if external_id not in self._items)
+        served = tuple(self._items[one] for one in sorted(asked) if one in self._items)
+        return Confirmation(gone=gone, served=served)
 
     async def stream_targets(self, external_id: str) -> list[StreamTarget]:
         await self._ready()

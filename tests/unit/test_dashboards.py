@@ -502,8 +502,8 @@ def test_the_catalogue_scan_reaches_the_row_that_carries_no_usher_prefix() -> No
         "the catalogue scan is still anchored on `usher.`, so an API-latency panel would "
         "fail invariant 2 for naming the one metric PRD 10 says it should"
     )
-    assert len(catalogue) == 46, (
-        f"PRD 10's metric table parsed to {len(catalogue)} rows, not the 46 its own header "
+    assert len(catalogue) == 47, (
+        f"PRD 10's metric table parsed to {len(catalogue)} rows, not the 47 its own header "
         "counts out — the table's shape has moved and both readers need checking"
     )
 
@@ -819,11 +819,11 @@ def _sql(panel: dict[str, Any]) -> str:
     return "\n".join(_target_sql(target) for target in panel.get("targets") or [])
 
 
-def _assert_dashboard_3_has_thirteen_panels(panels: list[dict[str, Any]]) -> None:
-    """Dashboard 3's panel count: PRD 10's twelve items, with queue depth drawn twice."""
+def _assert_dashboard_3_has_fourteen_panels(panels: list[dict[str, Any]]) -> None:
+    """Dashboard 3's panel count: PRD 10's thirteen items, with queue depth drawn twice."""
     titles = [str(panel["title"]) for panel in panels]
-    assert len(panels) == 13, (
-        "dashboard 3 is thirteen panels -- PRD 10's twelve items, with queue depth drawn "
+    assert len(panels) == 14, (
+        "dashboard 3 is fourteen panels -- PRD 10's thirteen items, with queue depth drawn "
         f"twice -- not {len(panels)}: {titles}"
     )
 
@@ -849,7 +849,7 @@ def test_the_queue_depth_panels_are_two_panels_over_two_datasources() -> None:
     assert "Parked jobs by kind" in titles, (
         f"the known-title anchor is gone, so this scan is reading something else: {titles}"
     )
-    _assert_dashboard_3_has_thirteen_panels(panels)
+    _assert_dashboard_3_has_fourteen_panels(panels)
 
     depth = [panel for panel in panels if "queue depth" in str(panel["title"]).lower()]
     assert len(depth) == 2, (
@@ -1128,6 +1128,26 @@ def test_the_page_size_panel_draws_the_listing_page_size_by_source() -> None:
     )
 
 
+def test_the_fallbacks_panel_sums_the_bare_counter_and_calls_an_empty_panel_healthy() -> None:
+    """One line, as the counter has no label to split on, and cumulative, as panel 12 is.
+
+    The first fallback is a series beginning at 1, which has risen by nothing inside a
+    `rate` window, and a counter exports nothing before it, so empty has to read as healthy.
+    """
+    fallbacks = [
+        panel for panel in _live_panels(_PIPELINE) if str(panel["title"]) == "Version fallbacks"
+    ]
+    assert len(fallbacks) == 1, f"dashboard 3 has {len(fallbacks)} fallback panels, not one"
+    [expr] = _exprs(fallbacks[0])
+    assert _AGGREGATION.findall(expr) == ["sum"], expr
+    assert _aggregations(expr) == [(set(), "usher_source_versions_fallbacks_total")], (
+        f"the panel must sum the bare counter, as Prometheus stores it, with no rate: {expr}"
+    )
+    assert "an empty panel is the healthy reading" in str(fallbacks[0]["description"]), (
+        "an empty panel is what a healthy deployment shows, and the panel has to say so"
+    )
+
+
 def test_the_dashboard_3_prose_claims_are_falsifiable() -> None:
     """Each of the four checks above, handed an input it has to refuse.
 
@@ -1148,8 +1168,8 @@ def test_the_dashboard_3_prose_claims_are_falsifiable() -> None:
         _assert_names_the_transport_failures(
             {"title": "TMDb requests", "description": "429s over the total"}
         )
-    with pytest.raises(AssertionError, match=r"thirteen panels .* not 12:"):
-        _assert_dashboard_3_has_thirteen_panels([{"title": f"panel {n}"} for n in range(12)])
+    with pytest.raises(AssertionError, match=r"fourteen panels .* not 13:"):
+        _assert_dashboard_3_has_fourteen_panels([{"title": f"panel {n}"} for n in range(13)])
 
 
 # --------------------------------------------------------------------------------

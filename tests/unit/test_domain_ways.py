@@ -410,6 +410,7 @@ def test_lossy_audio_above_two_channels_outranks_any_stereo_codec(
 def test_hdr_ranks_dolby_vision_then_hdr10_then_hlg_then_none() -> None:
     sdr = _copy("sdr", width=3840, height=2160, audio_codec="eac3")
     formats = (HdrFormat.DOLBY_VISION, HdrFormat.HDR10, HdrFormat.HLG, None)
+    assert set(formats) == {*HdrFormat, None}, "the premise: the ladder lists every format"
     scores = [quality_of(_variant(sdr, f"sdr-{hdr}", hdr_format=hdr)).score for hdr in formats]
     assert [higher > lower for higher, lower in pairwise(scores)] == [True, True, True]
 

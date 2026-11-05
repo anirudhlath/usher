@@ -1031,6 +1031,111 @@ async def test_a_version_group_lists_by_its_own_order_not_the_ids(driver: _Drive
     assert await _listed(driver, Ids="v0,v1", Limit="2") == ["v1"]
 
 
+async def test_a_version_group_read_by_id_lists_every_version_as_recorded(driver: _Driver) -> None:
+    reads = load_emby_fixture("version_group_by_id")["reads"]
+    group = [read["Id"] for read in reads]
+    for read in reads:
+        assert [(e["ItemId"], e["Id"]) for e in read["MediaSources"]] == [
+            (version, f"mediasource_{version}") for version in group
+        ], "the premise: every recorded read lists every version"
+    for version in ("v0", "v1"):
+        driver.server.add_item(replace(MOVIE, external_id=version), ADDED_AT)
+    driver.server.group_versions("v0", "v1")
+    for version in ("v0", "v1"):
+        payload = await driver.payload(version)
+        entries = payload["MediaSources"]
+        assert [(e.get("ItemId"), e.get("Id")) for e in entries] == [
+            ("v0", "mediasource_v0"),
+            ("v1", "mediasource_v1"),
+        ]
+        assert set(reads[0]) <= set(payload)
+        assert set(reads[0]["MediaSources"][0]) <= set(entries[0])
+        listed = await driver.session.json_body(
+            "GET", f"/Users/{USER_ID}/Items", params={"Ids": version, "Limit": "1"}, op="list"
+        )
+        assert [(e.get("ItemId"), e.get("Id")) for e in listed["Items"][0]["MediaSources"]] == [
+            (version, f"mediasource_{version}")
+        ]
+
+
+async def test_a_version_group_read_by_id_renders_each_present_version_from_its_own_facts(
+    driver: _Driver,
+) -> None:
+    """Each entry is its own version's file, in group order, and a removed version lists none.
+
+    Read as the 4K version, so an entry rendered from the read's facts rather than its
+    own version's shows up as a second 4K file. The group's order is neither the order
+    its versions were added in nor their ids' lexical order, so an entry list in either
+    of those orders fails.
+    """
+    hd = replace(
+        MOVIE,
+        external_id="v1",
+        container="mp4",
+        width=1920,
+        height=1080,
+        file_size_bytes=8_589_934_592,
+        runtime_seconds=9300,
+    )
+    added = (replace(MOVIE, external_id="v0"), hd, replace(MOVIE, external_id="v2"))
+    group = ("v1", "v2", "v0")
+    for version in added:
+        driver.server.add_item(version, ADDED_AT)
+    driver.server.group_versions(*group)
+    driver.server.remove_item("v2")
+    present = [member for member in group if member != "v2"]
+    in_added_order = [version.external_id for version in added if version.external_id in present]
+    assert present != in_added_order, "the premise: group order is not insertion order"
+    assert present != sorted(present), "the premise: group order is not lexical order"
+    assert hd.container != MOVIE.container, "the premise: the containers differ"
+    assert hd.file_size_bytes != MOVIE.file_size_bytes, "the premise: the sizes differ"
+    assert hd.runtime_seconds != MOVIE.runtime_seconds, "the premise: the runtimes differ"
+    assert MOVIE.runtime_seconds is not None
+    assert hd.runtime_seconds is not None
+    facts = {
+        "v0": (MOVIE.container, MOVIE.file_size_bytes, MOVIE.runtime_seconds * TICKS_PER_SECOND),
+        "v1": (hd.container, hd.file_size_bytes, hd.runtime_seconds * TICKS_PER_SECOND),
+    }
+    entries = (await driver.payload("v0"))["MediaSources"]
+    assert [
+        (e.get("ItemId"), e.get("Container"), e.get("Size"), e.get("RunTimeTicks")) for e in entries
+    ] == [(member, *facts[member]) for member in present]
+
+
+async def test_a_member_with_no_own_entry_is_refused_rather_than_read_as_the_entry_beside_it(
+    driver: _Driver,
+) -> None:
+    """A real read lists its own `Container: null` entry, which this fake does not model.
+
+    Beside a sibling or an alternate it would read as that entry. Beside nothing it renders no
+    key, as does a listing of a grouped member, and a sibling beside one reads as itself.
+    """
+    refused = "does not model a transcode-only version's entry"
+    transcode_only = replace(MOVIE, container=None, width=1280, height=720)
+    driver.server.add_item(replace(transcode_only, external_id="lone"), ADDED_AT)
+    assert "MediaSources" not in await driver.payload("lone"), "the premise: beside nothing"
+
+    driver.server.add_item(replace(MOVIE, external_id="uhd"), ADDED_AT)
+    driver.server.add_item(replace(transcode_only, external_id="hd"), ADDED_AT)
+    driver.server.group_versions("uhd", "hd")
+    entries = (await driver.payload("uhd"))["MediaSources"]
+    assert [entry["ItemId"] for entry in entries] == ["uhd"], "the sibling reads as itself"
+    with pytest.raises(ValueError, match=refused):
+        await driver.payload("hd")
+    listed = await driver.session.json_body(
+        "GET", f"/Users/{USER_ID}/Items", params={"Ids": "hd", "Limit": "1"}, op="list"
+    )
+    assert ["MediaSources" in entry for entry in listed["Items"]] == [False]
+
+    driver.server.add_alternate_version("lone", container="mkv", width=3840, height=2160)
+    with pytest.raises(ValueError, match=refused):
+        await driver.payload("lone")
+    with pytest.raises(ValueError, match=refused):
+        await driver.session.json_body(
+            "GET", f"/Users/{USER_ID}/Items", params={"Ids": "lone", "Limit": "1"}, op="list"
+        )
+
+
 def _given_next_up(driver: _Driver) -> None:
     driver.server.add_item(
         SourceItem(external_id="s0", name="S 0", kind=SourceItemKind.SERIES), ADDED_AT

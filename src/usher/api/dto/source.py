@@ -51,9 +51,9 @@ class SyncRunResponse(BaseModel):
     `stage`, `units_done`, `units_total` and `items_expected` say where a
     whole-library walk's plan stands -- `walk_progress` -- and are `null` for a walk
     without one. `heartbeat_at` tells a live `running` walk from a dead one: a
-    whole-library walk's writer moves it at least once a minute. `error` is the
-    run's own sentence, built like `SourceStatusResponse.detail` from translated
-    port errors.
+    whole-library walk's writer moves it at least once a minute, except while a sweep
+    re-describes what it keeps. `error` is the run's own sentence, built like
+    `SourceStatusResponse.detail` from translated port errors.
     """
 
     kind: SyncRunKind

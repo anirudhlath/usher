@@ -1,7 +1,9 @@
 """`EmbyAdapter.confirm_gone` on the wire: its rounds, its chunks, and what it will not read."""
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime
+from typing import Any
 
 import httpx
 import pytest
@@ -13,12 +15,13 @@ from pydantic import SecretStr
 
 from tests.fakes.emby_server import FakeEmbyServer
 from usher.adapters.emby.adapter import IDS_PER_REQUEST, EmbyAdapter
+from usher.adapters.emby.mapping import to_source_item
 from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
 from usher.domain.source import Source
 from usher.ports.credentials import SourceCredentials
 from usher.ports.errors import PortDataMalformed
-from usher.ports.source import SourceItem, SourceItemKind
+from usher.ports.source import Confirmation, SourceItem, SourceItemKind
 
 T0 = datetime(2026, 7, 20, 12, 0, 0, tzinfo=UTC)
 CREDENTIALS = SourceCredentials(username="usher", password=SecretStr("correct-horse-battery"))
@@ -73,11 +76,68 @@ async def test_a_served_version_its_sibling_hid_is_asked_again_and_kept() -> Non
     server.group_versions("v0", "v1")
     adapter, seen = _adapter(server)
     try:
-        gone = await adapter.confirm_gone(["v1", "v0"])
+        answer = await adapter.confirm_gone(["v1", "v0"])
     finally:
         await adapter.aclose()
-    assert gone == frozenset()
+    assert answer.gone == frozenset()
     assert _asked(seen) == ["v0,v1", "v1"]
+
+
+async def test_a_confirmation_asks_for_the_fields_a_walk_reads() -> None:
+    """Every `Ids` listing sends the `Fields` a real walk sent, so a served item reads as one.
+
+    Both are read off the wire: the fake renders every field whatever was asked, so no answer
+    could show this, and a constant compared with itself would not move with the walk's query.
+    """
+    server = FakeEmbyServer()
+    server.add_item(_movie("kept-1"), T0)
+    adapter, seen = _adapter(server)
+    try:
+        _ = [item async for item in adapter.list_items()]
+        answer = await adapter.confirm_gone(["gone-1", "kept-1"])
+    finally:
+        await adapter.aclose()
+    walk_fields = {
+        request.url.params.get("Fields")
+        for request in seen
+        if request.url.path.endswith("/Items") and "Ids" not in request.url.params
+    }
+    assert walk_fields and None not in walk_fields, "the premise: the walk's listing sent `Fields`"
+    by_ids = {request.url.params.get("Fields") for request in seen if "Ids" in request.url.params}
+    assert by_ids, "the premise: the confirmation listed by Ids"
+    assert by_ids == walk_fields
+    assert [item.external_id for item in answer.served] == ["kept-1"]
+    assert answer.gone == {"gone-1"}
+
+
+async def test_a_hidden_version_asked_again_is_served_as_its_own_file() -> None:
+    """A version its sibling hid in a chunk of a hundred is asked alone, and served as itself.
+
+    `a-v0` and `a-v1` are one group. A listing names every asked filler but only the group's
+    first asked version, and each entry carries its own one media source.
+    """
+    asked = ["a-v0", "a-v1", *(f"m-{index:03d}" for index in range(IDS_PER_REQUEST - 1))]
+    server = FakeEmbyServer()
+    server.add_item(replace(_movie("a-v0"), width=3840, height=2160), T0)
+    server.add_item(replace(_movie("a-v1"), width=1920, height=1080), T0)
+    server.group_versions("a-v0", "a-v1")
+    for filler in asked[2:]:
+        server.add_item(_movie(filler), T0)
+    assert sorted(asked)[:2] == ["a-v0", "a-v1"], "the premise: the group shares the first chunk"
+    assert len(asked) == IDS_PER_REQUEST + 1, "the premise: a second chunk follows"
+    adapter, seen = _adapter(server)
+    try:
+        answer = await adapter.confirm_gone(asked)
+    finally:
+        await adapter.aclose()
+    limits = [request.url.params.get("Limit") for request in seen if "Ids" in request.url.params]
+    assert limits == [str(IDS_PER_REQUEST), "1", "1"]
+    assert _asked(seen)[-1] == "a-v1"
+    served = {item.external_id: item for item in answer.served}
+    assert sorted(served) == sorted(asked)
+    assert answer.served[-1].external_id == "a-v1"
+    assert (served["a-v1"].width, served["a-v1"].height) == (1920, 1080)
+    assert answer.gone == frozenset()
 
 
 async def test_a_listing_of_only_ids_nobody_asked_for_raises_rather_than_reading_as_gone() -> None:
@@ -104,11 +164,76 @@ async def test_a_stray_id_beside_an_asked_one_is_skipped() -> None:
     adapter, seen = _adapter(FakeEmbyServer(), answer=answer)
     try:
         async with asyncio.timeout(5):
-            gone = await adapter.confirm_gone(["kept-1"])
+            confirmation = await adapter.confirm_gone(["kept-1"])
     finally:
         await adapter.aclose()
-    assert gone == frozenset()
+    assert confirmation.gone == frozenset()
     assert _asked(seen) == ["kept-1"]
+
+
+async def test_a_stray_entry_is_never_served() -> None:
+    """An entry nobody asked about is never described, even one that would map."""
+    listing: dict[str, Any] = {
+        "Items": [
+            {"Id": "kept-1", "Type": "Movie", "Name": "Kept"},
+            {"Id": "stray-1", "Type": "Movie", "Name": "Stray"},
+        ],
+        "TotalRecordCount": 2,
+    }
+    assert to_source_item(listing["Items"][1]) is not None, "the premise: the stray would map"
+    adapter, _ = _adapter(FakeEmbyServer(), answer=listing)
+    try:
+        answer = await adapter.confirm_gone(["kept-1"])
+    finally:
+        await adapter.aclose()
+    assert [item.external_id for item in answer.served] == ["kept-1"]
+
+
+async def test_an_id_listed_twice_is_served_as_its_first_entry() -> None:
+    """The entry after the first naming an id is ignored, so the item is served once."""
+    listing: dict[str, Any] = {
+        "Items": [
+            {"Id": "kept-1", "Type": "Movie", "Name": "First"},
+            {"Id": "kept-1", "Type": "Movie", "Name": "Second"},
+        ],
+        "TotalRecordCount": 2,
+    }
+    adapter, _ = _adapter(FakeEmbyServer(), answer=listing)
+    try:
+        answer = await adapter.confirm_gone(["kept-1"])
+    finally:
+        await adapter.aclose()
+    assert [item.name for item in answer.served] == ["First"]
+
+
+async def test_a_confirmation_keeps_no_raw_payload_of_what_it_serves() -> None:
+    """Every served entry drops `raw` and keeps the rest of what a walk's mapping describes."""
+    entries: list[dict[str, Any]] = [
+        {"Id": "kept-1", "Type": "Movie", "Name": "First"},
+        {"Id": "kept-2", "Type": "Movie", "Name": "Second"},
+    ]
+    walked = [item for item in map(to_source_item, entries) if item is not None]
+    assert [item.raw for item in walked] == entries, "the premise: a walk's mapping keeps it"
+    adapter, _ = _adapter(FakeEmbyServer(), answer={"Items": entries, "TotalRecordCount": 2})
+    try:
+        answer = await adapter.confirm_gone(["kept-1", "kept-2"])
+    finally:
+        await adapter.aclose()
+    assert list(answer.served) == [replace(item, raw={}) for item in walked]
+
+
+async def test_an_entry_listed_but_not_modelled_is_neither_gone_nor_served() -> None:
+    """The source lists it, so it is not gone; no `SourceItem` can describe it, so not served."""
+    entry = {"Id": "season-1", "Type": "Season", "Name": "Season 1"}
+    assert to_source_item(entry) is None, "the premise: the mapper does not model this entry"
+    adapter, _ = _adapter(FakeEmbyServer(), answer={"Items": [entry], "TotalRecordCount": 1})
+    try:
+        # Asked again for as long as it stayed undecided, it would be listed every round.
+        async with asyncio.timeout(5):
+            answer = await adapter.confirm_gone(["season-1"])
+    finally:
+        await adapter.aclose()
+    assert answer == Confirmation()
 
 
 async def test_a_hundred_and_one_ids_go_as_two_requests_each_limited_to_its_chunk() -> None:
@@ -116,10 +241,10 @@ async def test_a_hundred_and_one_ids_go_as_two_requests_each_limited_to_its_chun
     asked = [f"gone-{index:03d}" for index in range(IDS_PER_REQUEST + 1)]
     adapter, seen = _adapter(FakeEmbyServer())
     try:
-        gone = await adapter.confirm_gone(asked)
+        answer = await adapter.confirm_gone(asked)
     finally:
         await adapter.aclose()
-    assert gone == frozenset(asked)
+    assert answer.gone == frozenset(asked)
     limits = [request.url.params.get("Limit") for request in seen if "Ids" in request.url.params]
     assert limits == [str(IDS_PER_REQUEST), "1"]
 
@@ -127,7 +252,7 @@ async def test_a_hundred_and_one_ids_go_as_two_requests_each_limited_to_its_chun
 async def test_a_body_without_items_raises_rather_than_reading_as_gone() -> None:
     adapter, _ = _adapter(FakeEmbyServer(), answer={"TotalRecordCount": 0})
     try:
-        with pytest.raises(PortDataMalformed, match="no Items array"):
+        with pytest.raises(PortDataMalformed, match="Emby's Ids listing carried no Items array"):
             await adapter.confirm_gone(["kept-1"])
     finally:
         await adapter.aclose()
@@ -160,10 +285,10 @@ async def test_a_confirmation_is_timed_as_confirm_and_spanned_with_its_counts() 
     server.add_item(_movie("kept-1"), T0)
     adapter, seen = _adapter(server)
     try:
-        gone = await adapter.confirm_gone(["kept-1", "gone-1"])
+        answer = await adapter.confirm_gone(["kept-1", "gone-1"])
     finally:
         await adapter.aclose()
-    assert gone == {"gone-1"}
+    assert answer.gone == {"gone-1"}
     reads = [request for request in seen if request.url.path != "/Users/AuthenticateByName"]
     assert len(reads) == 2, "the premise: one round listed kept-1, the next listed nothing"
     spans = exporter.get_finished_spans()

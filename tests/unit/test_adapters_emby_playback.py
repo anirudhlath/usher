@@ -5,11 +5,14 @@ import ast
 import inspect
 import logging
 import pathlib
+from collections.abc import Iterator
 from urllib.parse import parse_qs, unquote, urlparse
 
+import pytest
 from _pytest.logging import LogCaptureFixture
+from loguru import logger
 
-from tests.fakes.emby_fixtures import load_emby_fixture
+from tests.fakes.emby_fixtures import load_emby_fixture, own_entry_only
 from usher.adapters.emby.mapping import to_source_item
 from usher.adapters.emby.playback import build_stream_targets
 from usher.domain.enums import HdrFormat
@@ -203,7 +206,7 @@ def test_a_media_source_with_no_container_has_no_targets() -> None:
     assert build_stream_targets(payload, base_url=BASE, access_token=TOKEN) == []
 
 
-def test_a_multi_version_item_is_played_at_its_best_playable_version() -> None:
+def test_several_entries_naming_none_play_the_best_version() -> None:
     """Emby lists one `MediaSources` entry per *version*.
 
     Taking index `[0]` picks whichever the server happened to list first, which fails
@@ -218,7 +221,8 @@ def test_a_multi_version_item_is_played_at_its_best_playable_version() -> None:
     `multi_version_movie.json` orders its three entries transcode-only,
     2160p, 1080p on purpose: "first wins" returns `[]`, "last wins" returns
     the 1080p version, and only "the best entry that has a container" gets
-    it right.
+    it right. `multi_version_movie.json` names no entry as its own, so this is
+    the fallback.
     """
     direct = _targets("multi_version_movie")[0]
     assert direct.container == "mkv"
@@ -231,6 +235,36 @@ def test_a_multi_version_item_is_played_at_its_best_playable_version() -> None:
     query = parse_qs(urlparse(direct.url).query)
     assert query["MediaSourceId"] == ["0000000000000000000000000000b0f1"]
     assert urlparse(direct.url).path.endswith("/stream.mkv")
+
+
+@pytest.mark.parametrize("index", [0, 1])
+def test_each_version_read_by_id_plays_its_own_file(index: int) -> None:
+    """Each read plays as its own entry alone plays, under that entry's `MediaSourceId`."""
+    reads = load_emby_fixture("version_group_by_id")["reads"]
+    alone = [
+        build_stream_targets(own_entry_only(read), base_url=BASE, access_token=TOKEN)
+        for read in reads
+    ]
+    assert alone[0][0].resolution != alone[1][0].resolution, (
+        "the premise: the versions play differently"
+    )
+    targets = build_stream_targets(reads[index], base_url=BASE, access_token=TOKEN)
+    assert parse_qs(urlparse(targets[0].url).query)["MediaSourceId"] == [
+        f"mediasource_{reads[index]['Id']}"
+    ]
+    assert (
+        urlparse(targets[0].url).path
+        == f"/Videos/{reads[index]['Id']}/stream.{('mkv', 'mp4')[index]}"
+    )
+    assert targets == alone[index]
+
+
+def test_an_own_entry_with_no_container_has_no_targets_beside_a_playable_sibling() -> None:
+    """The copy's own file has no direct URL, and the sibling's file is not offered instead."""
+    read = load_emby_fixture("version_group_by_id")["reads"][1]
+    del read["MediaSources"][1]["Container"]
+    assert read["MediaSources"][0]["Container"] == "mkv", "the premise: the sibling plays"
+    assert build_stream_targets(read, base_url=BASE, access_token=TOKEN) == []
 
 
 def test_a_capitalised_container_is_lowercased_in_both_places() -> None:
@@ -332,6 +366,29 @@ def test_an_item_with_no_id_has_no_targets() -> None:
     payload = load_emby_fixture("movie_item")
     del payload["Id"]
     assert build_stream_targets(payload, base_url=BASE, access_token=TOKEN) == []
+
+
+@pytest.fixture
+def warnings_logged() -> Iterator[list[str]]:
+    sink: list[str] = []
+    handler = logger.add(sink.append, level="WARNING", format="{message}")
+    try:
+        yield sink
+    finally:
+        logger.remove(handler)
+
+
+def test_an_item_with_no_id_chooses_no_version_and_logs_no_fallback(
+    warnings_logged: list[str],
+) -> None:
+    """With no `Id` there is no URL to build, so no version is chosen and none falls back."""
+    payload = load_emby_fixture("multi_version_movie")
+    del payload["Id"]
+    assert len(payload["MediaSources"]) > 1, (
+        "the premise: several versions, so choosing one would fall back"
+    )
+    assert build_stream_targets(payload, base_url=BASE, access_token=TOKEN) == []
+    assert warnings_logged == []
 
 
 # --- access-token handling rules --------------------------------------

@@ -272,6 +272,9 @@ def _is_synthetic_id(value: object) -> bool:
         return value >= _SYNTHETIC_ID_FLOOR
     if not isinstance(value, str):
         return True
+    # A media source's `Id` is `mediasource_` plus the id of the version it is, so
+    # it is judged as that id.
+    value = value.removeprefix("mediasource_")
     if _SYNTHETIC_IMDB_ID.match(value):
         return True
     if _ANY_IMDB_ID.fullmatch(value):
@@ -314,6 +317,13 @@ def test_every_id_in_a_fixture_is_synthetic() -> None:
         f"fixture ids that are not synthetic (floor {_SYNTHETIC_ID_FLOOR}) -- see "
         "tests/fixtures/README.md:\n" + "\n".join(offenders)
     )
+
+
+@pytest.mark.parametrize(
+    ("value", "synthetic"), [("mediasource_12345", False), ("mediasource_90000131", True)]
+)
+def test_a_media_source_id_is_judged_by_the_item_id_it_carries(value: str, synthetic: bool) -> None:
+    assert _is_synthetic_id(value) is synthetic
 
 
 @pytest.mark.parametrize(
@@ -398,6 +408,7 @@ def test_no_dataset_row_is_committed_anywhere() -> None:
         "tests/fixtures/emby/push_sessions.json",
         "tests/fixtures/emby/view_item.json",
         "tests/fixtures/emby/ids_version_group.json",
+        "tests/fixtures/emby/version_group_by_id.json",
         "tests/fixtures/tmdb/movie.json",
         "tests/fixtures/tmdb/series.json",
         "tests/fixtures/tmdb/season.json",

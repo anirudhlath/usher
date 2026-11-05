@@ -25,6 +25,7 @@ from usher.ports.source import (
     DEFAULT_UNIT_KEY,
     INFUSE_SCHEME,
     WHOLE_LIBRARY,
+    Confirmation,
     PushProbe,
     SourceAdapter,
     SourceAdapterFactory,
@@ -533,6 +534,36 @@ def test_get_watch_state_is_on_the_port() -> None:
 def test_confirm_gone_is_abstract_so_no_adapter_inherits_a_silent_default() -> None:
     """A default answering "none gone" would switch retraction off for a new adapter."""
     assert "confirm_gone" in SourceAdapter.__abstractmethods__
+
+
+_SERVED = SourceItem(external_id="kept-1", name="Kept", kind=SourceItemKind.MOVIE)
+
+
+def test_a_confirmation_defaults_to_nothing_gone_and_nothing_served() -> None:
+    """The answer to an empty question, which `confirm_gone` gives without a request."""
+    assert Confirmation() == Confirmation(gone=frozenset(), served=())
+
+
+@pytest.mark.parametrize(
+    "twin",
+    [_SERVED, dataclasses.replace(_SERVED, width=1920)],
+    ids=["the-same-item", "another-description-of-its-id"],
+)
+def test_a_confirmation_refuses_an_item_served_twice(twin: SourceItem) -> None:
+    """Two served items sharing an `external_id` are refused, even when they differ."""
+    with pytest.raises(ValueError, match="served twice"):
+        Confirmation(served=(_SERVED, twin))
+
+
+def test_a_confirmation_refuses_an_id_both_gone_and_served() -> None:
+    with pytest.raises(ValueError, match="both gone and served"):
+        Confirmation(gone=frozenset({_SERVED.external_id}), served=(_SERVED,))
+
+
+def test_confirm_gone_answers_with_a_confirmation() -> None:
+    """`eval_str=True`, so this holds whether the annotation is written quoted or bare."""
+    signature = inspect.signature(SourceAdapter.confirm_gone, eval_str=True)
+    assert signature.return_annotation is Confirmation
 
 
 def test_a_walks_resume_point_is_keyword_only() -> None:
