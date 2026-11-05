@@ -167,12 +167,12 @@ heading false. `tests/unit/test_docs_currency.py` reads it into the same union.
 ## Every version playable (from docs/specs/2026-10-28-every-version-playable-design.md)
 | Task | What it delivers | Plan file | Status |
 |---|---|---|---|
-| 1 | `version_group_by_id.json`, one version group read by id as each version, and a fake server that reads a group the same way | docs/plans/2026-11-02-every-version-own-file.md | 📋 planned |
-| 2 | Each copy describes and plays its own file: the media source whose `ItemId` is the item's, with a counted WARNING fallback | docs/plans/2026-11-02-every-version-own-file.md | 📋 planned |
-| 3 | `confirm_gone` returns a `Confirmation`: the ids gone and the entries served, each its own file | docs/plans/2026-11-02-every-version-own-file.md | 📋 planned |
-| 4 | The sweep re-describes the hidden versions it keeps, in the commit that completes the run | docs/plans/2026-11-02-every-version-own-file.md | 📋 planned |
-| 5 | `/play` offers copies in `/ways`' quality order, available copies first | docs/plans/2026-11-02-every-version-own-file.md | 📋 planned |
-| 6 | Status rows: this plan in review | docs/plans/2026-11-02-every-version-own-file.md | 📋 planned |
+| 1 | `version_group_by_id.json`, one version group read by id as each version, and a fake server that reads a group the same way | docs/plans/2026-11-02-every-version-own-file.md | 🔨 in review (PR #113) |
+| 2 | Each copy describes and plays its own file: the media source whose `ItemId` is the item's, with a counted WARNING fallback | docs/plans/2026-11-02-every-version-own-file.md | 🔨 in review (PR #113) |
+| 3 | `confirm_gone` returns a `Confirmation`: the ids gone and the entries served, each its own file | docs/plans/2026-11-02-every-version-own-file.md | 🔨 in review (PR #113) |
+| 4 | The sweep re-describes the hidden versions it keeps, in the commit that completes the run | docs/plans/2026-11-02-every-version-own-file.md | 🔨 in review (PR #113) |
+| 5 | `/play` offers copies in `/ways`' quality order, available copies first | docs/plans/2026-11-02-every-version-own-file.md | 🔨 in review (PR #113) |
+| 6 | Status rows: this plan in review | docs/plans/2026-11-02-every-version-own-file.md | 🔨 in review (PR #113) |
 | 7 | Live acceptance: one full walk, then each sampled copy's stored description, direct target and bytes checked against its own file — owner-gated | docs/plans/2026-11-02-every-version-own-file.md | 📋 planned |
 
 **A tenth table, for the ninth's reason.** Every version playable has its own
