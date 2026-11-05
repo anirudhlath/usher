@@ -14,6 +14,7 @@ from collections.abc import (
     Sequence,
 )
 from contextlib import AbstractAsyncContextManager, aclosing
+from dataclasses import replace
 from itertools import batched
 from typing import Any
 from urllib.parse import quote
@@ -946,7 +947,8 @@ class EmbyAdapter(SourceAdapter):
         served. Only an id that was asked for counts.
 
         `served` describes each listed id as a walk describes its entry, in the order the
-        rounds first listed them. An id whose entry the mapper does not model is in neither.
+        rounds first listed them, keeping no `raw`: a sweep holds every entry at once, and
+        nothing reads one. An id whose entry the mapper does not model is in neither.
         """
         with _tracer.start_as_current_span("source.confirm_gone") as span:
             remaining = set(external_ids)
@@ -984,7 +986,8 @@ class EmbyAdapter(SourceAdapter):
             if not isinstance(listed_id, str):
                 raise PortDataMalformed("Emby's Ids listing carried an entry with no string Id")
             if listed_id in asked and listed_id not in listed:
-                listed[listed_id] = to_source_item(entry)
+                item = to_source_item(entry)
+                listed[listed_id] = None if item is None else replace(item, raw={})
         if entries and not listed:
             raise PortDataMalformed("Emby's Ids listing named none of the ids it was asked for")
         return listed

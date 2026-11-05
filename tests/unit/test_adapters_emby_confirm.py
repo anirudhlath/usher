@@ -206,6 +206,22 @@ async def test_an_id_listed_twice_is_served_as_its_first_entry() -> None:
     assert [item.name for item in answer.served] == ["First"]
 
 
+async def test_a_confirmation_keeps_no_raw_payload_of_what_it_serves() -> None:
+    """Every served entry drops `raw` and keeps the rest of what a walk's mapping describes."""
+    entries: list[dict[str, Any]] = [
+        {"Id": "kept-1", "Type": "Movie", "Name": "First"},
+        {"Id": "kept-2", "Type": "Movie", "Name": "Second"},
+    ]
+    walked = [item for item in map(to_source_item, entries) if item is not None]
+    assert [item.raw for item in walked] == entries, "the premise: a walk's mapping keeps it"
+    adapter, _ = _adapter(FakeEmbyServer(), answer={"Items": entries, "TotalRecordCount": 2})
+    try:
+        answer = await adapter.confirm_gone(["kept-1", "kept-2"])
+    finally:
+        await adapter.aclose()
+    assert list(answer.served) == [replace(item, raw={}) for item in walked]
+
+
 async def test_an_entry_listed_but_not_modelled_is_neither_gone_nor_served() -> None:
     """The source lists it, so it is not gone; no `SourceItem` can describe it, so not served."""
     entry = {"Id": "season-1", "Type": "Season", "Name": "Season 1"}
