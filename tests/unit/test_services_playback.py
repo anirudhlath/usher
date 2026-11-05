@@ -12,6 +12,8 @@ from urllib.parse import quote
 import pytest
 from pydantic import SecretStr
 
+import usher.domain.ways
+import usher.services.playback
 from tests.fakes.credential_store import FakeCredentialStore
 from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.source_adapter import FakeSourceAdapter
@@ -21,6 +23,7 @@ from usher.domain.episode import Episode
 from usher.domain.ids import new_id
 from usher.domain.source import Source
 from usher.domain.title import Title
+from usher.domain.ways import quality_of
 from usher.ports.credentials import SourceCredentials
 from usher.ports.errors import PortDataMalformed, PortUnavailable
 from usher.ports.ingest import MediaItemUpsert
@@ -49,6 +52,7 @@ CREDENTIALS = SourceCredentials(username="usher", password=SecretStr("correct-ho
 TOKEN = "tok-Zq7"
 DIRECT_URL = f"https://e/a.mkv?api_key={TOKEN}"
 SECOND_URL = f"https://f/b.mkv?api_key={TOKEN}"
+THIRD_URL = f"https://g/c.mkv?api_key={TOKEN}"
 NAME = "Example Movie"
 
 T0 = datetime(2026, 8, 10, 12, 0, tzinfo=UTC)
@@ -199,6 +203,9 @@ class _Household:
         external_id: str,
         last_seen_at: datetime = T0,
         of_episode: bool = False,
+        width: int = 3840,
+        height: int = 2160,
+        container: str = "mkv",
     ) -> None:
         await self.media_items.upsert_many(
             [
@@ -207,11 +214,11 @@ class _Household:
                     external_id=external_id,
                     title_id=self.title_id,
                     episode_id=self.episode_id if of_episode else None,
-                    container="mkv",
+                    container=container,
                     video_codec="hevc",
                     audio_codec="truehd",
-                    width=3840,
-                    height=2160,
+                    width=width,
+                    height=height,
                     hdr_format=HdrFormat.HDR10,
                     audio_channels=8,
                     file_size_bytes=1,
@@ -783,7 +790,7 @@ async def test_a_household_holding_only_unavailable_copies_still_gets_targets() 
 
 
 async def test_the_freshest_of_two_available_copies_is_offered_first() -> None:
-    """The second ordering key, with its own premise.
+    """The tiebreak among copies of equal quality.
 
     The stale copy is seeded first and so holds the lower id, making `ORDER BY id` and
     `ORDER BY last_seen_at DESC` disagree, with only the second right.
@@ -802,10 +809,266 @@ async def test_the_freshest_of_two_available_copies_is_offered_first() -> None:
     }
     assert copies[stale.id].id < copies[fresh.id].id
     assert copies[stale.id].last_seen_at < copies[fresh.id].last_seen_at
+    assert quality_of(copies[stale.id]).score == quality_of(copies[fresh.id]).score
 
     resolution = await household.service().for_title(household.title_id, name=NAME)
 
     assert next(entry.source_name for entry in resolution.targets) == "Living Room Emby"
+
+
+async def test_a_better_copy_seen_earlier_is_offered_before_a_worse_one_seen_later() -> None:
+    """Quality outranks recency, with the two seeded to disagree.
+
+    Attic's copy is seeded first and seen last, so both the id and the repository's own order
+    offer its 1080p file first. Only the quality order puts the 4K copy in front.
+    """
+    household = _Household()
+    attic = await household.add_source("Attic Emby")
+    living_room = await household.add_source("Living Room Emby")
+    await household.add_copy(attic, external_id="e1", last_seen_at=LATER, width=1920, height=1080)
+    await household.add_copy(living_room, external_id="e2", last_seen_at=T0)
+    household.factory.script(attic, targets=_emby_shaped_targets(DIRECT_URL))
+    household.factory.script(living_room, targets=_emby_shaped_targets(SECOND_URL))
+
+    copies = {
+        copy.source_id: copy
+        for copy in await household.media_items.list_for_title(household.title_id)
+    }
+    assert copies[attic.id].last_seen_at > copies[living_room.id].last_seen_at, (
+        "the premise: recency puts Attic first"
+    )
+    assert copies[attic.id].id < copies[living_room.id].id, (
+        "the premise: id order puts Attic first too"
+    )
+    assert quality_of(copies[living_room.id]).score > quality_of(copies[attic.id]).score, (
+        "the premise: quality puts Living Room first"
+    )
+
+    resolution = await household.service().for_title(household.title_id, name=NAME)
+
+    assert list(dict.fromkeys(t.source_name for t in resolution.targets)) == [
+        "Living Room Emby",
+        "Attic Emby",
+    ]
+
+
+async def test_an_available_copy_is_offered_before_a_retracted_one_of_better_quality() -> None:
+    """Availability outranks quality: a retracted copy is a fallback, however good its file.
+
+    The retracted copy is the better, the fresher and the lower id, so only availability
+    puts the other in front.
+    """
+    household = _Household()
+    attic = await household.add_source("Attic Emby")
+    living_room = await household.add_source("Living Room Emby")
+    await household.add_copy(attic, external_id="e1", last_seen_at=LATER)
+    await household.retract(attic)
+    await household.add_copy(
+        living_room, external_id="e2", last_seen_at=T0, width=1920, height=1080
+    )
+    household.factory.script(attic, targets=_emby_shaped_targets(DIRECT_URL))
+    household.factory.script(living_room, targets=_emby_shaped_targets(SECOND_URL))
+
+    copies = {
+        copy.source_id: copy
+        for copy in await household.media_items.list_for_title(household.title_id)
+    }
+    assert copies[attic.id].available is False, "the premise: Attic's copy is retracted"
+    assert copies[living_room.id].available is True, "the premise: Living Room's is available"
+    assert copies[attic.id].last_seen_at > copies[living_room.id].last_seen_at, (
+        "the premise: recency alone would invert it"
+    )
+    assert copies[attic.id].id < copies[living_room.id].id, (
+        "the premise: id order alone would invert it"
+    )
+    assert quality_of(copies[attic.id]).score > quality_of(copies[living_room.id]).score, (
+        "the premise: quality alone would invert it"
+    )
+
+    resolution = await household.service().for_title(household.title_id, name=NAME)
+
+    assert resolution.targets[0].source_name == "Living Room Emby"
+
+
+async def test_the_whole_quality_score_decides_down_to_its_last_part() -> None:
+    """Two copies that differ only in the score's last part, the container.
+
+    So the key cannot be the resolution alone, or any shorter stretch of the score.
+    """
+    household = _Household()
+    attic = await household.add_source("Attic Emby")
+    living_room = await household.add_source("Living Room Emby")
+    await household.add_copy(attic, external_id="e1", last_seen_at=LATER, container="mp4")
+    await household.add_copy(living_room, external_id="e2", last_seen_at=T0)
+    household.factory.script(attic, targets=_emby_shaped_targets(DIRECT_URL))
+    household.factory.script(living_room, targets=_emby_shaped_targets(SECOND_URL))
+
+    copies = {
+        copy.source_id: copy
+        for copy in await household.media_items.list_for_title(household.title_id)
+    }
+    assert copies[attic.id].last_seen_at > copies[living_room.id].last_seen_at, (
+        "the premise: recency puts Attic first"
+    )
+    assert copies[attic.id].id < copies[living_room.id].id, (
+        "the premise: id order puts Attic first too"
+    )
+    better, worse = quality_of(copies[living_room.id]).score, quality_of(copies[attic.id]).score
+    assert better[:-1] == worse[:-1], "the premise: only the score's last part differs"
+    assert better > worse, "the premise: that part puts Living Room first"
+
+    resolution = await household.service().for_title(household.title_id, name=NAME)
+
+    assert resolution.targets[0].source_name == "Living Room Emby"
+
+
+async def test_a_copy_that_carries_no_facts_is_still_offered_after_one_that_does() -> None:
+    """A missing fact scores low: it neither raises out of the sort nor hides the copy.
+
+    `/ways` drops a copy with no container before scoring it, so only `/play` scores this one.
+    """
+    household = _Household()
+    attic = await household.add_source("Attic Emby")
+    living_room = await household.add_source("Living Room Emby")
+    await household.media_items.upsert_many(
+        [
+            MediaItemUpsert(
+                source_id=attic.id,
+                external_id="e1",
+                title_id=household.title_id,
+                episode_id=None,
+                container=None,
+                video_codec=None,
+                audio_codec=None,
+                width=None,
+                height=None,
+                hdr_format=None,
+                audio_channels=None,
+                file_size_bytes=None,
+                runtime_seconds=None,
+                added_at=None,
+                last_seen_at=LATER,
+            )
+        ]
+    )
+    await household.add_copy(living_room, external_id="e2", last_seen_at=T0)
+    household.factory.script(attic, targets=_emby_shaped_targets(DIRECT_URL))
+    household.factory.script(living_room, targets=_emby_shaped_targets(SECOND_URL))
+
+    copies = {
+        copy.source_id: copy
+        for copy in await household.media_items.list_for_title(household.title_id)
+    }
+    assert copies[attic.id].last_seen_at > copies[living_room.id].last_seen_at, (
+        "the premise: recency puts Attic first"
+    )
+    assert copies[attic.id].id < copies[living_room.id].id, (
+        "the premise: id order puts Attic first too"
+    )
+    bare = copies[attic.id]
+    facts = {
+        bare.container,
+        bare.width,
+        bare.height,
+        bare.hdr_format,
+        bare.audio_codec,
+        bare.audio_channels,
+    }
+    assert facts == {None}, "the premise: Attic's copy carries none of the facts a score reads"
+    assert quality_of(copies[living_room.id]).score > quality_of(bare).score, (
+        "the premise: quality puts Living Room first"
+    )
+
+    resolution = await household.service().for_title(household.title_id, name=NAME)
+
+    assert list(dict.fromkeys(t.source_name for t in resolution.targets)) == [
+        "Living Room Emby",
+        "Attic Emby",
+    ]
+
+
+async def test_copies_of_equal_quality_keep_the_repositorys_order() -> None:
+    """The sort is stable under `reverse`, so the repository's order breaks a tie.
+
+    They were seen in an order the ids give neither way up, and two of them together, which
+    only the repository's `id` settles. A third key on `id` fails here whichever way it runs,
+    and so does reversing a forward sort.
+    """
+    household = _Household()
+    attic = await household.add_source("Attic Emby")
+    den = await household.add_source("Den Emby")
+    living_room = await household.add_source("Living Room Emby")
+    await household.add_copy(attic, external_id="e1", last_seen_at=T0)
+    await household.add_copy(den, external_id="e2", last_seen_at=LATER)
+    await household.add_copy(living_room, external_id="e3", last_seen_at=T0)
+    household.factory.script(attic, targets=_emby_shaped_targets(DIRECT_URL))
+    household.factory.script(den, targets=_emby_shaped_targets(SECOND_URL))
+    household.factory.script(living_room, targets=_emby_shaped_targets(THIRD_URL))
+
+    copies = {
+        copy.source_id: copy
+        for copy in await household.media_items.list_for_title(household.title_id)
+    }
+    assert copies[attic.id].id < copies[den.id].id < copies[living_room.id].id, (
+        "the premise: the ids run Attic, Den, Living Room"
+    )
+    assert copies[den.id].last_seen_at > copies[attic.id].last_seen_at, (
+        "the premise: Den was seen last"
+    )
+    assert copies[attic.id].last_seen_at == copies[living_room.id].last_seen_at, (
+        "the premise: Attic and Living Room were seen together"
+    )
+    assert len({quality_of(copy).score for copy in copies.values()}) == 1, (
+        "the premise: every copy scores the same"
+    )
+
+    resolution = await household.service().for_title(household.title_id, name=NAME)
+
+    assert list(dict.fromkeys(t.source_name for t in resolution.targets)) == [
+        "Den Emby",
+        "Attic Emby",
+        "Living Room Emby",
+    ]
+
+
+async def test_sources_are_asked_and_named_in_the_order_copies_are_offered() -> None:
+    """The sort comes before the loop, and the loop is what asks and names the sources.
+
+    Reordering the targets after it would offer the same list, while still asking in the
+    repository's order and naming that order in the sentence an operator reads.
+    """
+    household = _Household()
+    attic = await household.add_source("Attic Emby")
+    living_room = await household.add_source("Living Room Emby")
+    await household.add_copy(attic, external_id="e1", last_seen_at=LATER, width=1920, height=1080)
+    await household.add_copy(living_room, external_id="e2", last_seen_at=T0)
+    household.factory.script(attic, error=PortUnavailable("connect timed out"))
+    household.factory.script(living_room, error=PortUnavailable("connect timed out"))
+
+    copies = {
+        copy.source_id: copy
+        for copy in await household.media_items.list_for_title(household.title_id)
+    }
+    assert copies[attic.id].last_seen_at > copies[living_room.id].last_seen_at, (
+        "the premise: recency puts Attic first"
+    )
+    assert copies[attic.id].id < copies[living_room.id].id, (
+        "the premise: id order puts Attic first too"
+    )
+    assert quality_of(copies[living_room.id]).score > quality_of(copies[attic.id]).score, (
+        "the premise: quality puts Living Room first"
+    )
+
+    resolution = await household.service().for_title(household.title_id, name=NAME)
+
+    assert household.factory.asked == [(living_room.id, "e2"), (attic.id, "e1")]
+    assert resolution.detail is not None
+    assert resolution.detail.rpartition(": ")[2] == "Living Room Emby, Attic Emby"
+
+
+def test_play_order_reuses_ways_quality() -> None:
+    """One quality order, so `/play` and `/ways` cannot come to score a copy differently."""
+    assert usher.services.playback.quality_of is usher.domain.ways.quality_of  # type: ignore[attr-defined]
 
 
 # -- adapter lifetime ---------------------------------------------------
@@ -879,6 +1142,43 @@ async def test_an_episode_is_resolved_through_its_own_copies() -> None:
     assert resolution.status is PlaybackStatus.PLAYABLE
     assert resolution.targets[0].target.url == "tkt1a"
     assert TOKEN not in _rendered(resolution)
+
+
+async def test_an_episodes_copies_take_the_same_order() -> None:
+    """The episode route reaches the same sort, so its better copy leads as well.
+
+    A sort placed only on the title route would leave the bulk of a library in recency order.
+    """
+    household = _Household()
+    attic = await household.add_source("Attic Emby")
+    living_room = await household.add_source("Living Room Emby")
+    await household.add_copy(
+        attic, external_id="e1", last_seen_at=LATER, of_episode=True, width=1920, height=1080
+    )
+    await household.add_copy(living_room, external_id="e2", last_seen_at=T0, of_episode=True)
+    household.factory.script(attic, targets=_emby_shaped_targets(DIRECT_URL))
+    household.factory.script(living_room, targets=_emby_shaped_targets(SECOND_URL))
+
+    copies = {
+        copy.source_id: copy
+        for copy in await household.media_items.list_for_episode(household.episode_id)
+    }
+    assert copies[attic.id].last_seen_at > copies[living_room.id].last_seen_at, (
+        "the premise: recency puts Attic first"
+    )
+    assert copies[attic.id].id < copies[living_room.id].id, (
+        "the premise: id order puts Attic first too"
+    )
+    assert quality_of(copies[living_room.id]).score > quality_of(copies[attic.id]).score, (
+        "the premise: quality puts Living Room first"
+    )
+
+    resolution = await household.service().for_episode(household.episode_id, name=NAME)
+
+    assert list(dict.fromkeys(t.source_name for t in resolution.targets)) == [
+        "Living Room Emby",
+        "Attic Emby",
+    ]
 
 
 async def test_an_episode_with_no_copy_is_not_playable() -> None:
