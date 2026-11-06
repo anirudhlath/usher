@@ -366,11 +366,11 @@ walks: the listing limit and the mean unit duration, by stage** · **listing
 page size, by source** · **retraction checks, by path and outcome** · **version
 fallbacks**.
 
-✅ **Every panel here but version fallbacks is backed by real data as of M9, the
-whole-library walk panel as of the fast first sync's acceptance walk, the
-retraction-checks panel as of confirmed retraction's acceptance, and the
-listing-page-size panel as of adaptive page size's acceptance walk.** ⏳ The
-version-fallbacks panel is unread until every version playable's acceptance.
+✅ **Every panel here is backed by real data as of M9, the whole-library walk
+panel as of the fast first sync's acceptance walk, the retraction-checks panel
+as of confirmed retraction's acceptance, the listing-page-size panel as of
+adaptive page size's acceptance walk, and the version-fallbacks panel as of
+every version playable's acceptance.**
 ⚠️ A panel that drains the whole unmatched queue should page with the keyset
 cursor; the `OFFSET` form is quadratic in queue depth.
 
