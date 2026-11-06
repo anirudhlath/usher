@@ -1331,9 +1331,12 @@ walk ends, as panel 12's sweep lines do (#104). Read a walk's count with
 `max_over_time` over its window. The running server's line starts again from
 zero at every deploy or restart.
 
-⏳ **This panel has not been read against real data.** No query has been issued
-for it, so nothing is recorded here as returned. Every version playable's
-acceptance reads it.
+**Returned** no series on 2026-11-06 at 00:21 UTC, to this query and to
+`max_over_time` over the 60 minutes before it, which held every version
+playable's acceptance walk and its 233 `/play` requests; the exporter was alive
+across that window. That is the healthy reading, so the statement above that a
+walk's count disappears stays an inference from panel 12: no fallback has
+happened to test it.
 
 ## ⚠️ Three Dashboard 3 panels plot a mean, not a quantile, and the reason is an instrument
 
