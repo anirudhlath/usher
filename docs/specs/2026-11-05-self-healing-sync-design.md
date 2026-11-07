@@ -1,7 +1,7 @@
 # Self-healing sync: design
 
-**Status:** Proposed. The owner answered its three open questions on 2026-11-06,
-and this is the rewrite that follows from them. It awaits the owner's approval.
+**Status:** Approved by the owner on 2026-11-07. The owner answered its three
+open questions on 2026-11-06, and this is the rewrite that follows from them.
 **Date:** 2026-11-05, rewritten 2026-11-06.
 **Slices:** five, each with its own plan and PR. Slice 1 brings a stopped push
 lane back by itself. Slice 2 checks the source against Usher in both directions,

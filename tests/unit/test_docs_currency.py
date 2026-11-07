@@ -26,6 +26,7 @@ _SEND_TO_SCREEN_TABLE = "## Send to a screen (from"
 _CONFIRMED_RETRACTION_TABLE = "## Confirmed retraction (from"
 _ADAPTIVE_PAGE_SIZE_TABLE = "## Adaptive page size (from"
 _EVERY_VERSION_TABLE = "## Every version playable (from"
+_SELF_HEALING_TABLE = "## Self-healing sync, slice 1 (from"
 _IMPLEMENTATION_PLAN_TABLE = "## Implementation plans"
 
 # A dated plan filename, excluding the `-design.md` specs that sit beside them.
@@ -72,7 +73,7 @@ def test_every_plan_file_is_named_by_every_status_table() -> None:
 
     progress = _PROGRESS.read_text()
     tables = {
-        "docs/plans/progress.md's ten status tables": (
+        "docs/plans/progress.md's eleven status tables": (
             _table_rows(progress, _MILESTONE_TABLE)
             | _table_rows(progress, _EVAL_PHASE_TABLE)
             | _table_rows(progress, _RATING_SPLIT_TABLE)
@@ -83,6 +84,7 @@ def test_every_plan_file_is_named_by_every_status_table() -> None:
             | _table_rows(progress, _CONFIRMED_RETRACTION_TABLE)
             | _table_rows(progress, _ADAPTIVE_PAGE_SIZE_TABLE)
             | _table_rows(progress, _EVERY_VERSION_TABLE)
+            | _table_rows(progress, _SELF_HEALING_TABLE)
         ),
         "docs/prd/README.md's implementation-plan table": _table_rows(
             _PRD_README.read_text(), _IMPLEMENTATION_PLAN_TABLE
@@ -213,6 +215,7 @@ def test_the_progress_log_really_does_name_plan_files_outside_its_table() -> Non
         | set(_section(text, _CONFIRMED_RETRACTION_TABLE))
         | set(_section(text, _ADAPTIVE_PAGE_SIZE_TABLE))
         | set(_section(text, _EVERY_VERSION_TABLE))
+        | set(_section(text, _SELF_HEALING_TABLE))
     )
     outside = [
         line
