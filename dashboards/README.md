@@ -1157,11 +1157,11 @@ defect M10's S10 fixed: before it, a lane that hit `PushSupervisor.run`'s
 failure ceiling had its task complete and nothing popped it, so the
 `SourceAdapter` stayed in `self._open_adapters` and `push_snapshots()` kept
 reading it. The running image was built **2026-08-26** and predates the repair.
-On this HEAD the same state would produce *no series* — which is the honest
-behaviour, and the reason D11's alert is
-`usher_source_push_connected_ratio == 0` and never `absent(...)`: a source with
-no lane is invisible here, so an `absent()` alert would fire for every source
-nobody configured and stay silent for the one whose lane died holding a socket.
+A lane no longer stops at that ceiling: it keeps its adapter and goes on trying,
+so the same state reads `0`. Only a source with no push channel leaves no
+series. D11's alert is `usher_source_push_connected_ratio == 0` and never
+`absent(...)`, because an `absent()` alert would fire for every source nobody
+configured.
 
 ### 9 — Push events applied, by kind
 
@@ -1652,32 +1652,17 @@ that recipe cannot work. The recipe below replaces it with a **running** worker
 that settles nothing because the lane's handler was never registered — the same
 operator-visible condition, and the one the gauge can see.
 
-## ⚠️ A silent push channel is given up after ~7.5 minutes, and *Push down* waits 15
+## A silent push channel keeps trying, and *Push down* fires on it
 
-Measured while firing this rule, and it narrows what the alert covers. Against a
-stub that upgrades and delivers nothing, the shipped defaults give the lane up
-long before the alert's window elapses:
+At `USHER_PUSH_MAX_CONSECUTIVE_FAILURES` the lane marks the source unavailable
+and goes on reconnecting, at most `USHER_PUSH_MAX_BACKOFF_SECONDS` apart. It
+keeps its adapter, so `push_snapshots()` goes on reporting the source and the
+series reads `0` for the whole outage. *Push down* fires after its `for: 15m`,
+whether the channel stays up and goes quiet or keeps failing to connect.
 
-```
-D11 Stub Emby's push channel failed (5/5): /embywebsocket delivered no message
-in 90s (ceiling 90s); treating the channel as dead
-D11 Stub Emby's push channel failed 5 times in a row; marking it unavailable and
-leaving this source to the nightly reconcile
-```
-
-`push_max_consecutive_failures` (5) × `push_stale_after_seconds` (90 s) ≈ **7.5
-minutes**, against `for: 15m`. The lane finishes, `LaneSupervisor.refresh`
-releases its adapter (M10's S10), `push_snapshots()` stops reporting it, and the
-alert correctly stops firing — **absence is not an incident, and here it means
-Usher has already handed the source to the nightly walk.** Watched live: that
-source's alert went from `pending` to gone without ever reaching `firing`.
-
-So *Push down* covers the case where the channel **stays up and goes quiet** — a
-source delivering intermittently, a proxy holding the socket open — and not the
-case where the lane gives up. Both are correct; only the first is an incident
-PRD 08 has no other answer for. The firing below uses
-`USHER_PUSH_STALE_AFTER_SECONDS=1200` to hold a silent socket open past the
-alert's own window, which **is** the condition rather than a way around the rule.
+`USHER_PUSH_STALE_AFTER_SECONDS=1200` is no longer needed to fire this rule: it
+held a silent socket open past the alert's window only because the lane used to
+give up first.
 
 ## 🔴 The seventh alert has no series, and its file must not be in the other file's glob
 

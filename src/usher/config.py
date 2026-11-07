@@ -330,10 +330,10 @@ class Settings(BaseSettings):
     # immediately", which is the hot loop it exists to prevent.
     push_backoff_seconds: float = Field(default=5.0, gt=0)
     push_max_backoff_seconds: float = Field(default=300.0, gt=0)
-    # PRD 08: "After `USHER_PUSH_MAX_CONSECUTIVE_FAILURES` (default 5) mark
-    # `supports_push = false` and lean on the full walk". `ge=1` for the reason
-    # `job_max_attempts` has one: a ceiling of zero disables push on the first
-    # blip, before one reconnect has been attempted.
+    # PRD 08: at this many failures in a row, mark `supports_push = false` and log one
+    # ERROR; the lane keeps trying. `ge=1` for the reason `job_max_attempts` has one: a
+    # ceiling of zero disables push on the first blip, before one reconnect has been
+    # attempted.
     push_max_consecutive_failures: int = Field(default=5, ge=1)
     # How many items one push event may name before the lane stops resolving them one at
     # a time and asks for a delta walk instead.

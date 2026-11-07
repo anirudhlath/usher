@@ -3,9 +3,10 @@
 import asyncio
 import inspect
 import itertools
+import json
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable, Collection, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Iterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
@@ -31,7 +32,7 @@ from usher.domain.ids import new_id
 from usher.domain.jobs import JobKind
 from usher.domain.rows import BuiltRow, DisplayHint, RowFamily
 from usher.domain.source import Source
-from usher.ports.errors import PortUnavailable
+from usher.ports.errors import PortUnavailable, UsherPortError
 from usher.ports.events import ClientEvent, ClientEventKind
 from usher.ports.ingest import MediaItemUpsert, Retraction
 from usher.ports.source import (
@@ -854,25 +855,34 @@ _DROP = SourceEvent(kind=SourceEventKind.ITEM_REMOVED, external_ids=("__drop__",
 _MESSAGE = SourceEvent(kind=SourceEventKind.ITEM_UPDATED, external_ids=("__message__",))
 
 
+class _ScriptSpent(Exception):
+    """The script has run out, which is the only thing that ends a lane in these cases.
+
+    Not a `UsherPortError`, deliberately. `PushSupervisor.run` retries every one of those, so
+    it takes an exception the supervisor must not catch to bring a case to its end.
+    """
+
+
 class _ScriptedAdapter(FakeSourceAdapter):
-    """A source whose push channel is a script of connections."""
+    """A source whose push channel is a script of connections.
+
+    One entry per attempt. A `UsherPortError` is raised instead of connecting. A list
+    connects, delivers those frames and drops, so `[]` is what a proxy that upgrades and
+    then buffers does on every attempt. Past the last entry `events()` raises `_ScriptSpent`.
+    """
 
     def __init__(
         self,
         source: Source,
-        connections: list[list[SourceEvent]],
+        connections: list[list[SourceEvent] | UsherPortError],
         *,
         emit_interval: float = 0.0,
-        max_attempts: int = 40,
         hang: bool = False,
-        unbounded: bool = False,
     ) -> None:
         super().__init__(source)
         self._script = list(connections)
         self._emit_interval = emit_interval
-        self._max_attempts = max_attempts
         self._hang = hang
-        self._unbounded = unbounded
         self._delivered_here = 0
         self._channel_open = False
         self.push_connections = 0
@@ -904,23 +914,12 @@ class _ScriptedAdapter(FakeSourceAdapter):
             # attempt is scripted: an adapter with no channel has no
             # connection to count.
             raise SourceNotSupported("push is disabled on this scripted source")
-        if self.attempts > self._max_attempts:
-            # Not a `UsherPortError`, deliberately: the supervisor must not
-            # be able to catch it. A loop that stopped counting failures
-            # fails here in milliseconds instead of spinning until an outer
-            # `wait_for` that a starved event loop can never fire.
-            raise AssertionError(
-                f"the supervisor opened {self.attempts} channels; it is not counting failures"
-            )
         if not self._script:
-            if not self._unbounded:
-                raise PortUnavailable("the scripted source refused the connection")
-            # A proxy that upgrades and then buffers connects perfectly **every** time
-            # -- there is no supply of connections to run out of, which is exactly why
-            # the ceiling has to come from the failure counter rather than from the
-            # world getting tired.
-            return self._open([])
-        return self._open(self._script.pop(0))
+            raise _ScriptSpent(f"attempt {self.attempts} is past the end of the script")
+        connection = self._script.pop(0)
+        if isinstance(connection, UsherPortError):
+            raise connection
+        return self._open(connection)
 
     @asynccontextmanager
     async def _open(self, frames: list[SourceEvent]) -> AsyncIterator[AsyncIterator[SourceEvent]]:
@@ -992,24 +991,24 @@ def _supervisor(
     *,
     clock: Callable[[], float] | None = None,
     sleeps: list[float] | None = None,
+    sleep: Callable[[float], Awaitable[None]] | None = None,
     **kwargs: object,
 ) -> PushSupervisor:
     recorded = sleeps if sleeps is not None else []
 
-    async def sleep(seconds: float) -> None:
+    async def recording_sleep(seconds: float) -> None:
         recorded.append(seconds)
-        # Yields even though it does not wait. Without this the loop can run
-        # unbounded iterations without ever returning to the event loop, and
-        # a mutation that stopped counting failures would hang the case
-        # rather than fail it -- `asyncio.wait_for` needs the loop to run in
-        # order to fire.
+        # Yields even though it does not wait. Without this the loop can go
+        # round without ever returning to the event loop, and a lane that spins
+        # would hang the case rather than fail it -- `asyncio.wait_for` needs
+        # the loop to run in order to fire.
         await asyncio.sleep(0)
 
     return PushSupervisor(
         lane.apply,
         lane.close_gap,
         lane.set_push_available,
-        sleep=sleep,
+        sleep=sleep if sleep is not None else recording_sleep,
         clock=clock if clock is not None else _ticks(),
         # A deterministic draw, so the *schedule* is asserted rather than a
         # range. The jitter itself is asserted separately, below.
@@ -1043,6 +1042,37 @@ SUPERVISED_SOURCE = Source(
 )
 
 
+def _downs(count: int) -> list[list[SourceEvent] | UsherPortError]:
+    """`count` attempts that never connect."""
+    return [PortUnavailable("down") for _ in range(count)]
+
+
+async def _run_until_spent(
+    supervisor: PushSupervisor, adapter: _ScriptedAdapter, *, timeout: float = 5.0
+) -> None:
+    """Run the lane to the end of its script, since nothing else in these cases ends it."""
+    with pytest.raises(_ScriptSpent):
+        await asyncio.wait_for(supervisor.run(SUPERVISED_SOURCE, adapter), timeout=timeout)
+
+
+async def _logged_run(
+    supervisor: PushSupervisor, adapter: _ScriptedAdapter
+) -> list[tuple[str, str]]:
+    """`_run_until_spent`, returning every line the lane logged as (level, message)."""
+    lines: list[str] = []
+    sink = logger.add(lines.append, level="TRACE", serialize=True)
+    try:
+        await _run_until_spent(supervisor, adapter)
+    finally:
+        logger.remove(sink)
+    records = [json.loads(line)["record"] for line in lines]
+    return [(record["level"]["name"], record["message"]) for record in records]
+
+
+def _at(level: str, logged: list[tuple[str, str]]) -> list[str]:
+    return [message for name, message in logged if name == level]
+
+
 @pytest.fixture
 def lane() -> _Lane:
     return _Lane()
@@ -1065,7 +1095,7 @@ async def test_the_gap_is_closed_after_connecting_not_before(lane: _Lane) -> Non
     )
     lane.gap_seconds = 0.04
     supervisor = _supervisor(lane, max_consecutive_failures=1)
-    await asyncio.wait_for(supervisor.run(SUPERVISED_SOURCE, adapter), timeout=5.0)
+    await _run_until_spent(supervisor, adapter)
 
     gap_window = lane.gap_windows[0]
     produced = (adapter.produced_at[0], adapter.produced_at[-1])
@@ -1097,14 +1127,14 @@ async def test_the_gap_runs_inside_the_channels_own_context(lane: _Lane) -> None
 
     adapter = _Noting(SUPERVISED_SOURCE, [[_event("i1")]])
     supervisor = _supervisor(lane, max_consecutive_failures=1)
-    await asyncio.wait_for(supervisor.run(SUPERVISED_SOURCE, adapter), timeout=5.0)
+    await _run_until_spent(supervisor, adapter)
     assert lane.order[:2] == ["connected", "gap"]
 
 
 async def test_a_dropped_channel_is_reconnected_and_the_gap_closed_again(lane: _Lane) -> None:
     adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [[_event("i1")], [_event("i2")]])
     supervisor = _supervisor(lane, clock=_ticks(step=1000.0), max_consecutive_failures=2)
-    await asyncio.wait_for(supervisor.run(SUPERVISED_SOURCE, adapter), timeout=5.0)
+    await _run_until_spent(supervisor, adapter)
     assert adapter.push_connections == 2
     assert lane.gaps == 2
     assert [event.external_ids for event in lane.applied] == [("i1",), ("i2",)]
@@ -1117,23 +1147,22 @@ async def test_the_failure_counter_is_reset_by_delivery_not_by_connection(lane: 
     connecting reset the counter, that source would reconnect forever,
     silently, reporting a healthy lane -- and PRD 08's rule to mark
     `supports_push = false` after `USHER_PUSH_MAX_CONSECUTIVE_FAILURES` would never
-    fire, so the reconciler would go on skipping the one source it is the only
-    cover for. Three connections that
-    open cleanly and deliver nothing is exactly that proxy.
+    fire. Three connections that open cleanly and deliver nothing is exactly that
+    proxy.
     """
-    adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [], unbounded=True)
+    adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [[], [], []])
     sleeps: list[float] = []
     supervisor = _supervisor(
         lane, clock=_ticks(step=1000.0), sleeps=sleeps, max_consecutive_failures=3
     )
-    await asyncio.wait_for(supervisor.run(SUPERVISED_SOURCE, adapter), timeout=5.0)
+    await _run_until_spent(supervisor, adapter)
     assert adapter.push_connections == 3
     assert lane.push_available == [False]
-    assert sleeps == [5.0, 10.0], "the last failure hits the ceiling and must not sleep"
+    assert sleeps == [5.0, 10.0, 20.0]
 
 
 async def test_a_delivering_channel_resets_the_counter(lane: _Lane) -> None:
-    """The other direction: a working lane must not park itself on an ordinary blip.
+    """The other direction: a working lane must not mark itself on an ordinary blip.
 
     Three connections that each deliver one event and then drop, followed by
     one that delivers nothing. With the reset the ceiling of two is reached on
@@ -1141,38 +1170,43 @@ async def test_a_delivering_channel_resets_the_counter(lane: _Lane) -> None:
     """
     adapter = _ScriptedAdapter(
         SUPERVISED_SOURCE,
-        [[_event("i1")], [_event("i2")], [_event("i3")]],
-        unbounded=True,
+        [[_event("i1")], [_event("i2")], [_event("i3")], []],
     )
     supervisor = _supervisor(lane, clock=_ticks(step=1000.0), max_consecutive_failures=2)
-    await asyncio.wait_for(supervisor.run(SUPERVISED_SOURCE, adapter), timeout=5.0)
+    await _run_until_spent(supervisor, adapter)
     assert adapter.push_connections == 4
-    assert True in lane.push_available
+    assert lane.push_available == [True, True, True, False]
 
 
 async def test_a_connection_that_delivered_only_messages_resets_the_counter(lane: _Lane) -> None:
     """Delivery is a message, not an event.
 
     An idle library's channel sends frames that map to no event and little else, so a
-    counter reset only by events parks a working lane after five quiet spells however
-    far apart they fall. Three connections that each deliver one such frame and drop,
-    then one that delivers nothing: with the reset the ceiling of two is reached on the
-    fourth connection; without it, on the second.
+    counter reset only by events marks a working lane unavailable after five quiet spells
+    however far apart they fall. Three connections that each deliver one such frame and
+    drop never reach a ceiling of two. One more that delivers nothing reaches it on the
+    fourth connection; without the reset, on the second.
     """
-    adapter = _ScriptedAdapter(
-        SUPERVISED_SOURCE, [[_MESSAGE], [_MESSAGE], [_MESSAGE]], unbounded=True
-    )
+    adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [[_MESSAGE]] * 3)
     supervisor = _supervisor(lane, clock=_ticks(step=1000.0), max_consecutive_failures=2)
-    await asyncio.wait_for(supervisor.run(SUPERVISED_SOURCE, adapter), timeout=5.0)
+    await _run_until_spent(supervisor, adapter)
     assert lane.applied == [], "the premise: no connection delivered an event"
     assert adapter.messages == 3, "the premise: three connections each delivered a frame"
+    assert adapter.push_connections == 3
+    assert lane.push_available == []
+
+    then_silent = _Lane()
+    adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [[_MESSAGE], [_MESSAGE], [_MESSAGE], []])
+    supervisor = _supervisor(then_silent, clock=_ticks(step=1000.0), max_consecutive_failures=2)
+    await _run_until_spent(supervisor, adapter)
     assert adapter.push_connections == 4
+    assert then_silent.push_available == [False]
 
 
 async def test_push_available_is_written_true_on_first_delivery(lane: _Lane) -> None:
     adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [[_event("i1")]])
     supervisor = _supervisor(lane, max_consecutive_failures=1)
-    await asyncio.wait_for(supervisor.run(SUPERVISED_SOURCE, adapter), timeout=5.0)
+    await _run_until_spent(supervisor, adapter)
     assert lane.push_available[0] is True
 
 
@@ -1184,12 +1218,12 @@ async def test_push_available_is_written_once_per_transition(lane: _Lane) -> Non
     """
     adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [[_event(f"i{index}") for index in range(5)]])
     supervisor = _supervisor(lane, max_consecutive_failures=1)
-    await asyncio.wait_for(supervisor.run(SUPERVISED_SOURCE, adapter), timeout=5.0)
+    await _run_until_spent(supervisor, adapter)
     assert lane.push_available == [True, False]
 
 
 async def test_the_backoff_doubles_and_is_capped(lane: _Lane) -> None:
-    adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [], unbounded=True)
+    adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [[]] * 6)
     sleeps: list[float] = []
     supervisor = _supervisor(
         lane,
@@ -1199,11 +1233,11 @@ async def test_the_backoff_doubles_and_is_capped(lane: _Lane) -> None:
         backoff_seconds=5.0,
         max_backoff_seconds=40.0,
     )
-    await asyncio.wait_for(supervisor.run(SUPERVISED_SOURCE, adapter), timeout=5.0)
+    await _run_until_spent(supervisor, adapter)
     # `jitter=lambda low, high: high`, so these are the ceilings of each
-    # interval: 5, 10, 20, 40, 40. Five sleeps for six failures -- the last
-    # failure hits the ceiling and stops rather than sleeping.
-    assert sleeps == [5.0, 10.0, 20.0, 40.0, 40.0]
+    # interval: 5, 10, 20, 40, 40, 40. Six sleeps for six failures -- the last
+    # failure hits the ceiling and sleeps like the rest, because the lane goes on.
+    assert sleeps == [5.0, 10.0, 20.0, 40.0, 40.0, 40.0]
 
 
 def test_the_backoff_draws_from_the_upper_half_of_the_interval() -> None:
@@ -1255,7 +1289,7 @@ async def test_a_deferred_event_triggers_a_gap_close(lane: _Lane) -> None:
     lane.outcome = PushOutcome(deferred_to_delta=True)
     adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [[_event("i1")]])
     supervisor = _supervisor(lane, clock=_ticks(step=1000.0), max_consecutive_failures=1)
-    await asyncio.wait_for(supervisor.run(SUPERVISED_SOURCE, adapter), timeout=5.0)
+    await _run_until_spent(supervisor, adapter)
     assert lane.gaps == 2
 
 
@@ -1275,7 +1309,7 @@ async def test_gap_closing_is_rate_limited(lane: _Lane) -> None:
         max_consecutive_failures=1,
         gap_min_interval_seconds=60.0,
     )
-    await asyncio.wait_for(supervisor.run(SUPERVISED_SOURCE, adapter), timeout=5.0)
+    await _run_until_spent(supervisor, adapter)
     assert lane.gaps == 1
     assert len(lane.applied) == 5, "the rate limit swallowed the events too"
 
@@ -1294,7 +1328,7 @@ async def test_the_first_gap_after_an_outage_is_never_skipped(lane: _Lane) -> No
     supervisor = _supervisor(
         lane, clock=lambda: 0.0, max_consecutive_failures=1, gap_min_interval_seconds=1e9
     )
-    await asyncio.wait_for(supervisor.run(SUPERVISED_SOURCE, adapter), timeout=5.0)
+    await _run_until_spent(supervisor, adapter)
     assert lane.gaps == 1
 
 
@@ -1304,8 +1338,8 @@ async def test_a_source_with_no_push_channel_is_marked_and_left_alone(lane: _Lan
     Not a failure to retry: an adapter saying it has no channel will say the
     same thing on every reconnect, and PRD 03's reconciler is the cover.
     `attempts` is the assertion with teeth and the other three are not -- a loop
-    letting `SourceNotSupported` fall through to `except UsherPortError` reaches
-    the ceiling instead of returning, so every visible end state is identical
+    letting `SourceNotSupported` fall through to `except UsherPortError` keeps
+    trying instead of returning, so every visible end state is identical
     and only the wasted attempts and backoff sleeps differ.
     """
     adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [[_event("i1")]])
@@ -1327,9 +1361,9 @@ async def test_a_channel_that_ends_quietly_counts_as_a_failure(lane: _Lane) -> N
     alternative is a lane that returns silently and a source that stops pushing
     until somebody notices by hand.
     """
-    adapter = _QuietAdapter(SUPERVISED_SOURCE, [], unbounded=True)
+    adapter = _QuietAdapter(SUPERVISED_SOURCE, [[], []])
     supervisor = _supervisor(lane, clock=_ticks(step=1000.0), max_consecutive_failures=2)
-    await asyncio.wait_for(supervisor.run(SUPERVISED_SOURCE, adapter), timeout=5.0)
+    await _run_until_spent(supervisor, adapter)
     assert adapter.push_connections == 2
     assert lane.push_available == [False]
 
@@ -1371,6 +1405,155 @@ async def test_a_bug_in_the_lane_is_not_swallowed_as_a_push_failure(lane: _Lane)
     with pytest.raises(ZeroDivisionError):
         await asyncio.wait_for(supervisor.run(SUPERVISED_SOURCE, adapter), timeout=5.0)
     assert lane.push_available == [True], "a bug marked the source unavailable"
+
+
+async def test_a_lane_keeps_trying_past_the_ceiling_and_comes_back(lane: _Lane) -> None:
+    """The ceiling marks the source and ends nothing, and the first delivery unmarks it.
+
+    Seven failures wait the doubling schedule and then stay at the cap. The drop after
+    the delivery is the first failure of a new streak, so it waits the base again.
+    """
+    i1 = _event("i1")
+    adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [*_downs(7), [i1]])
+    sleeps: list[float] = []
+    supervisor = _supervisor(
+        lane, sleeps=sleeps, max_consecutive_failures=3, max_backoff_seconds=20.0
+    )
+    await _run_until_spent(supervisor, adapter)
+    assert lane.push_available == [False, True]
+    assert sleeps == [5.0, 10.0, 20.0, 20.0, 20.0, 20.0, 20.0, 5.0]
+    assert lane.gaps == 1
+    assert lane.applied == [i1]
+    assert adapter.attempts == 9
+
+
+async def test_a_channel_failing_two_thousand_times_raises_nothing(lane: _Lane) -> None:
+    """A float cannot hold `2 ** 1024`, and a long enough outage gets there.
+
+    `OverflowError` is not a `UsherPortError`, so an uncapped exponent would end the lane
+    in the outage it exists to outlast.
+    """
+    adapter = _ScriptedAdapter(SUPERVISED_SOURCE, _downs(2000))
+    sleeps: list[float] = []
+    supervisor = _supervisor(lane, sleeps=sleeps)
+    await _run_until_spent(supervisor, adapter, timeout=30.0)
+    assert adapter.attempts == 2001
+    assert len(sleeps) == 2000
+    assert sleeps[-1] == 300.0
+    assert lane.push_available == [False]
+
+
+async def test_the_ceiling_logs_one_error_each_streak(lane: _Lane) -> None:
+    """Past the ceiling a streak goes on failing, and it says so once.
+
+    Two streaks that each pass the ceiling, with a delivery between them, so one ERROR for
+    the whole lane fails here as well as one ERROR per failure.
+    """
+    adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [*_downs(7), [_event("i1")], *_downs(3)])
+    supervisor = _supervisor(lane, max_consecutive_failures=3, max_backoff_seconds=20.0)
+    logged = await _logged_run(supervisor, adapter)
+    line = (
+        "Living Room Emby's push channel failed 3 times in a row; "
+        "marking it unavailable and still trying, at most 20 s apart"
+    )
+    assert _at("ERROR", logged) == [line, line]
+    assert lane.push_available == [False, True, False]
+
+
+async def test_a_silent_socket_keeps_trying_and_is_polled_by_the_delta(lane: _Lane) -> None:
+    """A proxy that upgrades and buffers is polled rather than abandoned.
+
+    Each connection reads the clock once, 30 s apart, so the deltas stand exactly on the
+    60 s interval: at 0, 60, 120 and 180.
+    """
+    adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [[]] * 7)
+    supervisor = _supervisor(
+        lane, clock=_ticks(step=30.0), max_consecutive_failures=3, gap_min_interval_seconds=60.0
+    )
+    await _run_until_spent(supervisor, adapter)
+    assert adapter.push_connections == 7
+    assert lane.gaps == 4
+    assert adapter.supports_push is False
+    assert lane.push_available == [False]
+
+
+async def test_coming_back_after_the_ceiling_says_which_attempt_it_took(lane: _Lane) -> None:
+    adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [*_downs(4), [_event("i1")]])
+    supervisor = _supervisor(lane, max_consecutive_failures=3)
+    logged = await _logged_run(supervisor, adapter)
+    assert _at("INFO", logged) == ["Living Room Emby's push channel is back on attempt 5"]
+
+
+async def test_the_attempt_count_starts_at_the_last_delivery(lane: _Lane) -> None:
+    """The delivery before the outage is not one of its attempts."""
+    adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [[_event("i1")], *_downs(3), [_event("i2")]])
+    supervisor = _supervisor(lane, max_consecutive_failures=3)
+    logged = await _logged_run(supervisor, adapter)
+    assert _at("INFO", logged) == ["Living Room Emby's push channel is back on attempt 4"]
+
+
+async def test_an_ordinary_reconnect_says_nothing_about_coming_back(lane: _Lane) -> None:
+    """Below the ceiling nothing was marked, so a reconnect has nothing to announce."""
+    adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [[_event("i1")], *_downs(1), [_event("i2")]])
+    supervisor = _supervisor(lane, max_consecutive_failures=3)
+    logged = await _logged_run(supervisor, adapter)
+    assert lane.push_available == [True, True], "the premise: the channel delivered again"
+    assert [message for _, message in logged if "back on attempt" in message] == []
+
+
+async def test_frames_that_map_to_nothing_leave_the_column_false_and_the_count_running(
+    lane: _Lane,
+) -> None:
+    """A frame resets the failure streak, and only an event ends the outage.
+
+    The column returns at the first event that maps to something, and the attempt count
+    and the one INFO line wait for it. The streak restarts at the frame, so the failures
+    after it stay below the ceiling and log no second ERROR.
+    """
+    adapter = _ScriptedAdapter(
+        SUPERVISED_SOURCE, [*_downs(3), [_MESSAGE], *_downs(1), [_event("i1")]]
+    )
+    supervisor = _supervisor(lane, max_consecutive_failures=3)
+    logged = await _logged_run(supervisor, adapter)
+    assert lane.push_available == [False, True]
+    assert len(_at("ERROR", logged)) == 1
+    assert _at("INFO", logged) == ["Living Room Emby's push channel is back on attempt 6"]
+
+
+async def test_a_database_failure_at_the_ceiling_escapes_the_lane(lane: _Lane) -> None:
+    """Retrying forever covers the channel and nothing else.
+
+    A failed write of the column is not a push failure, and `_guard` is what answers it.
+    """
+
+    async def refuse(source: Source, available: bool) -> None:
+        raise RuntimeError("the database went away")
+
+    lane.set_push_available = refuse  # type: ignore[method-assign]
+    adapter = _ScriptedAdapter(SUPERVISED_SOURCE, _downs(3))
+    supervisor = _supervisor(lane, max_consecutive_failures=3)
+    with pytest.raises(RuntimeError, match="the database went away"):
+        await asyncio.wait_for(supervisor.run(SUPERVISED_SOURCE, adapter), timeout=5.0)
+    assert adapter.attempts == 3
+
+
+async def test_cancelling_a_lane_in_its_backoff_ends_it_at_once(lane: _Lane) -> None:
+    """A lane spends most of an outage in this sleep, so it is where shutdown finds it."""
+    in_backoff = asyncio.Event()
+
+    async def wait_forever(seconds: float) -> None:
+        in_backoff.set()
+        await asyncio.Event().wait()
+
+    adapter = _ScriptedAdapter(SUPERVISED_SOURCE, _downs(1))
+    supervisor = _supervisor(lane, sleep=wait_forever, max_consecutive_failures=1)
+    task = asyncio.create_task(supervisor.run(SUPERVISED_SOURCE, adapter))
+    await asyncio.wait_for(in_backoff.wait(), timeout=5.0)
+    assert lane.push_available == [False], "the premise: the ceiling's write came first"
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=5.0)
+    assert lane.push_available == [False]
 
 
 async def test_a_pushed_watch_state_invalidates_that_users_rows(fixture: _Fixture) -> None:

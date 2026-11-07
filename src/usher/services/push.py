@@ -317,6 +317,21 @@ class _Gate:
         self.at: float | None = None
 
 
+class _Outage:
+    """How far one run is into an outage, held as `_Gate` is and for its reason.
+
+    `attempts` counts the connections tried since the channel last delivered, the one
+    that delivers included. `marked` says the source has been marked unavailable, so the
+    delivery that ends this outage is worth a line.
+    """
+
+    __slots__ = ("attempts", "marked")
+
+    def __init__(self) -> None:
+        self.attempts = 0
+        self.marked = False
+
+
 class PushSupervisor:
     def __init__(
         self,
@@ -344,29 +359,28 @@ class PushSupervisor:
         self._jitter = jitter
 
     async def run(self, source: Source, adapter: SourceAdapter) -> None:
-        """Hold this source's push channel until it stops being worth holding.
+        """Hold this source's push channel for as long as it has one.
 
-        Returns; never raises a `UsherPortError`.
-
-        Returns rather than looping forever, and that is PRD 08: "After
-        `USHER_PUSH_MAX_CONSECUTIVE_FAILURES` (default 5) mark `supports_push =
-        false` and lean on the full walk."
-        A lane that retried indefinitely against a proxy stripping `Upgrade`
-        would look identical to a working one from every dashboard.
+        Stops only for `SourceNotSupported`, which every later attempt would answer the
+        same way. Any other `UsherPortError` is retried. At PRD 08's
+        `USHER_PUSH_MAX_CONSECUTIVE_FAILURES` the source is marked unavailable and the lane
+        keeps trying, at most `USHER_PUSH_MAX_BACKOFF_SECONDS` apart. The push gauge reads
+        delivery rather than this loop, so it reads 0 meanwhile and a lane retrying against
+        a proxy stripping `Upgrade` does not look like a working one. Anything else escapes,
+        a bug or a failed database write: this loop retries the channel and nothing more.
         """
-        gate = _Gate()
-        failures = 0
-        delivering = False
-        while failures < self._max_failures:
+        gate, outage, failures, delivering = _Gate(), _Outage(), 0, False
+        while True:
+            outage.attempts += 1
             # Read before the connection opens, so `_streak` can tell whether it delivered.
             received = adapter.push_messages_received
             try:
                 async with adapter.events() as events:
                     # After the connection, deliberately.
                     await self._gap(source, adapter, gate)
-                    delivering = await self._note(source, adapter, delivering)
+                    delivering = await self._note(source, adapter, delivering, outage)
                     async for event in events:
-                        delivering = await self._note(source, adapter, delivering)
+                        delivering = await self._note(source, adapter, delivering, outage)
                         outcome = await self._apply(source, adapter, event)
                         if outcome.deferred_to_delta:
                             await self._gap(source, adapter, gate)
@@ -385,38 +399,47 @@ class PushSupervisor:
                 # Shutdown is not a push failure.
                 raise
             except UsherPortError as exc:
-                failures = self._streak(failures, adapter, received)
-                delivering = False
+                failures, delivering = self._streak(failures, adapter, received), False
                 logger.warning(
-                    "{source}'s push channel failed ({failures}/{ceiling}): {error}",
+                    "{source}'s push channel failed ({failures} in a row): {error}",
                     source=source.name,
                     failures=failures,
-                    ceiling=self._max_failures,
                     error=str(exc),
                 )
+                wait = await self._after_failure(source, failures, outage)
             else:
                 # The port forbids an iterator that ends quietly, and an
                 # adapter can still do it. Counted as a failure rather than
                 # treated as a clean shutdown, because the alternative is a
                 # lane that returns silently and a source that stops pushing
                 # until somebody notices by hand.
-                failures = self._streak(failures, adapter, received)
-                delivering = False
+                failures, delivering = self._streak(failures, adapter, received), False
                 logger.warning(
-                    "{source}'s push channel ended without raising ({failures}/{ceiling})",
+                    "{source}'s push channel ended without raising ({failures} in a row)",
                     source=source.name,
                     failures=failures,
-                    ceiling=self._max_failures,
                 )
-            if failures < self._max_failures:
-                await self._sleep(self._backoff(failures))
-        logger.error(
-            "{source}'s push channel failed {count} times in a row; marking it unavailable "
-            "and leaving this source to the nightly reconcile",
-            source=source.name,
-            count=failures,
-        )
-        await self._set_push_available(source, False)
+                wait = await self._after_failure(source, failures, outage)
+            # Out here, so a cancel during the wait never arrives inside a handler, and the
+            # failure at the ceiling sleeps like the rest.
+            await self._sleep(wait)
+
+    async def _after_failure(self, source: Source, failures: int, outage: _Outage) -> float:
+        """Mark the source if this failure reached the ceiling; return the wait before the next.
+
+        `==`, so a streak that goes on past the ceiling logs one ERROR and writes once.
+        """
+        if failures == self._max_failures:
+            outage.marked = True
+            logger.error(
+                "{source}'s push channel failed {count} times in a row; marking it unavailable "
+                "and still trying, at most {wait:.0f} s apart",
+                source=source.name,
+                count=failures,
+                wait=self._max_backoff,
+            )
+            await self._set_push_available(source, False)
+        return self._backoff(failures)
 
     @staticmethod
     def _streak(failures: int, adapter: SourceAdapter, received: int) -> int:
@@ -430,18 +453,30 @@ class PushSupervisor:
         """
         return 1 if adapter.push_messages_received > received else failures + 1
 
-    async def _note(self, source: Source, adapter: SourceAdapter, was: bool) -> bool:
-        """Read `supports_push` and persist the transition.
+    async def _note(
+        self, source: Source, adapter: SourceAdapter, was: bool, outage: _Outage
+    ) -> bool:
+        """Read `supports_push`, persist the transition, and close the outage it ends.
 
         The read is the adapter's, which grounds it in received messages
         rather than in a socket being open. This layer neither knows nor
         guesses -- and writing only on the *transition* keeps `sources` from
         taking one `UPDATE` per second of playback for a value that changed
-        once.
+        once. A delivery says it came back only if the ceiling had marked the
+        source, so an ordinary reconnect logs nothing.
         """
         now_delivering = adapter.supports_push
         if now_delivering != was:
             await self._set_push_available(source, now_delivering)
+        if now_delivering:
+            if outage.marked:
+                logger.info(
+                    "{source}'s push channel is back on attempt {attempts}",
+                    source=source.name,
+                    attempts=outage.attempts,
+                )
+            outage.attempts = 0
+            outage.marked = False
         return now_delivering
 
     async def _gap(self, source: Source, adapter: SourceAdapter, gate: _Gate) -> None:
@@ -472,7 +507,8 @@ class PushSupervisor:
         backoff exists to prevent, merely rationed. The spread is what breaks
         a thundering herd across sources; the half-interval floor is what
         makes "a failed connection is not instantly retried" a property
-        rather than a probability.
+        rather than a probability. The exponent is capped as well: a float
+        cannot hold `2 ** 1024`, and a long enough outage counts that far.
         """
-        base = min(self._backoff_seconds * (2 ** (failures - 1)), self._max_backoff)
+        base = min(self._backoff_seconds * 2 ** min(failures - 1, 20), self._max_backoff)
         return self._jitter(base / 2, base)

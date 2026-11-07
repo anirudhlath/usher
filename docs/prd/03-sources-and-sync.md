@@ -57,9 +57,9 @@ Any received frame counts as liveness; on an idle library `Sessions` is the
 only thing keeping `push_available` true, and those come minutes apart.
 `push_stale_after_seconds` defaults to 300 s: a channel silent that long is
 reconnected, and a run of reconnects that each stay silent marks push
-unavailable ([08](08-operations.md)) — at the defaults, about 25 minutes of
-unbroken silence. `usher.source.push.reconnects` shows a household where the
-window is too tight.
+unavailable while the lane goes on reconnecting ([08](08-operations.md)) — at
+the defaults, about 25 minutes of unbroken silence.
+`usher.source.push.reconnects` shows a household where the window is too tight.
 
 **No admin privileges are required** — a normal user token works. Not required
 is not prevented: `POST /admin/sources` ([07](07-client-api.md)) takes whatever
@@ -79,7 +79,8 @@ Operational requirements:
   on reconnect to recover anything missed while disconnected.
 - **Fall back cleanly.** A reverse proxy that does not forward `Upgrade`
   returns 404 instead of 101. If the socket cannot be established the adapter
-  reports `supports_push = false` and the reconciler covers the gap.
+  reports `supports_push = false` and the lane keeps retrying; a connection that
+  returns closes the gap with its delta.
 
 **Push health is judged on received messages**, never on a successful upgrade.
 

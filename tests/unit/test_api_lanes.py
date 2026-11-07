@@ -6,14 +6,16 @@ import inspect
 import io
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from loguru import logger
-from opentelemetry import trace
+from opentelemetry import metrics, trace
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -25,6 +27,7 @@ from tests.fakes.credential_store import FakeCredentialStore
 from tests.fakes.credit_repository import FakeCreditRepository
 from tests.fakes.curated_row_repository import FakeCuratedRowRepository
 from tests.fakes.embedding import FakeEmbedder
+from tests.fakes.emby_harness import gauge_readings
 from tests.fakes.episode_repository import FakeEpisodeRepository
 from tests.fakes.event_publisher import FakeEventPublisher
 from tests.fakes.image_repository import FakeImageRepository
@@ -64,6 +67,7 @@ from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus
 from usher.domain.watch import User
 from usher.ports.credentials import SourceCredentials
 from usher.ports.embedding import Embedder
+from usher.ports.errors import PortUnavailable
 from usher.ports.events import EventPublisher
 from usher.ports.jobs import JobQueue, JobRequest
 from usher.ports.llm import LLMClient
@@ -94,6 +98,7 @@ from usher.services.search import SearchService
 from usher.services.similar import SimilarityService
 from usher.services.taste import TasteService
 from usher.services.watch_sync import WatchStateSyncService
+from usher.telemetry import register_push_gauges
 
 _EMBEDDING_MODEL = "fake:test-embedding"
 
@@ -132,6 +137,13 @@ class _CrashingAdapter(FakeSourceAdapter):
         raise ZeroDivisionError("a bug in the lane")
 
 
+class _DownAdapter(FakeSourceAdapter):
+    """A lane whose every connection fails, which is an outage rather than a bug."""
+
+    def events(self) -> AbstractAsyncContextManager[AsyncIterator[SourceEvent]]:
+        raise PortUnavailable("down")
+
+
 class _SlowAdapter(FakeSourceAdapter):
     """Records the wall-clock window its lane spent resolving a pushed id.
 
@@ -163,6 +175,7 @@ class _Adapters(SourceAdapterFactory):
     def __init__(self) -> None:
         self.built: dict[str, FakeSourceAdapter] = {}
         self.crashing: set[str] = set()
+        self.down: set[str] = set()
         self.slow: set[str] = set()
         # Two spellings of one precondition, kept because each side's cases use its own:
         # `_start_lane` builds the adapter and hands it straight to
@@ -181,6 +194,8 @@ class _Adapters(SourceAdapterFactory):
     def build(self, source: Source, credentials: SourceCredentials) -> SourceAdapter:
         if source.name in self.crashing:
             kind: type[FakeSourceAdapter] = _CrashingAdapter
+        elif source.name in self.down:
+            kind = _DownAdapter
         elif source.name in self.slow:
             kind = _SlowAdapter
         else:
@@ -560,6 +575,14 @@ def _supervisor(
 
 async def _user_id() -> uuid.UUID:
     return USER_ID
+
+
+@pytest.fixture
+def meter_reader() -> Iterator[InMemoryMetricReader]:
+    """A provider of this test's own; `tests/conftest.py` resets the set-once global."""
+    reader = InMemoryMetricReader()
+    metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
+    yield reader
 
 
 @pytest.fixture
@@ -1147,6 +1170,37 @@ async def test_a_lane_that_reached_the_failure_ceiling_releases_its_adapter_and_
         assert stopped._closes == 1
     finally:
         await supervisor.stop()
+
+
+async def test_a_lane_past_the_ceiling_keeps_its_adapter_and_reads_zero(
+    fakes: _Fakes, meter_reader: InMemoryMetricReader
+) -> None:
+    """Past the ceiling the lane goes on trying, so the series reads 0 rather than vanishing.
+
+    Seeded `supports_push=True`: the writer no-ops on an equal value, so the false the case
+    waits for is this lane's own write. The drain stands on that write and the refresh runs
+    while the lane sits in its backoff, which is where it spends an outage.
+    """
+    source = _source("A").evolve(supports_push=True)
+    await _seed(fakes, source)
+    fakes.adapters.down.add("A")
+    supervisor = _supervisor(fakes, push_max_consecutive_failures=1)
+    register_push_gauges(supervisor.push_snapshots)
+    await supervisor.start()
+    try:
+        await _drain(lambda: fakes.sources._sources[source.id].supports_push is False)
+
+        await supervisor.refresh()
+
+        assert supervisor.running_sources() == ["A"]
+        assert supervisor.crashed_sources() == []
+        assert fakes.adapters.built["A"]._closes == 0
+        assert supervisor.push_available(source.id) is False
+        assert gauge_readings(meter_reader, "usher.source.push.connected") == [
+            (0.0, {"source": "A"})
+        ]
+    finally:
+        await asyncio.wait_for(supervisor.stop(), 5.0)
 
 
 async def test_push_snapshots_report_the_adapters_own_ledger(fakes: _Fakes) -> None:
