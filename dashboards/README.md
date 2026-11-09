@@ -1158,7 +1158,7 @@ failure ceiling had its task complete and nothing popped it, so the
 `SourceAdapter` stayed in `self._open_adapters` and `push_snapshots()` kept
 reading it. The running image was built **2026-08-26** and predates the repair.
 A lane no longer stops at that ceiling: it keeps its adapter and goes on trying,
-so the same state reads `0`. Only a source with no push channel leaves no
+so the same state reads `0`. Only a source with no open adapter leaves no
 series. D11's alert is `usher_source_push_connected_ratio == 0` and never
 `absent(...)`, because an `absent()` alert would fire for every source nobody
 configured.

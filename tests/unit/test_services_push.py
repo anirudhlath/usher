@@ -976,9 +976,9 @@ class _QuietAdapter(_ScriptedAdapter):
         yield  # pragma: no cover -- makes this a generator
 
 
-def _ticks(step: float = 1.0) -> Callable[[], float]:
-    """A monotonic clock that moves by `step` on every read."""
-    state = itertools.count(0.0, step)
+def _ticks(step: float = 1.0, *, start: float = 0.0) -> Callable[[], float]:
+    """A monotonic clock that reads `start` first and moves by `step` on every read."""
+    state = itertools.count(start, step)
 
     def read() -> float:
         return next(state)
@@ -1336,11 +1336,11 @@ async def test_a_source_with_no_push_channel_is_marked_and_left_alone(lane: _Lan
     """The port's `SourceNotSupported` contract.
 
     Not a failure to retry: an adapter saying it has no channel will say the
-    same thing on every reconnect, and PRD 03's reconciler is the cover.
-    `attempts` is the assertion with teeth and the other three are not -- a loop
-    letting `SourceNotSupported` fall through to `except UsherPortError` keeps
-    trying instead of returning, so every visible end state is identical
-    and only the wasted attempts and backoff sleeps differ.
+    same thing on every reconnect, and PRD 03's reconciler is the cover. A loop
+    letting `SourceNotSupported` fall through to `except UsherPortError` never
+    returns, because a disabled adapter refuses before it takes a connection from
+    the script, so the script never runs out: this case then fails on its
+    `wait_for` rather than on an assertion.
     """
     adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [[_event("i1")]])
     adapter.disable_push()
@@ -1363,9 +1363,13 @@ async def test_a_channel_that_ends_quietly_counts_as_a_failure(lane: _Lane) -> N
     """
     adapter = _QuietAdapter(SUPERVISED_SOURCE, [[], []])
     supervisor = _supervisor(lane, clock=_ticks(step=1000.0), max_consecutive_failures=2)
-    await _run_until_spent(supervisor, adapter)
+    logged = await _logged_run(supervisor, adapter)
     assert adapter.push_connections == 2
     assert lane.push_available == [False]
+    assert _at("WARNING", logged) == [
+        "Living Room Emby's push channel ended without raising (1 in a row)",
+        "Living Room Emby's push channel ended without raising (2 in a row)",
+    ]
 
 
 async def test_cancellation_stops_the_lane_without_marking_the_source(lane: _Lane) -> None:
@@ -1392,8 +1396,8 @@ async def test_a_bug_in_the_lane_is_not_swallowed_as_a_push_failure(lane: _Lane)
     """`JobWorker`'s rule, one lane over.
 
     A `ZeroDivisionError` is a bug in this process, and a loop that counted it
-    as a push failure would spend a backoff schedule and then park a healthy
-    source with an error message describing nothing an operator can act on.
+    as a push failure would bury it under a reconnect and a warning describing
+    nothing an operator can act on, in place of the traceback that is the bug report.
     """
 
     async def explode(source: Source, adapter: SourceAdapter, event: SourceEvent) -> PushOutcome:
@@ -1464,24 +1468,39 @@ async def test_a_silent_socket_keeps_trying_and_is_polled_by_the_delta(lane: _La
     """A proxy that upgrades and buffers is polled rather than abandoned.
 
     Each connection reads the clock once, 30 s apart, so the deltas stand exactly on the
-    60 s interval: at 0, 60, 120 and 180.
+    60 s interval: at 1000, 1060, 1120 and 1180.
     """
     adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [[]] * 7)
     supervisor = _supervisor(
-        lane, clock=_ticks(step=30.0), max_consecutive_failures=3, gap_min_interval_seconds=60.0
+        lane,
+        clock=_ticks(step=30.0, start=1_000.0),
+        max_consecutive_failures=3,
+        gap_min_interval_seconds=60.0,
     )
     await _run_until_spent(supervisor, adapter)
     assert adapter.push_connections == 7
     assert lane.gaps == 4
-    assert adapter.supports_push is False
     assert lane.push_available == [False]
 
 
 async def test_coming_back_after_the_ceiling_says_which_attempt_it_took(lane: _Lane) -> None:
-    adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [*_downs(4), [_event("i1")]])
+    """One INFO for the return, and each WARNING's count runs on past the ceiling.
+
+    Two events on the connection that comes back, so announcing the return again on the
+    second fails here. Four failures against a ceiling of three, where `4/3` would read
+    wrong. The drop that ends the returning connection starts a new streak.
+    """
+    adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [*_downs(4), [_event("i1"), _event("i2")]])
     supervisor = _supervisor(lane, max_consecutive_failures=3)
     logged = await _logged_run(supervisor, adapter)
     assert _at("INFO", logged) == ["Living Room Emby's push channel is back on attempt 5"]
+    assert _at("WARNING", logged) == [
+        "Living Room Emby's push channel failed (1 in a row): down",
+        "Living Room Emby's push channel failed (2 in a row): down",
+        "Living Room Emby's push channel failed (3 in a row): down",
+        "Living Room Emby's push channel failed (4 in a row): down",
+        "Living Room Emby's push channel failed (1 in a row): the scripted peer went away",
+    ]
 
 
 async def test_the_attempt_count_starts_at_the_last_delivery(lane: _Lane) -> None:
