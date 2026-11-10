@@ -225,7 +225,7 @@ Each card line is its position, name, year and the lists that found it:
 recommended list was not consulted. `outcome` is the latest attempt's: when it
 is `too_few` or `unusable`, the cards shown are the last good build's, and
 `built_at` says when that was (`never` when there was none). `--build-row`
-needs a title id and refuses `--rebuild`, `--resume` and `--max-seeds`. Bare
+needs a title id and refuses `--rebuild`, `--resume`, `--max-seeds` and `--limit`. Bare
 `usher similar <title_id>` prints the same record, as `stored row:`, beneath the
 title's neighbours when it has one.
 

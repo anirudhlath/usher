@@ -377,7 +377,9 @@ def test_similar_is_a_read_form_and_a_write_form_of_one_subcommand() -> None:
     read = parse_args(["similar", "0198c6b1-0000-7000-8000-000000000001"])
     assert read.title_id == "0198c6b1-0000-7000-8000-000000000001"
     assert read.rebuild is False
-    assert read.limit == 10
+    # Unset rather than 10: `--build-row` refuses a `--limit` only if it can tell one was
+    # given. The resolved default is pinned through the dispatch below.
+    assert read.limit is None
 
     write = parse_args(["similar", "--rebuild"])
     assert write.title_id is None
@@ -442,16 +444,18 @@ def test_build_row_needs_a_title_id(capsys: pytest.CaptureFixture[str]) -> None:
         (["--rebuild"], "--rebuild"),
         (["--resume"], "--resume"),
         (["--max-seeds", "5"], "--max-seeds"),
+        (["--limit", "3"], "--limit"),
     ],
 )
 def test_build_row_refuses_the_rebuild_flags(
     flags: list[str], named: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Each walk flag is refused by name, rather than ignored on a command that builds one row.
+    """Each flag that means nothing to a one-row build is refused by name, not ignored.
 
     A `--max-seeds 5` accepted beside `--build-row` is an operator who believes they
-    capped a walk that never started. The same id and flag parse without the walk flag,
-    so the refusal is `--build-row`'s own rule and not another rule's.
+    capped a walk that never started, and `--limit 3` one who believes they shortened a
+    row of up to 20 cards. Every message names `--build-row`, so the refusal is its own
+    rule and not the neighbouring "a title id, or --rebuild" sentence.
     """
     assert parse_args(["similar", _SEED_ID, "--build-row"]).build_row is True
 
@@ -460,6 +464,25 @@ def test_build_row_refuses_the_rebuild_flags(
 
     assert refused.value.code == 2
     assert f"--build-row cannot be combined with {named}" in capsys.readouterr().err
+
+
+def test_a_limit_beside_a_title_id_is_the_read_forms_and_defaults_to_ten(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--limit` is unset in the parsed arguments, and the dispatch resolves it to 10.
+
+    The parser cannot carry the default itself: `--build-row` refuses a `--limit` only if
+    it can tell one was given. So the number a bare `usher similar <id>` lists is pinned
+    here, through the arm, beside the explicit value that must win over it.
+    """
+    configured(monkeypatch)
+    assert parse_args(["similar", _SEED_ID, "--limit", "3"]).limit == 3
+
+    bare = dispatched(monkeypatch, arm="_similar", argv=["similar", _SEED_ID])
+    explicit = dispatched(monkeypatch, arm="_similar", argv=["similar", _SEED_ID, "--limit", "3"])
+    whole_table = dispatched(monkeypatch, arm="_similar", argv=["similar"])
+
+    assert [call["limit"] for call in bare + explicit + whole_table] == [10, 3, 10]
 
 
 def test_build_row_reaches_similar_through_the_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:

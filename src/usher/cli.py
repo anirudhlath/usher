@@ -115,6 +115,9 @@ SYNC_KINDS = ("full", "delta")
 # answer, and a knob would invite tuning a number that is about to stop
 # mattering.
 _IDLE_SLEEP_SECONDS = 5.0
+# How many neighbours `usher similar <id>` lists when `--limit` is not given. The flag
+# has no argparse default so that `--build-row` can refuse it by being given.
+_SIMILAR_LIMIT = 10
 # The failures that are the *operator's* to fix, and so the ones `main` answers with a
 # message instead of a stack.
 OPERATOR_ERRORS: tuple[type[Exception], ...] = (
@@ -1942,7 +1945,12 @@ def build_parser() -> argparse.ArgumentParser:
     # have drifted; the cross-argument rule in `parse_args` is what argparse
     # cannot express.
     similar.add_argument("title_id", nargs="?")
-    similar.add_argument("--limit", type=int, default=10)
+    similar.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help=f"with a title id and no --build-row: neighbours to list (default {_SIMILAR_LIMIT})",
+    )
     similar.add_argument(
         "--rebuild",
         action="store_true",
@@ -2127,6 +2135,8 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
                 ("--rebuild", args.rebuild),
                 ("--resume", args.resume),
                 ("--max-seeds", args.max_seeds is not None),
+                # A row is up to 20 cards and all of them print, so a limit has no meaning.
+                ("--limit", args.limit is not None),
             ):
                 if given:
                     parser.error(f"--build-row cannot be combined with {flag}")
@@ -2287,7 +2297,7 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> None:
             _similar(
                 settings,
                 title_id=None if args.title_id is None else _as_uuid(args.title_id, "title id"),
-                limit=args.limit,
+                limit=_SIMILAR_LIMIT if args.limit is None else args.limit,
                 rebuild=args.rebuild,
                 resume=args.resume,
                 max_seeds=args.max_seeds,

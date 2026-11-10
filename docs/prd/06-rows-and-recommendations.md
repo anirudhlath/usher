@@ -264,7 +264,7 @@ makes three lists:
   not, and stores it as the job would, with one `llm_calls` row. It prints the
   seed, the latest attempt's outcome, `attempted_at`, `built_at` and each card
   with the lists that found it. It needs `USHER_LLM_ENABLED=true` and refuses
-  `--rebuild`, `--resume` and `--max-seeds`. `usher similar <title id>` prints
+  `--rebuild`, `--resume`, `--max-seeds` and `--limit`. `usher similar <title id>` prints
   the stored record beneath the title's neighbours.
 
 **`FranchiseProvider` fires on ≥ 2 owned members *and* ≥ 1 unplayed.** The row
