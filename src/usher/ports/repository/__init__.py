@@ -77,6 +77,9 @@ from usher.ports.repository.search_query import (
     SearchQueryRecord,
     SearchQueryRepository,
 )
+from usher.ports.repository.seed_row import (
+    SeedRowRepository,
+)
 from usher.ports.repository.source import (
     SourceRepository,
 )
@@ -147,6 +150,7 @@ __all__ = [
     "ScoredNeighbor",
     "SearchQueryRecord",
     "SearchQueryRepository",
+    "SeedRowRepository",
     "SourceRepository",
     "StoredEmbedding",
     "StoredTaste",

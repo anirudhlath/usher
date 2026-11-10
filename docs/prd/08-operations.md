@@ -513,6 +513,7 @@ table's count identical.
 | `people`, `credits`, `collections` | **yes, with no network call at all** | `raw_payloads`, via `usher derive --backfill`. The payload cache is the backup |
 | `user_taste` | **yes** | a mean over embeddings of the household's watch states; a missing row is recomputed exactly like a stale one |
 | `title_neighbors` | **yes** | `usher similar --rebuild`; `blend_fingerprint` tells a restored table from a current one |
+| `seed_rows` | **yes, a window at a time** | `usher schedule --once` builds a window of seeds a tick, so one run rebuilds a window and not the table. Until a seed is built again its row is the fallback one |
 | `genome_scores`, `genome_tags` | **yes, but only from upstream** | re-download `ml-latest.zip` and re-run `bootstrap --phase movielens`. **Not guaranteed**: GroupLens can withdraw or replace the archive, and then it is not rebuildable at all. They share a `genome_revision` and are restored together or not at all |
 | `curated_rows` | **yes, and cheaply — but not to the same rows** | one completion per household. "Rebuildable" means *a screen appears*, not *the screen comes back* |
 | `raw_payloads` | **yes, at the price of the whole crawl** | not carried: it is third-party payloads verbatim, which rule 1 of [04](04-catalog-bootstrap.md) forbids redistributing. There is no `usher backup --include-payloads` |
