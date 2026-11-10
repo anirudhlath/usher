@@ -2,14 +2,22 @@
 
 import asyncio
 import time
+import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from asgi_lifespan import LifespanManager
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from tests.fakes.llm_client import FakeLLMClient
+from tests.fakes.metadata_provider import FakeMetadataProvider
 from usher.api.app import create_app
 from usher.api.lanes import LaneSupervisor
+from usher.composition import Pipeline
 from usher.config import Settings
+from usher.ports.events import NullEventPublisher
 from usher.ports.scheduler import JobOutcome, ScheduledJob
 from usher.services.scheduler import Scheduler
 
@@ -143,3 +151,62 @@ async def test_the_scheduler_lane_is_off_when_the_setting_is(
         await asyncio.sleep(0.2)
 
     assert job.runs == 0, "the scheduler ran a job in a process configured not to schedule"
+
+
+async def test_the_supervisor_hands_the_scheduler_its_own_client_provider_and_household(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`build_scheduler` receives the very objects the supervisor was constructed with.
+
+    The seed-row job is registered only where a client, a session factory and a household
+    reader are all present, so a supervisor that passed `None` for one would register
+    nothing and every other case in this file would still pass. Identity, not equality:
+    a client the supervisor rebuilt would be a second one in the same process.
+
+    No database: `start()` connects to nothing, and the worker and push lanes are off.
+    """
+    client, provider = FakeLLMClient(), FakeMetadataProvider()
+    sessions = async_sessionmaker[AsyncSession]()
+
+    async def household() -> uuid.UUID:
+        return uuid.uuid4()
+
+    @asynccontextmanager
+    async def no_work() -> AsyncIterator[Pipeline]:
+        raise AssertionError("a scheduler-only supervisor opened a unit of work")
+        yield  # pragma: no cover
+
+    handed: list[dict[str, object]] = []
+
+    def _build(settings: Settings, **held: object) -> Scheduler:
+        handed.append(held)
+        return Scheduler(tick_seconds=settings.scheduler_tick_seconds)
+
+    monkeypatch.setattr("usher.api.lanes.build_scheduler", _build)
+    settings = Settings(
+        database_url="postgresql+asyncpg://u:p@127.0.0.1:1/usher",
+        secret_key=SECRET_KEY,
+        worker_enabled=False,
+        push_enabled=False,
+        scheduler_enabled=True,
+    )
+    lanes = LaneSupervisor(
+        settings,
+        no_work,
+        NullEventPublisher(),
+        user_id=household,
+        provider=provider,
+        client=client,
+        sessions=sessions,
+    )
+
+    await lanes.start()
+    try:
+        assert lanes.scheduler_running() is True, "the premise: the scheduler lane started"
+        assert len(handed) == 1, "the supervisor built the scheduler other than once"
+        assert handed[0].get("client") is client
+        assert handed[0].get("metadata") is provider
+        assert handed[0].get("user_id") is household
+        assert handed[0].get("sessions") is sessions
+    finally:
+        await lanes.stop()
