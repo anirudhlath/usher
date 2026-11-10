@@ -94,6 +94,7 @@ from usher.ports.repository.title import (
     BrowseCursorPosition,
     BrowseFacets,
     BrowseSort,
+    NamedTitle,
     TitleGenres,
     TitleRepository,
 )
@@ -131,6 +132,7 @@ __all__ = [
     "LLMCallRepository",
     "LibraryGenres",
     "MediaItemRepository",
+    "NamedTitle",
     "NeighborCandidate",
     "NeighborSeed",
     "OwnedCollection",

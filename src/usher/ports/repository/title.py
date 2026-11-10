@@ -17,6 +17,7 @@ __all__ = [
     "BrowseCursorPosition",
     "BrowseFacets",
     "BrowseSort",
+    "NamedTitle",
     "TitleGenres",
     "TitleRepository",
 ]
@@ -37,6 +38,18 @@ class TitleGenres:
 
     id: uuid.UUID
     genres: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class NamedTitle:
+    """A title as a person or a model names it: a name and a year, nothing else.
+
+    Frozen and hashable, because `resolve_names` answers keyed by the probe the
+    caller built.
+    """
+
+    name: str
+    year: int
 
 
 #: Each sort's `titles` column -- also its `Title` field, the two being 1:1 --
@@ -215,6 +228,22 @@ class TitleRepository(ABC):
         self, references: Sequence[TitleReference]
     ) -> dict[TitleReference, uuid.UUID]:
         """`TitleReference` -> the id **this** catalog holds it under, in one round trip."""
+
+    @abstractmethod
+    async def resolve_names(self, probes: Sequence[NamedTitle]) -> dict[NamedTitle, uuid.UUID]:
+        """`NamedTitle` -> the title it names, in one round trip.
+
+        A name matches without regard to case, of either kind, and a year within one
+        of the probe's. A skeleton never matches. Where several titles qualify the one
+        with the most votes wins, an unknown count ranking below any known one, and the
+        lower id breaks a tie.
+
+        A probe naming nothing is absent from the answer, never mapped to `None`.
+        An empty batch sends no statement.
+
+        Not `TitleMatchRepository.match_by_name_year`, which needs one kind and drops
+        a probe two titles answer: this is for a caller that wants a guess, not a proof.
+        """
 
     @abstractmethod
     async def credit_names_for(
