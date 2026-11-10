@@ -252,8 +252,13 @@ makes three lists:
 - **Watched cards stay in the row and are marked.** Each card for a title the
   household has played, a series through its episodes included, carries `played`,
   the mark Rediscover's cards carry. One read covers every row on the screen and
-  applies to both sources; the mark is read when the rows are proposed and is
-  never stored with a row. A stored card whose title was deleted is dropped.
+  applies to both sources, and the mark is never stored with a seed's record.
+  A built row is cached whole, though, so a mark is only as fresh as its row. A
+  watch write drops the household's Continue Watching and Next Up rows and its
+  composed screen but not these rows, so a title watched just now can show
+  unmarked for up to the row's six-hour cache lifetime. A restart, switching a
+  row provider on or off, or enrichment of a title on the shelf drops the row
+  sooner. A stored card whose title was deleted is dropped.
 
 **`FranchiseProvider` fires on ≥ 2 owned members *and* ≥ 1 unplayed.** The row
 *lists* every owned member, watched ones included. It is **movies only**, so on
