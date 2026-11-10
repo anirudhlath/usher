@@ -2,6 +2,7 @@
 
 import copy
 import uuid
+from collections.abc import Sequence
 from datetime import date
 from typing import Any
 
@@ -99,9 +100,11 @@ class FakeMetadataProvider(MetadataProvider):
         }
         self._candidates: list[MetadataCandidate] = []
         self._changed: list[ProviderRef] = []
+        self._recommendations: dict[ProviderRef, list[MetadataCandidate]] = {}
         self._failure: UsherPortError | None = None
         self.fetches = 0
         self.searches = 0
+        self.recommendation_calls = 0
 
     # -- seams a test drives -------------------------------------------
 
@@ -160,6 +163,16 @@ class FakeMetadataProvider(MetadataProvider):
     def seed_changed(self, *refs: ProviderRef) -> None:
         self._changed = list(refs)
 
+    def seed_recommendations(
+        self, ref: ProviderRef, candidates: Sequence[MetadataCandidate]
+    ) -> None:
+        """What `recommendations(ref)` answers, in this order.
+
+        Seeding `[]` is how a test says the entity exists and nothing is
+        recommended from it.
+        """
+        self._recommendations[ref] = list(candidates)
+
     def fail_with(self, exc: UsherPortError) -> None:
         """Every subsequent call raises.
 
@@ -180,6 +193,7 @@ class FakeMetadataProvider(MetadataProvider):
     def reset_calls(self) -> None:
         self.fetches = 0
         self.searches = 0
+        self.recommendation_calls = 0
 
     # -- the port ------------------------------------------------------
 
@@ -201,6 +215,18 @@ class FakeMetadataProvider(MetadataProvider):
                 f"{self._name} has no entity for this reference", detail=ref.value
             )
         return copy.deepcopy(payload)
+
+    async def recommendations(self, ref: ProviderRef) -> list[MetadataCandidate]:
+        self._raise_if_failing()
+        self.recommendation_calls += 1
+        seeded = self._recommendations.get(ref)
+        if seeded is not None:
+            return list(seeded)
+        if ref in self._payloads:
+            # An entity the provider holds and nobody is recommended from:
+            # TMDb answers 200 with an empty page, not a 404.
+            return []
+        raise PortDataMalformed(f"{self._name} has no entity for this reference", detail=ref.value)
 
     def to_result(self, payload: dict[str, Any], title_id: uuid.UUID) -> EnrichmentResult:
         # Both spellings, because TMDb really does use two -- though agreeing

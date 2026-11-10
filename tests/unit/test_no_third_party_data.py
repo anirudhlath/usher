@@ -415,6 +415,8 @@ def test_no_dataset_row_is_committed_anywhere() -> None:
         "tests/fixtures/tmdb/search_movie.json",
         "tests/fixtures/tmdb/search_tv.json",
         "tests/fixtures/tmdb/movie_changes.json",
+        "tests/fixtures/tmdb/recommendations_movie.json",
+        "tests/fixtures/tmdb/recommendations_tv.json",
     ],
 )
 def test_the_guard_reads_what_it_claims_to_read(relative: str) -> None:
