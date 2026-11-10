@@ -269,9 +269,10 @@ MANIFEST: Final[MappingProxyType[str, BackupEntry]] = MappingProxyType(
             "curate",
         ),
         "seed_rows": _rebuildable(
-            "0 rows. One stored 'Because you watched' row per seed title, built by the "
-            "scheduler a window of seeds a tick, so one `schedule --once` rebuilds a window "
-            "and not the table. Until a seed is built again its row is the fallback one",
+            "0 rows. One stored 'Because you watched' row per seed title. With "
+            "USHER_LLM_ENABLED=true, one `schedule --once` builds every due seed in the "
+            "household's 12 most recent titles, so it rebuilds that window and not the "
+            "table. Until a seed is rebuilt, its row comes from `title_neighbors`",
             "schedule --once",
         ),
         "user_taste": _rebuildable(

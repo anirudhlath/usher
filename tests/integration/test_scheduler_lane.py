@@ -70,16 +70,18 @@ def _settings(postgres_url: str, *, scheduler: bool) -> Settings:
 def _with_job(monkeypatch: pytest.MonkeyPatch, job: ScheduledJob) -> None:
     """The real registry, replaced by one holding a single fake.
 
-    ⚠️ **`sessions` is accepted and dropped**, which is what keeps the
-    substitution honest: `LaneSupervisor.start` passes the session factory
+    ⚠️ **`sessions`, `client`, `metadata` and `user_id` are accepted and dropped**,
+    which is what keeps the substitution honest: `LaneSupervisor.start` passes what
     `create_app` handed it, so a supervisor that stopped passing one would be
     a `TypeError` here rather than a silent narrowing. What the fake must not
-    do is *use* it -- these cases are about the lane, and the real
+    do is *use* them -- these cases are about the lane, and the real
     registration's database work is
     `tests/integration/test_search_query_retention.py`'s subject.
     """
 
-    def _build(settings: Settings, *, sessions: object) -> Scheduler:
+    def _build(
+        settings: Settings, *, sessions: object, client: object, metadata: object, user_id: object
+    ) -> Scheduler:
         scheduler = Scheduler(tick_seconds=settings.scheduler_tick_seconds)
         scheduler.register(job)
         return scheduler

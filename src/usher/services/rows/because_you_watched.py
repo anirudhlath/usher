@@ -14,8 +14,9 @@ from usher.services.rows.base import BaseRow
 # like the things you watched" *is* the home screen.
 _MAX_SEEDS = 3
 
-# How far down the household's recency list to look for those three.
-_SEED_WINDOW = 12
+# How far down the household's recency list to look for those three. Public because
+# `services/seed_rows.py` builds stored rows for exactly this window.
+SEED_WINDOW = 12
 
 BECAUSE_YOU_WATCHED_SCORE_CEILING = 0.80
 
@@ -109,7 +110,7 @@ class BecauseYouWatchedProvider(RowProvider):
     """0-3 rows, one per recently-finished title carrying neighbours."""
 
     def __init__(
-        self, *, semantic: bool = False, max_seeds: int = _MAX_SEEDS, window: int = _SEED_WINDOW
+        self, *, semantic: bool = False, max_seeds: int = _MAX_SEEDS, window: int = SEED_WINDOW
     ) -> None:
         self._semantic = semantic
         self._max_seeds = max_seeds
@@ -188,6 +189,7 @@ class BecauseYouWatchedProvider(RowProvider):
 
 __all__ = [
     "BECAUSE_YOU_WATCHED_SCORE_CEILING",
+    "SEED_WINDOW",
     "BecauseYouWatchedProvider",
     "BecauseYouWatchedRow",
 ]

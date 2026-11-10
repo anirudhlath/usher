@@ -4,8 +4,11 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from tests.fakes.llm_client import FakeLLMClient
+from tests.fakes.metadata_provider import FakeMetadataProvider
 from tests.unit.commands import configured, dispatched
 from usher.cli import build_parser, main
+from usher.composition import DefaultUserId
 from usher.config import Settings
 from usher.ports.scheduler import JobOutcome, ScheduledJob
 from usher.services.scheduler import Scheduler
@@ -62,7 +65,9 @@ def test_one_tick_over_an_empty_registry_says_so_and_exits(
     # property of `_schedule`, not of what happens to be registered today.
     monkeypatch.setattr(
         "usher.cli.build_scheduler",
-        lambda settings, *, sessions: Scheduler(tick_seconds=settings.scheduler_tick_seconds),
+        lambda settings, *, sessions, client, metadata, user_id: Scheduler(
+            tick_seconds=settings.scheduler_tick_seconds
+        ),
     )
 
     main(["schedule", "--once"])
@@ -103,7 +108,9 @@ def test_one_tick_does_not_run_a_job_whose_period_has_not_elapsed(
     monkeypatch.setenv("USHER_SECRET_KEY", "0" * 32)
     job = _Recent()
 
-    def _build(settings: Settings, *, sessions: object) -> Scheduler:
+    def _build(
+        settings: Settings, *, sessions: object, client: object, metadata: object, user_id: object
+    ) -> Scheduler:
         scheduler = Scheduler(tick_seconds=settings.scheduler_tick_seconds)
         scheduler.register(job)
         return scheduler
@@ -114,3 +121,52 @@ def test_one_tick_does_not_run_a_job_whose_period_has_not_elapsed(
 
     assert job.runs == 0, "`--once` ran a job whose period had not elapsed"
     assert "0 of 1 scheduled jobs ran" in capsys.readouterr().out.splitlines()
+
+
+def test_schedule_hands_the_registry_its_own_client_and_closes_it(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The completion client and the provider are built once, here, and closed on the way out.
+
+    Both factories are substituted, so the case reads what reached the registry rather
+    than what a default `Settings` happens to build.
+    """
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@127.0.0.1:1/usher")
+    monkeypatch.setenv("USHER_SECRET_KEY", "0" * 32)
+    client, provider = FakeLLMClient(), FakeMetadataProvider()
+    closed: list[str] = []
+    reported: list[bool] = []
+
+    async def _client(settings: Settings, *, report: bool = True) -> tuple[object, object]:
+        reported.append(report)
+
+        async def aclose() -> None:
+            closed.append("client")
+
+        return client, aclose
+
+    async def _provider(settings: Settings) -> tuple[object, object]:
+        async def aclose() -> None:
+            closed.append("provider")
+
+        return provider, aclose
+
+    handed: list[dict[str, object]] = []
+
+    def _build(settings: Settings, *, sessions: object, **held: object) -> Scheduler:
+        handed.append(held)
+        return Scheduler(tick_seconds=settings.scheduler_tick_seconds)
+
+    monkeypatch.setattr("usher.cli.llm_client", _client)
+    monkeypatch.setattr("usher.cli.metadata_provider", _provider)
+    monkeypatch.setattr("usher.cli.build_scheduler", _build)
+
+    main(["schedule", "--once"])
+
+    assert len(handed) == 1
+    assert handed[0]["client"] is client
+    assert handed[0]["metadata"] is provider
+    assert isinstance(handed[0]["user_id"], DefaultUserId)
+    assert reported == [False], "the CLI prints its own line and logs no degradation"
+    assert sorted(closed) == ["client", "provider"]
+    assert "0 of 0 scheduled jobs ran" in capsys.readouterr().out.splitlines()

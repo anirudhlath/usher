@@ -213,6 +213,36 @@ seed promoted.
 default the neighbours are genre and keyword overlap alone, and the row says
 "Similar genres and themes to Dune" instead of "Because you watched Dune".
 
+**Its neighbours come from `title_neighbors`.** 🔶 A second source is being
+built beside it: one stored row per seed in `seed_rows`, which nothing reads yet.
+The scheduler's `seed_rows.build` job ([08](08-operations.md)) builds them off
+the request path, one seed at a time, for the household's 12 most recent titles,
+a series watched through its episodes included. Each build makes three lists:
+
+| List | From | Order |
+|---|---|---|
+| **Named** | One LLM call (`because_you_watched` in `llm_calls`) naming 25 titles from the seed's name, year, overview and keywords, each matched to the catalog by name and a year within one, the most-voted title winning | The model's |
+| **Recommended** | The metadata provider's first page of recommendations for the seed | The provider's |
+| **Close** | The 100 titles nearest the seed by embedding cosine among those with at least 500 votes | Cosine |
+
+- **Skeletons and the seed itself are on no list.** A Named title the catalog
+  does not hold is dropped.
+- **The row is up to 20 cards.** Titles are scored by reciprocal rank fusion
+  over the three lists, `1 / (60 + rank)` with rank from 1, and ordered by score,
+  votes and id. Odd positions take the next Named title and even ones the next
+  scored title. A title only Close found is never a card. Each card records
+  which lists found it, as `named`, `recommended` and `close`.
+- **A row needs 8 cards to be stored.** A shorter or unusable attempt is
+  recorded instead and keeps the seed's last good cards.
+- **A seed is due** when it has no record, when its cards were built by another
+  recipe (a fingerprint of the prompt, the merge's numbers and the model) or
+  over 30 days ago, and when a short or unusable attempt is over 7 days old or
+  was made under another recipe. Until then that failed attempt holds the seed
+  back, so a recipe change costs one attempt per seed.
+- **A model or provider outage stops the walk and records nothing.** A provider
+  with no record of the seed, or a seed with no provider id, leaves Recommended
+  empty and the build goes on.
+
 **`FranchiseProvider` fires on ≥ 2 owned members *and* ≥ 1 unplayed.** The row
 *lists* every owned member, watched ones included. It is **movies only**, so on
 a television-only household it never fires.
@@ -385,7 +415,8 @@ expected rather than a broken counter.
 |---|---|
 | Built rows | Per-row TTL, in-process — 60 s (Continue Watching, Next Up) to 12 h (Seasonal), each row's own. **No stale-serve grace** |
 | Composed home screen | 30 s per user, in-process, **plus a 60 s stale-serve grace** (`SCREEN_STALE_GRACE`). Between 30 s and 90 s the cached screen is served and a refresh is scheduled; past 90 s it is a hard miss |
-| **Neighbour tables** | ⚠️ **Not rebuilt on any event.** `usher similar --rebuild` is an operator's command, a cron entry, or the scheduler's period |
+| **Neighbour tables** (`title_neighbors`) | ⚠️ **Not rebuilt on any event.** `usher similar --rebuild` is an operator's command, a cron entry, or the scheduler's period |
+| **Seed rows** (`seed_rows`) | Not rebuilt on any event. The scheduler's `seed_rows.build`, every 15 minutes, rebuilds a recent title's row after 30 days or a recipe change, and retries a short or unusable attempt after 7 |
 | Curated rows | 5 min per built row, in-process |
 | Taste centroid | Recomputed when the household's `max(watch_states.updated_at)` moves — a fingerprint, not an event |
 | Genre affinity | **Nothing stored**, memoised for the life of one request |

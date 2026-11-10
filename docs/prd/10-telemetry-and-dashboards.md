@@ -226,7 +226,7 @@ llm_calls(
   id, at, model, purpose,           -- purpose: curation | query_expansion | because_you_watched
   tokens_in, tokens_out, cost_usd,
   latency_ms, ok, error,
-  generation_id                     -- NULL for a purpose that produces no rows
+  generation_id                     -- curation's only; NULL for every other purpose
 )
 
 search_queries(

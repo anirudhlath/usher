@@ -5,7 +5,7 @@ An injected clock, no database, and a `_NOW` no arithmetic error can land on.
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
@@ -19,6 +19,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from tests.fakes.llm_client import FakeLLMClient
 from tests.fakes.search_query_repository import FakeSearchQueryRepository
 from usher.composition import build_scheduler
 from usher.config import Settings
@@ -33,6 +34,7 @@ from usher.services.scheduler import (
     SearchQueryRetention,
     SearchQueryScope,
 )
+from usher.services.seed_rows import SeedRowJob
 from usher.services.similar import NeighborRebuildJob
 
 # Not the epoch, and not a round number either -- see the module docstring.
@@ -301,6 +303,10 @@ def _settings(**overrides: object) -> Settings:
     )
 
 
+async def _default_user() -> uuid.UUID:
+    return uuid.UUID("00000000-0000-7000-8000-0000000000aa")
+
+
 def test_the_registry_a_composition_root_builds_holds_both_jobs_in_order() -> None:
     """Both registrations are present, and in registration order.
 
@@ -313,6 +319,52 @@ def test_the_registry_a_composition_root_builds_holds_both_jobs_in_order() -> No
         "search_queries.retention",
         "similar.rebuild",
     ]
+
+
+def test_a_registry_holding_a_completion_client_also_builds_seed_rows() -> None:
+    """The third registration needs the process's client and its household, and nothing else.
+
+    No metadata provider is passed: a deployment without one builds rows from two lists.
+    """
+    scheduler = build_scheduler(
+        _settings(), sessions=_no_sessions(), client=FakeLLMClient(), user_id=_default_user
+    )
+
+    assert [job.name for job in scheduler.jobs] == [
+        "search_queries.retention",
+        "similar.rebuild",
+        "seed_rows.build",
+    ]
+    (seed_rows,) = (job for job in scheduler.jobs if isinstance(job, SeedRowJob))
+    assert seed_rows.period == timedelta(minutes=15)
+
+
+@pytest.mark.parametrize(
+    ("client", "user_id"),
+    [
+        pytest.param(None, _default_user, id="no-client"),
+        pytest.param(FakeLLMClient(), None, id="no-household"),
+    ],
+)
+def test_the_seed_row_job_is_registered_only_with_a_client_and_a_household(
+    client: FakeLLMClient | None, user_id: Callable[[], Awaitable[uuid.UUID]] | None
+) -> None:
+    scheduler = build_scheduler(
+        _settings(), sessions=_no_sessions(), client=client, user_id=user_id
+    )
+
+    assert [job.name for job in scheduler.jobs] == [
+        "search_queries.retention",
+        "similar.rebuild",
+    ]
+
+
+def test_no_way_to_reach_a_database_registers_no_seed_row_job_either() -> None:
+    scheduler = build_scheduler(
+        _settings(), sessions=None, client=FakeLLMClient(), user_id=_default_user
+    )
+
+    assert scheduler.jobs == ()
 
 
 def test_a_scheduler_with_no_way_to_reach_a_database_registers_nothing() -> None:

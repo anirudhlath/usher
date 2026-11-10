@@ -486,8 +486,8 @@ async def test_bare_usher_push_schedules_the_jobs_the_server_does(
     built: list[tuple[str, ...]] = []
     real = build_scheduler
 
-    def spy(settings: Settings, *, sessions: Any) -> Any:
-        scheduler = real(settings, sessions=sessions)
+    def spy(settings: Settings, *, sessions: Any, **held: Any) -> Any:
+        scheduler = real(settings, sessions=sessions, **held)
         built.append(tuple(job.name for job in scheduler.jobs))
         return scheduler
 

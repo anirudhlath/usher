@@ -231,8 +231,9 @@ def test_no_service_mints_its_own_ledger_row() -> None:
     """
     import usher.services.curation as curation
     import usher.services.query_expansion as query_expansion
+    import usher.services.seed_rows as seed_rows
 
-    for module in (curation, query_expansion):
+    for module in (curation, query_expansion, seed_rows):
         source = Path(inspect.getsourcefile(module) or "").read_text()
         minted = [
             node

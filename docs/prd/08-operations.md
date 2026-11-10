@@ -209,10 +209,11 @@ local state can answer.**
 | Home Assistant unreachable, or players off | `/screens` and confirm → 503 `players_unavailable`, its `detail` saying why the last connection ended, with `Retry-After` unless players are off; `/ways` answers with `screens_available: false`. Catalog, search and playback unaffected, and readiness never consults it. The connection retries with jittered backoff (`USHER_PLAYERS_BACKOFF_SECONDS` doubling to `USHER_PLAYERS_MAX_BACKOFF_SECONDS`) and re-reads every registry when it returns |
 | Home Assistant refuses `USHER_HA_TOKEN` | As unreachable, with no `Retry-After`, and `detail` says the token was refused. The connection is **not** retried: one ERROR line names `USHER_HA_TOKEN`, never its value, and Usher connects again only after a restart |
 | Gap-closing delta larger than `USHER_PUSH_GAP_MAX_ITEMS` | The item walk stops at the ceiling (default **20,000 items**; `0` is unlimited) and the run records **`FAILED`**, never `COMPLETED`. **Nothing the walk saw is lost**; the cursor does not advance. One WARNING names the source, how far it got, the setting and `usher sync --kind full`. `usher sync --kind delta` and `POST /admin/sources/{id}/sync` are unbounded. **The item lane only** |
-| TMDb 429 or down | Enrichment retries with jittered backoff. Stubs stay stubs; every other subsystem is unaffected |
-| TMDb key missing | Bootstrap Phase 3 skipped. Skeleton catalog and full-text search still work; semantic search degrades |
+| TMDb 429 or down | Enrichment retries with jittered backoff. Stubs stay stubs. The seed-row walk stops at the seed it was building and records nothing for it, until a later run; every other subsystem is unaffected |
+| TMDb key missing | Bootstrap Phase 3 skipped. Skeleton catalog and full-text search still work; semantic search degrades. Seed rows are built from the Named and Close lists alone |
 | Provider image CDN unreachable | Catalog and every rendered card unaffected — an artwork reference is a row, not a fetch. A **cold** image answers `503 source_unavailable` with `Retry-After`; a **cached** one still serves. Artwork this deployment declines to carry (an `image/svg+xml` logo) is an ordinary `404 not_found`; everything else — a 4xx, an oversized body, a captive portal's HTML under a 200 — is `503 source_unavailable` with **no** `Retry-After`. A CDN 429 or 401/403 answers `503 source_unavailable` on every route, with no `Retry-After` on the refused credential and one on the rate limit. **`Retry-After`'s presence and absence is the contract between the two 503s** |
 | LLM call fails | Previous curated rows persist. Home composes without them. The failure is fatal to the *job* and never to the screen. **Only the failures that translate to `PortDataMalformed` park the job** — a 4xx that is none of 429, 401/403 or 408; a 200 whose body does not conform; and a generation that validated to zero rows. The other three families back off with jittered retry |
+| LLM call fails while building a **seed row** | The seed keeps its stored row, and Because You Watched is unaffected. An answer it cannot use — truncated, non-conforming, or a 4xx that is none of 429, 401/403 or 408 — records an unusable attempt, retried after 7 days, and the walk moves on. An unreachable model, a 429 or a refused key stops the walk and records nothing for that seed. **Either way the attempt is on the ledger** |
 | LLM call fails during a **search** (query expansion) | The search runs on the query the user typed and `expanded_query` is absent. **The attempt is still billed**, so the warning arrives after the money. Off by default |
 | Embedder unavailable, or refusing the model it is serving | A `fused` search falls back to full-text, flagged through `requested_mode` ≠ `mode`. A `semantic` search fails, having no lane left. `INDEX` jobs back off while the endpoint is down, and park while its vectors fail the width or norm check |
 | Meilisearch down (if enabled) | Fall back to the Postgres index. It is never the only index |
@@ -339,24 +340,33 @@ Abbreviated, not literal. The Postgres healthcheck's `-h 127.0.0.1` and the
   unavailable, refused authentication or rate-limited.
   `usher --traceback <command>` re-raises. Ctrl-C exits 130.
 
-### Scheduled work — two named jobs, no table, and off by default
+### Scheduled work — three named jobs, no table, and off by default
 
-Two jobs are registered, each with a name and a period — no crontab
+Three jobs are registered, each with a name and a period — no crontab
 expression, no calendar, no timezone, no dependency graph:
 
 | job | what it runs | `last_done()` reads | period |
 |---|---|---|---|
 | `search_queries` retention | `DELETE FROM search_queries WHERE at < :cutoff`, chunked, a commit per chunk | `min(min(search_queries.at) + window, now)` | 1 day |
 | the neighbour rebuild | `usher similar --rebuild`'s batch, `resume=True` | `min(title_neighbors.computed_at)` | `USHER_SIMILAR_REBUILD_PERIOD_HOURS`, 24 h |
+| `seed_rows.build` | each due seed's Because You Watched row ([06](06-rows-and-recommendations.md)), one at a time, over the household's 12 most recent titles, a commit per seed | when this process last completed a run, held in memory, so `None` until one has | 15 min |
+
+**The seed-row job is registered only in a process holding an LLM client**: the
+server with `USHER_WORKER_ENABLED` and `USHER_LLM_ENABLED` both on, or `usher
+schedule` with `USHER_LLM_ENABLED` on. Bare `usher push` holds none and does not
+run it. A run with nothing due makes no model or provider call.
 
 **Retention's period is how much expired data may accumulate, not how long a
 row is kept.** The window is `USHER_SEARCH_QUERY_RETENTION_DAYS`. An empty
 table counts as done.
 
-**Both jobs converge after a failure.** An interrupted prune keeps the chunks it
+**All three jobs converge after a failure.** An interrupted prune keeps the chunks it
 committed. The registered rebuild always resumes (an operator types
 `usher similar --rebuild --resume`), and a seed it cannot clear is re-attempted
-once per run rather than looped on.
+once per run rather than looped on. The seed-row walk keeps every seed it
+finished; a model or provider that is unreachable, rate-limited or refusing its
+key stops the walk at that seed and records nothing for it; the next run, under
+the scheduler's failure spacing, takes up the seeds still due.
 
 🔴 **The registered rebuild refuses to run against a table whose vectors were
 written by a model this deployment is not configured with**, logs both names at
@@ -513,7 +523,7 @@ table's count identical.
 | `people`, `credits`, `collections` | **yes, with no network call at all** | `raw_payloads`, via `usher derive --backfill`. The payload cache is the backup |
 | `user_taste` | **yes** | a mean over embeddings of the household's watch states; a missing row is recomputed exactly like a stale one |
 | `title_neighbors` | **yes** | `usher similar --rebuild`; `blend_fingerprint` tells a restored table from a current one |
-| `seed_rows` | **yes, a window at a time** | `usher schedule --once` builds a window of seeds a tick, so one run rebuilds a window and not the table. Until a seed is built again its row is the fallback one |
+| `seed_rows` | **yes, a window at a time** | with `USHER_LLM_ENABLED=true`, `usher schedule --once` builds every due seed in the household's 12 most recent titles, one completion each, so one run rebuilds that window and not the table. Until a seed is rebuilt, its Because You Watched row comes from `title_neighbors` |
 | `genome_scores`, `genome_tags` | **yes, but only from upstream** | re-download `ml-latest.zip` and re-run `bootstrap --phase movielens`. **Not guaranteed**: GroupLens can withdraw or replace the archive, and then it is not rebuildable at all. They share a `genome_revision` and are restored together or not at all |
 | `curated_rows` | **yes, and cheaply — but not to the same rows** | one completion per household. "Rebuildable" means *a screen appears*, not *the screen comes back* |
 | `raw_payloads` | **yes, at the price of the whole crawl** | not carried: it is third-party payloads verbatim, which rule 1 of [04](04-catalog-bootstrap.md) forbids redistributing. There is no `usher backup --include-payloads` |

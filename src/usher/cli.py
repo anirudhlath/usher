@@ -629,8 +629,19 @@ async def _schedule(settings: Settings, *, once: bool) -> None:
         pool_size=settings.db_pool_size,
         max_overflow=settings.db_max_overflow,
     )
+    sessions = build_session_factory(engine)
+    # Both built once and closed in the `finally`. With `USHER_LLM_ENABLED=false` the
+    # client is `None` and the seed-row job is not registered.
+    client, aclose_client = await llm_client(settings, report=False)
+    provider, aclose_provider = await metadata_provider(settings)
     try:
-        scheduler = build_scheduler(settings, sessions=build_session_factory(engine))
+        scheduler = build_scheduler(
+            settings,
+            sessions=sessions,
+            client=client,
+            metadata=provider,
+            user_id=DefaultUserId(sessions),
+        )
         register_scheduler_gauges(scheduler.read)
         registered = len(scheduler.jobs)
         if once:
@@ -643,6 +654,8 @@ async def _schedule(settings: Settings, *, once: bool) -> None:
         print(f"scheduling {registered} jobs every {settings.scheduler_tick_seconds:g}s")
         await scheduler.run()
     finally:
+        await aclose_provider()
+        await aclose_client()
         await engine.dispose()
 
 
