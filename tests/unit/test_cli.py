@@ -31,6 +31,7 @@ from tests.fakes.import_run_repository import FakeImportRunRepository
 from tests.fakes.llm_client import FakeLLMClient
 from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.title_repository import FakeTitleRepository
+from tests.unit.commands import configured, dispatched
 from usher.adapters.bulk.imdb import parse_akas_row
 from usher.adapters.bulk.movielens import MovieLensGenomeDataset
 from usher.cli import (
@@ -412,6 +413,68 @@ def test_the_rebuild_only_flags_are_refused_where_they_cannot_mean_anything() ->
         parse_args(["similar", "0198c6b1-0000-7000-8000-000000000001", "--max-seeds", "5"])
     with pytest.raises(SystemExit):
         parse_args(["similar", "--rebuild", "--max-seeds", "0"])
+
+
+_SEED_ID = "0198c6b1-0000-7000-8000-000000000001"
+
+
+def test_build_row_needs_a_title_id(capsys: pytest.CaptureFixture[str]) -> None:
+    """`--build-row` builds *one* title's row, so without a title there is nothing to build.
+
+    The bare form is the whole-table report, which a flag must not turn into a build of
+    nothing. The id-bearing form is the premise: the flag is a real option and parses.
+    """
+    parsed = parse_args(["similar", _SEED_ID, "--build-row"])
+    assert (parsed.title_id, parsed.build_row, parsed.rebuild) == (_SEED_ID, True, False)
+    assert parse_args(["similar", _SEED_ID]).build_row is False
+    assert parse_args(["similar"]).build_row is False
+
+    with pytest.raises(SystemExit) as refused:
+        parse_args(["similar", "--build-row"])
+
+    assert refused.value.code == 2
+    assert "--build-row needs a title id" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("flags", "named"),
+    [
+        (["--rebuild"], "--rebuild"),
+        (["--resume"], "--resume"),
+        (["--max-seeds", "5"], "--max-seeds"),
+    ],
+)
+def test_build_row_refuses_the_rebuild_flags(
+    flags: list[str], named: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Each walk flag is refused by name, rather than ignored on a command that builds one row.
+
+    A `--max-seeds 5` accepted beside `--build-row` is an operator who believes they
+    capped a walk that never started. The same id and flag parse without the walk flag,
+    so the refusal is `--build-row`'s own rule and not another rule's.
+    """
+    assert parse_args(["similar", _SEED_ID, "--build-row"]).build_row is True
+
+    with pytest.raises(SystemExit) as refused:
+        parse_args(["similar", _SEED_ID, "--build-row", *flags])
+
+    assert refused.value.code == 2
+    assert f"--build-row cannot be combined with {named}" in capsys.readouterr().err
+
+
+def test_build_row_reaches_similar_through_the_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The arm passes `build_row` on, bound against `_similar`'s real signature.
+
+    Dropping the keyword from the arm leaves the flag parsed and ignored, and the read
+    form runs where a build was asked for.
+    """
+    configured(monkeypatch)
+
+    built = dispatched(monkeypatch, arm="_similar", argv=["similar", _SEED_ID, "--build-row"])
+    read = dispatched(monkeypatch, arm="_similar", argv=["similar", _SEED_ID])
+
+    assert [call["build_row"] for call in built + read] == [True, False]
+    assert built[0]["title_id"] == uuid.UUID(_SEED_ID)
 
 
 def test_work_runs_forever_unless_asked_for_one_pass() -> None:

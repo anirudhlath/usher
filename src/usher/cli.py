@@ -39,6 +39,7 @@ from usher.composition import (
     nothing,
     open_adapter,
     run_bootstrap,
+    seed_row_service,
     selected_sources,
     unit_of_work,
 )
@@ -53,6 +54,7 @@ from usher.db.users import default_user, ensure_default_user
 from usher.domain.bootstrap import BootstrapPhase
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.jobs import JobKind, JobPriority
+from usher.domain.seed_rows import SeedRow
 from usher.domain.source import Source
 from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus, WalkProgress, walk_progress
 from usher.eval.errors import EvalDependencyMissing
@@ -65,6 +67,7 @@ from usher.ports.errors import (
 )
 from usher.ports.events import NullEventPublisher
 from usher.ports.jobs import JobRequest
+from usher.ports.repository import TitleRepository
 from usher.ports.rows import RowContext
 from usher.ports.search import SearchFilters, SearchMode, SuggestTier
 from usher.ports.source import SourceAdapter
@@ -989,8 +992,15 @@ async def _similar(
     rebuild: bool,
     resume: bool = False,
     max_seeds: int | None = None,
+    build_row: bool = False,
 ) -> None:
-    """Report the table's age, read one title's neighbours, or recompute it."""
+    """Report the table's age, read one title's neighbours and stored row, or write either."""
+    if build_row:
+        if title_id is None:
+            # `parse_args` refuses this; it is reachable only by a caller that skips it.
+            raise SystemExit("usher similar: --build-row needs a title id")
+        await _similar_build_row(settings, title_id=title_id)
+        return
     async with _session_for(settings) as session:
         pipeline = build_pipeline(session, settings)
         if rebuild:
@@ -1049,6 +1059,82 @@ async def _similar(
             print("no neighbours have ever been computed -- run `usher similar --rebuild`")
         elif not rows:
             print("no neighbours for this title")
+        # The home screen reads this record before it falls back to the neighbours above,
+        # so the two are shown together. A title with no record prints nothing here.
+        stored = (await pipeline.seed_rows.list_for([title_id])).get(title_id)
+        if stored is not None:
+            print("stored row:")
+            await _print_seed_row(pipeline.titles, stored)
+
+
+async def _similar_build_row(settings: Settings, *, title_id: uuid.UUID) -> None:
+    """Build one seed's row now, due or not, through the code the scheduled job runs."""
+    # Both releases start as the shared no-op and are replaced as each client opens, so a
+    # raise between the two still closes what was opened. The engine is `_session_for`'s.
+    aclose_client: Callable[[], Awaitable[None]] = nothing
+    aclose_provider: Callable[[], Awaitable[None]] = nothing
+    try:
+        client, aclose_client = await llm_client(settings, report=False)
+        if client is None:
+            raise SystemExit(
+                "usher similar --build-row: this deployment has no LLM, so there is no row "
+                "to build (set USHER_LLM_ENABLED=true and point USHER_LLM_BASE_URL at an "
+                "OpenAI-compatible endpoint)"
+            )
+        provider, aclose_provider = await metadata_provider(settings)
+        async with _session_for(settings) as session:
+            pipeline = build_pipeline(session, settings)
+            seed = await pipeline.titles.get(title_id)
+            if seed is None:
+                raise SystemExit(f"usher similar --build-row: no title has the id {title_id}")
+            service = seed_row_service(session, settings, client=client, metadata=provider)
+            try:
+                row = await service.build(seed)
+            except PortDataMalformed as exc:
+                raise SystemExit(
+                    f"usher similar --build-row: {exc}\n"
+                    "(the title's stored row, if it has one, still stands)"
+                ) from exc
+            year = f" ({seed.year})" if seed.year is not None else ""
+            print(f"seed: {seed.name}{year} {seed.id}")
+            if provider is None:
+                # Said once, since the sources below would otherwise show no `recommended`
+                # and leave an operator to guess whether the list was empty or never asked.
+                print(
+                    "recommended: not consulted, no metadata provider is configured "
+                    "(USHER_TMDB_API_KEY)"
+                )
+            await _print_seed_row(pipeline.titles, row)
+    finally:
+        await aclose_provider()
+        await aclose_client()
+
+
+async def _print_seed_row(titles: TitleRepository, row: SeedRow) -> None:
+    """A stored record's latest attempt, its last good build, and its cards in order.
+
+    `attempted_at` and `built_at` are both printed because a failed attempt keeps the
+    cards of an earlier build, and one time could not tell the two apart. Each card keeps
+    its position even when its title has since been deleted.
+    """
+    known = (
+        {one.id: one for one in await titles.list_by_ids([card.title_id for card in row.cards])}
+        if row.cards
+        else {}
+    )
+    print(f"outcome: {row.attempt_outcome.value}")
+    print(f"attempted_at: {row.attempted_at.isoformat()}")
+    print(f"built_at: {row.built_at.isoformat() if row.built_at is not None else 'never'}")
+    print(f"cards: {len(row.cards)}")
+    for position, card in enumerate(row.cards, start=1):
+        # Sorted, as the table stores them: a set has no order of its own.
+        sources = "+".join(sorted(source.value for source in card.sources))
+        title = known.get(card.title_id)
+        if title is None:
+            label = f"(title {card.title_id} is no longer in the catalog)"
+        else:
+            label = title.name if title.year is None else f"{title.name} ({title.year})"
+        print(f"{position:>2}. {label} [{sources}]")
 
 
 async def _home(settings: Settings, *, limit: int, repeat: int) -> None:
@@ -1848,7 +1934,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     similar = sub.add_parser(
-        "similar", help="how old the neighbour table is, one title's neighbours, or a rebuild"
+        "similar",
+        help="how old the neighbour table is, one title's neighbours and stored row, or a rebuild",
     )
     # Optional because `--rebuild` is the write form of the same command. Two
     # subcommands for one artefact is how `usher index` and its backfill would
@@ -1871,6 +1958,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="with --rebuild: stop after this many seeds; the rest stay stale for --resume",
+    )
+    similar.add_argument(
+        "--build-row",
+        action="store_true",
+        help="build this title's Because You Watched row now, due or not, and print it",
     )
 
     home = sub.add_parser("home", help="compose the home screen, and time it")
@@ -2026,6 +2118,18 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         if args.repeat < 1:
             parser.error("--repeat must be at least 1")
     if args.command == "similar":
+        if args.build_row:
+            # Before the rules below, so `--build-row --rebuild` is refused by name and
+            # not by the neighbouring "a title id, or --rebuild" sentence.
+            if not args.title_id:
+                parser.error("--build-row needs a title id")
+            for flag, given in (
+                ("--rebuild", args.rebuild),
+                ("--resume", args.resume),
+                ("--max-seeds", args.max_seeds is not None),
+            ):
+                if given:
+                    parser.error(f"--build-row cannot be combined with {flag}")
         # **No arguments is the whole-table report rather than an error**: the
         # per-title form prints two of the three staleness facts and has no
         # whole-table spelling, which is what issue #17 asks for.
@@ -2187,6 +2291,7 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> None:
                 rebuild=args.rebuild,
                 resume=args.resume,
                 max_seeds=args.max_seeds,
+                build_row=args.build_row,
             )
         )
     elif args.command == "home":

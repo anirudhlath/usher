@@ -259,6 +259,13 @@ makes three lists:
   unmarked for up to the row's six-hour cache lifetime. A restart, switching a
   row provider on or off, or enrichment of a title on the shelf drops the row
   sooner. A stored card whose title was deleted is dropped.
+- **An operator can build one seed's row on demand.**
+  `usher similar <title id> --build-row` builds that title's row now, due or
+  not, and stores it as the job would, with one `llm_calls` row. It prints the
+  seed, the latest attempt's outcome, `attempted_at`, `built_at` and each card
+  with the lists that found it. It needs `USHER_LLM_ENABLED=true` and refuses
+  `--rebuild`, `--resume` and `--max-seeds`. `usher similar <title id>` prints
+  the stored record beneath the title's neighbours.
 
 **`FranchiseProvider` fires on ≥ 2 owned members *and* ≥ 1 unplayed.** The row
 *lists* every owned member, watched ones included. It is **movies only**, so on
