@@ -130,9 +130,10 @@ the plaintext exists only in memory in the adapter that needs it.
 - **And neither does a rejected *setting*.** An operator learns which setting
   was wrong and never sees the value, with or without `--traceback`.
 - ⚠️ **Changing `USHER_SECRET_KEY` without `usher rotate-secret` makes every
-  stored credential unreadable** until an operator re-enters it.
-  `GET /admin/sources/{id}/status` reports such a source as unreachable and
-  unauthenticated, with a fixed re-enter-your-credentials detail.
+  stored credential unreadable** until an operator re-enters it with
+  `usher set-credentials`. `GET /admin/sources/{id}/status` reports such a
+  source as unreachable and unauthenticated, with a fixed
+  re-enter-your-credentials detail.
 - **No credential ever reaches a client, with one documented exception**: a
   `direct` playback target's URL carries the source's session token. It does
   not carry Usher's own `DeviceId`. The playback ticket keeps the token out of
@@ -186,13 +187,44 @@ that is recoverable:
 - **Re-running is the recovery.** A second run finishes a half-rotated table,
   and a run over a fully-rotated one is a no-op.
 - **A row that opens under neither key is refused, named and counted**, the run
-  exits non-zero, and the row is left exactly as it was.
+  exits non-zero, and the row is left exactly as it was. The report says to
+  store each refused source's credentials with `usher set-credentials` once the
+  new key is in place.
 - 🔴 **A run that refused *every* row is a different diagnosis and says so.** An
   operator who changes `.env` before running the command makes both ciphers the
   same, so every row refuses. That report names `USHER_SECRET_KEY`, says
-  nothing was lost, and does not mention re-registration;
+  nothing was lost, and does not tell the operator to re-enter anything;
   [`docs/runbooks/rotation.md`](../runbooks/rotation.md) is the operator-facing
   form.
+
+### Changing a stored password — `usher set-credentials`
+
+```bash
+read -r SOURCE_USERNAME && export SOURCE_USERNAME
+read -rs SOURCE_PASSWORD && export SOURCE_PASSWORD   # not echoed, not in history
+uv run usher set-credentials --source "Living Room Emby" \
+  --username-env SOURCE_USERNAME --password-env SOURCE_PASSWORD
+# then restart Usher
+```
+
+**The login is read from the environment, never from an argument.**
+`--username-env` and `--password-env` take the *names* of two exported
+variables. `--username` and `--password` are refused, and no refusal repeats
+any argument — not a value, not a variable's name and not the `--source` name.
+A variable that is unset or empty is refused before the database is read.
+
+**It overwrites the source's stored login**, under the current
+`USHER_SECRET_KEY`. The source keeps its id and every row that refers to it.
+`--source` matches a source's name exactly, a disabled source's included; a name
+matching no source, or more than one, is refused and nothing is written.
+
+**It prints neither value.** On success it names the source and says to
+restart. It attempts no login, so a wrong password shows up at the source's
+next login rather than here.
+
+⚠️ **Usher must be restarted afterwards.** Running push lanes and the worker's
+cached adapters hold the old password, and a lane waiting out its day after a
+rejected login does not notice the new one by itself.
 
 ## Failure and degradation
 

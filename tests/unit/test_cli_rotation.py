@@ -205,9 +205,9 @@ def test_prefix_matching_is_off_for_this_command_and_on_for_every_other(
 ) -> None:
     """The blast radius of `allow_abbrev=False`, pinned rather than left to a comment.
 
-    It is set on this subparser only -- a subparser does **not** inherit it from the
-    parser that created it -- so exactly three option strings lose prefix matching and
-    nineteen other commands keep it.
+    It is set per subparser -- a subparser does **not** inherit it from the parser that
+    created it -- so this command's three option strings lose prefix matching, as do
+    `set-credentials`', and every other command keeps it.
     """
     configured(monkeypatch)
 
@@ -530,9 +530,10 @@ def test_a_run_that_refused_every_row_blames_the_old_key_and_not_the_credentials
     assert "re-entered" not in message
     assert "re-register" not in message
     assert "POST /admin/sources" not in message
+    assert "set-credentials" not in message
 
 
-def test_a_run_that_refused_only_some_rows_still_says_to_re_register_those(
+def test_a_run_that_refused_only_some_rows_still_says_to_re_enter_those(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The control, and what keeps the case above about the *saturated* count.
@@ -555,7 +556,9 @@ def test_a_run_that_refused_only_some_rows_still_says_to_re_register_those(
     message = str(exit_info.value)
     assert exit_info.value.code != 0
     assert "re-entered" in message
-    assert "POST /admin/sources" in message
+    assert "usher set-credentials" in message
+    # Not the old advice beside it: registering again mints a second source.
+    assert "POST /admin/sources" not in message
     # And it does not claim nothing was written, because two rows were.
     assert "nothing was written" not in message.lower()
 

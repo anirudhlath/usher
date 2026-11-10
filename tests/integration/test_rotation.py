@@ -683,7 +683,8 @@ async def test_a_row_no_key_can_open_is_named_and_the_other_two_still_rotate(
     # The *partial* arm, and it is the control for the saturated case below:
     # two rows rotated, so the old key was right and this row really is
     # unreadable. Here the destructive advice is the correct advice.
-    assert "re-entered" in printed and "POST /admin/sources" in printed
+    assert "re-entered" in printed and "usher set-credentials" in printed
+    assert "POST /admin/sources" not in printed
     assert "no credential was lost" not in printed.lower()
     # Left exactly as it was: writing onto it would destroy the one copy a
     # restored key could still have read.
@@ -736,6 +737,7 @@ async def test_rotating_after_the_key_was_already_changed_refuses_every_row_and_
     assert "no credential was lost" in printed.lower()
     assert "re-entered" not in printed
     assert "re-register" not in printed
+    assert "set-credentials" not in printed
 
     # The premise: only the order was wrong.
     with _command_environment(monkeypatch, postgres_url, secret_key=OLD_KEY, new_key=NEW_KEY):
