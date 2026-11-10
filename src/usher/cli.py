@@ -1072,6 +1072,7 @@ async def _home(settings: Settings, *, limit: int, repeat: int) -> None:
             collections=pipeline.collections,
             affinities=lambda: pipeline.taste.genre_affinity(user.id),
             curated=pipeline.curated_rows,
+            seed_rows=pipeline.seed_rows,
             images=pipeline.images,
         )
         cache = RowCache(clock=lambda: datetime.now(UTC))

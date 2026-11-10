@@ -161,7 +161,7 @@ so it has at most ten values.
 | `ContinueWatchingProvider` | Anything in progress | 1 row, always ranked first |
 | `NextUpProvider` | Series with an unwatched next episode — **started, never merely owned** | 1 row |
 | `RecentlyAddedProvider` | New items in the window | 1 row |
-| `BecauseYouWatchedProvider` | Recent high-engagement titles carrying neighbours | 1 row *per seed*, capped at 3 |
+| `BecauseYouWatchedProvider` | Recent high-engagement titles with a stored row or neighbours | 1 row *per seed*, capped at 3 |
 | `FranchiseProvider` | ≥ 2 owned titles in a collection **and ≥ 1 of them unplayed** — movies only | 1 row per franchise, capped at 2 |
 | `GenreAffinityProvider` | The household watches a genre disproportionately to its share of their library | 1–3 rows |
 | `SeasonalProvider` | Calendar window (Halloween, holidays) — curated by the author, not derived | 0–1 rows |
@@ -208,16 +208,23 @@ separate from the diversity constraint. A candidate seed whose neighbour set
 overlaps an already-emitted row's by more than half is skipped and the next
 seed promoted.
 
-**Its `reason` changes with the signal that was available.**
-`title_neighbors` is computed with or without an embedder; on the shipped
-default the neighbours are genre and keyword overlap alone, and the row says
-"Similar genres and themes to Dune" instead of "Because you watched Dune".
+**Its cards come from the seed's stored row in `seed_rows` when that holds
+cards, and from `title_neighbors` otherwise.** A seed whose record holds only a
+failed attempt has no stored row. Stored rows show whatever the LLM and
+scheduler settings say, and without `title_neighbors` ever having been built.
+The seed list, the overlap rule, the cap of three, the scores and the six-hour
+cache are the same for both sources.
 
-**Its neighbours come from `title_neighbors`.** 🔶 A second source is being
-built beside it: one stored row per seed in `seed_rows`, which nothing reads yet.
-The scheduler's `seed_rows.build` job ([08](08-operations.md)) builds them off
-the request path, one seed at a time, for the household's 12 most recent titles,
-a series watched through its episodes included. Each build makes three lists:
+**Its `reason` depends on the source.** A stored row always says "Because you
+watched Dune." A row from `title_neighbors` changes with the signal that was
+available: it is computed with or without an embedder, on the shipped default
+the neighbours are genre and keyword overlap alone, and the row says "Similar
+genres and themes to Dune" instead.
+
+The scheduler's `seed_rows.build` job ([08](08-operations.md)) builds the
+stored rows off the request path, one seed at a time, for the household's 12
+most recent titles, a series watched through its episodes included. Each build
+makes three lists:
 
 | List | From | Order |
 |---|---|---|
@@ -242,6 +249,11 @@ a series watched through its episodes included. Each build makes three lists:
 - **A model or provider outage stops the walk and records nothing.** A provider
   with no record of the seed, or a seed with no provider id, leaves Recommended
   empty and the build goes on.
+- **Watched cards stay in the row and are marked.** Each card for a title the
+  household has played, a series through its episodes included, carries `played`,
+  the mark Rediscover's cards carry. One read covers every row on the screen and
+  applies to both sources; the mark is read when the rows are proposed and is
+  never stored with a row. A stored card whose title was deleted is dropped.
 
 **`FranchiseProvider` fires on ≥ 2 owned members *and* ≥ 1 unplayed.** The row
 *lists* every owned member, watched ones included. It is **movies only**, so on

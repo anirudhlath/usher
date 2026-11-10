@@ -78,6 +78,11 @@ carries `usher.row.provider` (the `slug_prefix`), `usher.row.slug` and
 has a span reading `usher.row.proposed=0` rather than no span at all. **A
 cached screen produces none**, and **no metric goes with it**.
 
+`BecauseYouWatchedProvider`'s `propose` span carries two more,
+`usher.home.because_you_watched.stored` and `usher.home.because_you_watched.fallback`:
+how many of the rows it proposed came from a stored seed row and how many from
+`title_neighbors`. A household with no recent titles gets neither.
+
 **A cached row produces no `row.build` span** and records no histogram point.
 So the number of `row.build` children of a `home.compose` is the number of
 *misses on that composition* — but **not** the number of misses in the

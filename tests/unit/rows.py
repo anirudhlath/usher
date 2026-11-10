@@ -15,6 +15,7 @@ from tests.fakes.person_repository import (
     SeededCredit,
     SeededWatchState,
 )
+from tests.fakes.seed_row_repository import FakeSeedRowRepository
 from tests.fakes.title_neighbor_repository import FakeTitleNeighborRepository
 from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
@@ -76,6 +77,9 @@ class Library:
         self.credits = FakeCreditRepository(self.people, self.titles)
         self.collections = FakeCollectionRepository()
         self.curated_rows = FakeCuratedRowRepository()
+        # The stored "Because you watched" records, one per seed and the same for every
+        # household; seeded through the port's own `save`, as the scheduled job does.
+        self.seed_rows = FakeSeedRowRepository()
         # Artwork, seeded through `poster()`/`backdrop()` below.
         self.images = FakeImageRepository()
         # `replace_for_titles` is a replace, so incremental seeding has to hold
@@ -488,6 +492,7 @@ class Library:
             credits=self.credits,
             collections=self.collections,
             curated=self.curated_rows,
+            seed_rows=self.seed_rows,
             affinities=affinities_of,
             images=self.images,
         )

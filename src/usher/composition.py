@@ -92,6 +92,7 @@ from usher.ports.repository import (
     PersonRepository,
     RawPayloadStore,
     RowProviderSettingsRepository,
+    SeedRowRepository,
     SourceRepository,
     SyncRunRepository,
     TasteRepository,
@@ -229,6 +230,9 @@ class Pipeline:
     # dependencies -- `CuratedProvider` reads `list_for_user` through the context and a
     # CLI that could not fill that field would compose a screen the route does not.
     curated_rows: CuratedRowRepository
+    # `BecauseYouWatchedProvider` reads it through the context, so `usher home` and the
+    # `rows.refresh` lane need it on the pipeline as they need `curated_rows`.
+    seed_rows: SeedRowRepository
     # M8's cost ledger. Write-only from here -- nothing in `src/` reads it
     # back, and PRD 10's spend dashboards are SQL against the table -- so it
     # is on the pipeline for the reason every other port is: `services/` may
@@ -334,6 +338,7 @@ def build_pipeline(
     neighbors = PostgresTitleNeighborRepository(session)
     taste_rows = PostgresTasteRepository(session)
     curated_rows = PostgresCuratedRowRepository(session)
+    seed_rows = PostgresSeedRowRepository(session)
     llm_calls = PostgresLLMCallRepository(session)
     queue = PostgresJobQueue(
         session,
@@ -381,6 +386,7 @@ def build_pipeline(
         neighbors=neighbors,
         taste_rows=taste_rows,
         curated_rows=curated_rows,
+        seed_rows=seed_rows,
         llm_calls=llm_calls,
         people=people,
         credits=credits,
@@ -1215,7 +1221,7 @@ def _load_embedder(settings: Settings) -> Embedder:
 
 
 def build_row_context(pipeline: Pipeline, user: User) -> RowContext:
-    """The thirteen values a row may reach, over one unit of work.
+    """The fourteen values a row may reach, over one unit of work.
 
     `api/deps.py` assembles the same context from request-scoped dependencies
     and `usher home` from a command's one session; this is the third caller --
@@ -1244,6 +1250,7 @@ def build_row_context(pipeline: Pipeline, user: User) -> RowContext:
         collections=pipeline.collections,
         affinities=lambda: pipeline.taste.genre_affinity(user.id),
         curated=pipeline.curated_rows,
+        seed_rows=pipeline.seed_rows,
         images=pipeline.images,
     )
 

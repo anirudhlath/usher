@@ -40,6 +40,7 @@ from tests.fakes.metadata_provider import FakeMetadataProvider
 from tests.fakes.person_repository import FakePersonRepository
 from tests.fakes.raw_payload_store import FakeRawPayloadStore
 from tests.fakes.row_provider_settings_repository import FakeRowProviderSettingsRepository
+from tests.fakes.seed_row_repository import FakeSeedRowRepository
 from tests.fakes.source_adapter import FakeSourceAdapter
 from tests.fakes.taste_repository import FakeTasteRepository
 from tests.fakes.title_embedding_repository import FakeTitleEmbeddingRepository
@@ -204,6 +205,7 @@ def _pipeline_over_fakes(
         neighbors=unused,
         taste_rows=FakeTasteRepository(),
         curated_rows=FakeCuratedRowRepository() if curated is None else curated,
+        seed_rows=FakeSeedRowRepository(),
         llm_calls=FakeLLMCallRepository() if ledger is None else ledger,
         people=people,
         credits=FakeCreditRepository(people, titles_store),

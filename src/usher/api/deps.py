@@ -37,6 +37,7 @@ from usher.db.repositories.search import (
     PostgresTitleNeighborRepository,
 )
 from usher.db.repositories.search_query import PostgresSearchQueryRepository
+from usher.db.repositories.seed_row import PostgresSeedRowRepository
 from usher.db.repositories.source import PostgresSourceRepository
 from usher.db.repositories.sync import PostgresRawPayloadStore, PostgresSyncRunRepository
 from usher.db.repositories.taste import PostgresTasteRepository
@@ -62,6 +63,7 @@ from usher.ports.repository import (
     RawPayloadStore,
     RowProviderSettingsRepository,
     SearchQueryRepository,
+    SeedRowRepository,
     SourceRepository,
     SyncRunRepository,
     TasteRepository,
@@ -602,6 +604,11 @@ def get_curated_row_repository(session: SessionDep) -> CuratedRowRepository:
     return PostgresCuratedRowRepository(session)
 
 
+def get_seed_row_repository(session: SessionDep) -> SeedRowRepository:
+    """The read half only: the scheduled job is `save`'s one caller, off the request path."""
+    return PostgresSeedRowRepository(session)
+
+
 def get_row_provider_settings_repository(session: SessionDep) -> RowProviderSettingsRepository:
     """The overrides `GET`/`PUT /admin/rows/providers` renders and writes.
 
@@ -673,6 +680,7 @@ async def get_row_context(
     credits: Annotated[CreditRepository, Depends(get_credit_repository)],
     collections: Annotated[CollectionRepository, Depends(get_collection_repository)],
     curated: Annotated[CuratedRowRepository, Depends(get_curated_row_repository)],
+    seed_rows: Annotated[SeedRowRepository, Depends(get_seed_row_repository)],
     images: Annotated[ImageRepository, Depends(get_image_repository)],
     taste: Annotated[TasteService, Depends(get_taste_service)],
 ) -> RowContext:
@@ -693,6 +701,7 @@ async def get_row_context(
         collections=collections,
         affinities=_Affinities(taste, user.id),
         curated=curated,
+        seed_rows=seed_rows,
         images=images,
     )
 
