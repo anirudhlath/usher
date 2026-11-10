@@ -84,7 +84,7 @@ Two fields are **absent**:
 | Family | `RowFamily` | Built from | Examples | TTL |
 |---|---|---|---|---|
 | **`SourceRow`** | `SOURCE` | Catalog and watch state in Postgres | Continue Watching, Next Up, Recently Added, genre shelves, collections | ~60 s |
-| **`SimilarityRow`** | `SIMILARITY` | Embedding / genome neighbours of a seed title | "Because you watched *Dune*", "More like this" | hours |
+| **`SimilarityRow`** | `SIMILARITY` | A seed title's stored row (`seed_rows`), or its embedding / genome neighbours (`title_neighbors`) | "Because you watched *Dune*", "More like this" | hours |
 | **`LLMRow`** | `CURATED` | A persisted `curated_rows` record | "Slow-burn sci-fi for a rainy night" | 5 min |
 
 `LLMRow.build()` only *hydrates* stored output. Generation happens in a
@@ -210,8 +210,8 @@ seed promoted.
 
 **Its cards come from the seed's stored row in `seed_rows` when that holds
 cards, and from `title_neighbors` otherwise.** A seed whose record holds only a
-failed attempt has no stored row. Stored rows show whatever the LLM and
-scheduler settings say, and without `title_neighbors` ever having been built.
+failed attempt has no stored row. Stored rows show regardless of the LLM and
+scheduler settings, and even when `title_neighbors` has never been built.
 The seed list, the overlap rule, the cap of three, the scores and the six-hour
 cache are the same for both sources.
 
@@ -246,9 +246,10 @@ makes three lists:
   over 30 days ago, and when a short or unusable attempt is over 7 days old or
   was made under another recipe. Until then that failed attempt holds the seed
   back, so a recipe change costs one attempt per seed.
-- **A model or provider outage stops the walk and records nothing.** A provider
-  with no record of the seed, or a seed with no provider id, leaves Recommended
-  empty and the build goes on.
+- **A model or provider outage stops the walk and records no attempt for the
+  seed; its LLM call is still on the ledger.** A provider with no record of the
+  seed, or a seed with no provider id, leaves Recommended empty and the build
+  goes on.
 - **Watched cards stay in the row and are marked.** Each card for a title the
   household has played, a series through its episodes included, carries `played`,
   the mark Rediscover's cards carry. One read covers every row on the screen and
