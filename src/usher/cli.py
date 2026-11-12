@@ -1812,7 +1812,7 @@ def _as_uuid(value: str, what: str) -> uuid.UUID:
         raise SystemExit(f"{what} is not a uuid: {value}") from exc
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser() -> _Parser:
     parser = _Parser(prog="usher")
     # The error boundary's own escape hatch, and the reason the boundary is allowed to
     # swallow a stack at all.
@@ -2135,9 +2135,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _parse_without_echoing_unknown_values(
-    parser: argparse.ArgumentParser, argv: list[str]
-) -> argparse.Namespace:
+def _parse_without_echoing_unknown_values(parser: _Parser, argv: list[str]) -> argparse.Namespace:
     """`parser.parse_args`, quoting no argument of a command line naming a secret command.
 
     `rotate-secret`'s and `set-credentials`' unknowns are counted here, and every other
