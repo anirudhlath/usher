@@ -197,10 +197,11 @@ after them; every `sync.progress` frame carries it ([07](07-client-api.md)).
 
 `push_available` is three-valued: `null` ("not probed") when the status check
 could not authenticate (`authenticated: false`), when the source has no push
-lane, or when its lane ended because the source has no push channel; otherwise
-the live answer — a connection *and* at least one received message *and* a
-recent one — which for a crashed lane is `false` until it restarts. The status
-check opens no socket.
+lane, or from the first refresh of the push lanes after its lane ended because
+the source has no push channel (before that refresh, a check that authenticates
+answers `false`); otherwise the live answer — a connection *and* at least one
+received message *and* a recent one — which for a crashed lane is `false` until
+it restarts. The status check opens no socket.
 
 The on-demand answer is `usher push --probe`, which opens a channel on purpose,
 listens for one `push_stale_after_seconds` window, and reports **what arrived**
