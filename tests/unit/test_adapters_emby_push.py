@@ -1,6 +1,7 @@
-"""The Emby push channel: the ledger, the mapper, the socket, the watchdog."""
+"""The Emby push channel: the ledger, the mapper, the socket, the watchdog, and a lane over it."""
 
 import asyncio
+import gc
 import json
 import logging
 import time
@@ -736,7 +737,15 @@ async def test_a_consumer_and_a_producer_genuinely_overlap() -> None:
                 if len(consumed) == rounds:
                     return
 
-        await asyncio.wait_for(asyncio.gather(produce(), consume()), timeout=BOUND)
+        # The windows last a fraction of a millisecond, about one collector pass, so a pass
+        # landing inside them reads as serialisation. Collection waits for the timestamps.
+        was = gc.isenabled()
+        gc.disable()
+        try:
+            await asyncio.wait_for(asyncio.gather(produce(), consume()), timeout=BOUND)
+        finally:
+            if was:
+                gc.enable()
 
     # Serialised would mean every produce() timestamp precedes every
     # consume() one. Genuine interleaving means the consumer had already
