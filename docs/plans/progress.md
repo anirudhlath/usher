@@ -179,6 +179,24 @@ heading false. `tests/unit/test_docs_currency.py` reads it into the same union.
 spec and is not a milestone, so a row under any heading above would make that
 heading false. `tests/unit/test_docs_currency.py` reads it into the same union.
 
+## Because You Watched rows (from docs/specs/2026-11-07-because-you-watched-rows-design.md)
+| Task | What it delivers | Plan file | Status |
+|---|---|---|---|
+| 1 | Status rows: the spec, this plan and their tables committed | docs/plans/2026-11-09-because-you-watched-rows.md | ✅ landed |
+| 2 | `complete_json` takes a per-call temperature; `LLMPurpose.BECAUSE_YOU_WATCHED` | docs/plans/2026-11-09-because-you-watched-rows.md | 🔨 in review |
+| 3 | `MetadataProvider.recommendations(ref)`, the first page, on the port, the TMDb adapter and the fake | docs/plans/2026-11-09-because-you-watched-rows.md | 🔨 in review |
+| 4 | `TitleRepository.resolve_names` and `TitleEmbeddingRepository.nearest_known` | docs/plans/2026-11-09-because-you-watched-rows.md | 🔨 in review |
+| 5 | The `SeedRow` record, the merge, the recall prompt and the recipe fingerprint | docs/plans/2026-11-09-because-you-watched-rows.md | 🔨 in review |
+| 6 | `seed_rows`: port, model, migration, repository, fake, backup classification | docs/plans/2026-11-09-because-you-watched-rows.md | 🔨 in review |
+| 7 | `SeedRowService`, `SeedRowJob` every 15 minutes, and its wiring into the scheduler | docs/plans/2026-11-09-because-you-watched-rows.md | 🔨 in review |
+| 8 | Because You Watched reads stored rows, falls back to `title_neighbors`, and marks watched cards | docs/plans/2026-11-09-because-you-watched-rows.md | 🔨 in review |
+| 9 | `usher similar <id> --build-row`, and the stored row in `usher similar <id>` | docs/plans/2026-11-09-because-you-watched-rows.md | 🔨 in review |
+| 10 | Live acceptance: the spec's bars on production after the deploy, then the owner's home screen — owner-gated | docs/plans/2026-11-09-because-you-watched-rows.md | 📋 planned |
+
+**An eleventh table, for the ninth's reason.** Because You Watched rows has its own
+spec and is not a milestone, so a row under any heading above would make that
+heading false. `tests/unit/test_docs_currency.py` reads it into the same union.
+
 ## Self-healing sync, slice 1 (from docs/specs/2026-11-05-self-healing-sync-design.md)
 | Task | What it delivers | Plan file | Status |
 |---|---|---|---|
@@ -189,7 +207,7 @@ heading false. `tests/unit/test_docs_currency.py` reads it into the same union.
 | 5 | Status rows and the PR | docs/plans/2026-11-07-self-healing-lane.md | 📋 planned |
 | 6 | Live acceptance at the next natural outage: the series reads 0 and returns to 1 with no deploy between — owner-gated | docs/plans/2026-11-07-self-healing-lane.md | 📋 planned |
 
-**An eleventh table, for the tenth's reason.** Self-healing sync has its own
+**A twelfth table, for the eleventh's reason.** Self-healing sync has its own
 spec and is not a milestone, so a row under any heading above would make that
 heading false. `tests/unit/test_docs_currency.py` reads it into the same union.
 

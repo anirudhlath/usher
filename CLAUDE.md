@@ -228,7 +228,7 @@ uv run usher push --source "..." | --probe
 uv run usher index [--backfill]                 # search-index freshness
 uv run usher search "..." | suggest "..." --limit 5
 uv run usher eval [suggest --full]              # --full enforces bars, writes the ledger
-uv run usher similar [<id>] [--rebuild [--resume] [--max-seeds N]]
+uv run usher similar [<id> [--build-row]] [--rebuild [--resume] [--max-seeds N]]
 uv run usher derive | genres [--backfill] | home | curate
 uv run usher schedule [--once]                  # scheduled batches whose period has elapsed
 uv run usher backup [--output OUTPUT]           # everything nothing else can rebuild, one file

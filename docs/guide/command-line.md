@@ -195,13 +195,40 @@ splitting the lanes across containers.
 usher search "the quiet vacuum"                        # full-text and semantic, fused
 usher search "vacuum" --mode full_text --kind movie --year-from 1990 --owned-only
 usher suggest "the quie" --limit 5                     # type-ahead, typo-tolerant
-usher similar <title_id>                               # precomputed neighbours
+usher similar <title_id>                               # precomputed neighbours, and a stored row
+usher similar <title_id> --build-row                   # build that title's Because You Watched row now
 ```
 
 `usher search` ends with a `semantic_coverage` line: the share of enriched
 titles that have an embedding. Without a model, a fused search quietly narrows
 to full-text and says `fused was served as full_text`. `semantic_coverage=0.000`
 means a model is configured but nothing has been embedded yet.
+
+`usher similar <title_id> --build-row` builds one title's Because You Watched
+row now, whether or not it is due, through the code the scheduler's
+`seed_rows.build` job runs. It needs `USHER_LLM_ENABLED=true`, spends one model
+call, records it in `llm_calls`, stores the row, and prints it. Abbreviated:
+
+```text
+seed: BlackBerry (2023) 0198c6b1-0000-7000-8000-000000000001
+outcome: built
+attempted_at: 2026-11-09T14:05:00+00:00
+built_at: 2026-11-09T14:05:00+00:00
+cards: 14
+ 1. The Social Network (2010) [close+named]
+ 2. Steve Jobs (2015) [close+named+recommended]
+ 3. Jobs (2013) [named]
+```
+
+Each card line is its position, name, year and the lists that found it:
+`named` (the model), `recommended` (the metadata provider) and `close`
+(embedding distance). With no metadata provider configured the output says the
+recommended list was not consulted. `outcome` is the latest attempt's: when it
+is `too_few` or `unusable`, the cards shown are the last good build's, and
+`built_at` says when that was (`never` when there was none). `--build-row`
+needs a title id and refuses `--rebuild`, `--resume`, `--max-seeds` and `--limit`. Bare
+`usher similar <title_id>` prints the same record, as `stored row:`, beneath the
+title's neighbours when it has one.
 
 Four commands keep derived data fresh. Each one only reports when run bare, and
 writes when given `--backfill` or `--rebuild`:

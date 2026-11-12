@@ -17,13 +17,16 @@ from tests.contract.title_repository_contract import (
     TitleRepositoryCandidateContract,
     TitleRepositoryContract,
     TitleRepositoryGenreSweepContract,
+    TitleRepositoryNameContract,
     TitleRepositoryNaturalKeyContract,
     TitleRepositoryOwnedContract,
 )
+from tests.integration.conftest import Analyze, index_suspended
 from usher.db.models.source import MediaItemRow
 from usher.db.models.title import DERIVED_COLUMNS, TitleRow
 from usher.db.repositories.source import PostgresSourceRepository
 from usher.db.repositories.title import (
+    _RESOLVE_NAMES,
     _RESOLVE_NATURAL_KEYS,
     _WITHOUT_DERIVED_COLUMNS,
     PostgresTitleRepository,
@@ -34,7 +37,10 @@ from usher.domain.ids import new_id
 from usher.domain.source import Source
 from usher.domain.title import Title
 from usher.ports.errors import RepositoryConflict, RepositoryNotFound
-from usher.ports.repository import BrowseSort, TitleReference
+from usher.ports.repository import BrowseSort, NamedTitle, TitleReference
+
+_PLAN_ROWS = 2_000
+"""Enough `titles` rows for the planner to prefer an index over a scan."""
 
 
 @pytest.fixture
@@ -1184,3 +1190,89 @@ async def test_the_ladder_plans_to_the_indexes_it_was_designed_for(
     assert "ix_titles_tmdb_id_kind" in plan, plan
     assert "pk_titles" in plan, plan
     assert "Seq Scan on titles" not in plan, plan
+
+
+class TestPostgresTitleRepositoryNames(TitleRepositoryNameContract):
+    """`resolve_names` against real Postgres.
+
+    The half with teeth: `lower(t.name)` against an expression index, `BETWEEN`
+    over a `NULL` year, and `NULLS LAST` under a `DISTINCT ON`, each of which the
+    fake reproduces with a Python scan.
+    """
+
+    @pytest.fixture
+    def repo(self, session: AsyncSession) -> PostgresTitleRepository:
+        return PostgresTitleRepository(session)
+
+
+async def test_no_probes_is_no_statement(
+    repo: PostgresTitleRepository, session: AsyncSession
+) -> None:
+    """The one-probe call is the control: it is exactly one statement."""
+    probe = NamedTitle(name="Anything", year=2000)
+
+    with _capturing_sql(session) as statements:
+        assert await repo.resolve_names([]) == {}
+        asked_nothing = len(statements)
+        await repo.resolve_names([probe])
+        asked_one = len(statements) - asked_nothing
+
+    assert asked_nothing == 0, f"an empty batch sent: {statements}"
+    assert asked_one == 1, f"one probe cost {asked_one} statements: {statements}"
+
+
+async def test_a_batch_of_names_is_one_statement(
+    repo: PostgresTitleRepository, session: AsyncSession
+) -> None:
+    held = Title(
+        kind=TitleKind.MOVIE,
+        name="Quiet Kiln",
+        sort_name="Quiet Kiln",
+        year=2005,
+        enrichment_state=EnrichmentState.ENRICHED,
+    )
+    await repo.add(held)
+    probes = [NamedTitle(name="Quiet Kiln", year=2005)]
+    probes += [NamedTitle(name=f"Absent {number}", year=2005) for number in range(24)]
+
+    with _capturing_sql(session) as statements:
+        answers = await repo.resolve_names(probes)
+
+    assert len(statements) == 1, f"{len(probes)} probes cost {len(statements)}: {statements}"
+    assert answers == {probes[0]: held.id}, "the premise: the one real probe resolved"
+
+
+async def test_the_name_lookup_plans_to_an_index_on_the_lowered_name(
+    session: AsyncSession, analyze: Analyze
+) -> None:
+    """The probe is lowered by the statement, and the column must be too.
+
+    The other spelling returns the same rows off a sequential scan, so only the plan
+    tells the two apart. The planner may pick either btree over `lower(name)`; the
+    second plan hides the prefix one to show the `(lower(name), year)` index serves it.
+    """
+    await session.execute(
+        text(
+            "INSERT INTO titles (id, kind, name, sort_name, year, enrichment_state) "
+            "VALUES (:id, 'movie', :name, :name, :year, 'enriched')"
+        ),
+        [
+            {"id": new_id(), "name": f"Film {number:04d}", "year": 1950 + number % 70}
+            for number in range(_PLAN_ROWS)
+        ],
+    )
+    await analyze("titles")
+    binds = {"names": ["Film 0007"], "years": [1957]}
+
+    async def plan() -> str:
+        rows = await session.execute(text("EXPLAIN " + _RESOLVE_NAMES), binds)
+        return "\n".join(str(line) for line in rows.scalars())
+
+    chosen = await plan()
+    assert "Index Cond: (lower(name) = lower(p.name))" in chosen, chosen
+    assert "Seq Scan on titles" not in chosen, chosen
+
+    async with index_suspended(session, "ix_titles_name_lower_prefix"):
+        without = await plan()
+    assert "ix_titles_name_lower_year" in without, without
+    assert "Seq Scan on titles" not in without, without

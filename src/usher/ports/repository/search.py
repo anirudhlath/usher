@@ -211,6 +211,20 @@ class TitleEmbeddingRepository(ABC):
         """The `limit` nearest candidates for each seed, nearest first."""
 
     @abstractmethod
+    async def nearest_known(
+        self, seed_id: uuid.UUID, *, min_votes: int, limit: int
+    ) -> list[uuid.UUID]:
+        """The `limit` titles nearest `seed_id` by cosine that the catalog knows well.
+
+        Nearest first, the lower id breaking a tie. Known means not a skeleton and
+        with at least `min_votes` votes, an unknown count being zero. The seed is not
+        in its own answer, and a seed with no vector has an empty one.
+
+        The floor applies before the limit, not after: `limit` titles come back
+        whenever that many qualify, however many nearer ones do not.
+        """
+
+    @abstractmethod
     async def list_for_titles(
         self, title_ids: Sequence[uuid.UUID], *, model_name: str | None = None
     ) -> dict[uuid.UUID, tuple[float, ...]]:

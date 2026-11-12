@@ -50,6 +50,7 @@ from usher.ports.repository import (
     RowProviderSettingsRepository,
     SearchQueryRecord,
     SearchQueryRepository,
+    SeedRowRepository,
     SourceRepository,
     SyncRunRepository,
     TasteRepository,
@@ -109,6 +110,7 @@ ALL_PORTS: list[type[ABC]] = [
     RestoreRepository,
     RowProviderSettingsRepository,
     SearchQueryRepository,
+    SeedRowRepository,
     SourceRepository,
     SyncRunRepository,
     TasteRepository,
@@ -415,7 +417,11 @@ def test_llm_usage_cost_is_decimal_not_float() -> None:
 
 
 def test_llm_purpose_is_a_closed_string_vocabulary() -> None:
-    assert {p.value for p in LLMPurpose} == {"curation", "query_expansion"}
+    assert {p.value for p in LLMPurpose} == {
+        "curation",
+        "query_expansion",
+        "because_you_watched",
+    }
 
 
 # --- SearchMode ------------------------------------------------------------

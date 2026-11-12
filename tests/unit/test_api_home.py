@@ -213,6 +213,7 @@ async def test_the_route_hands_every_provider_a_context_it_can_actually_read() -
         credits=library.credits,
         collections=library.collections,
         curated=library.curated_rows,
+        seed_rows=library.seed_rows,
         images=library.images,
         taste=taste,
     )
@@ -267,6 +268,7 @@ async def test_the_route_does_not_read_a_households_taste_until_a_row_asks_for_i
         credits=library.credits,
         collections=library.collections,
         curated=library.curated_rows,
+        seed_rows=library.seed_rows,
         images=library.images,
         taste=taste,
     )

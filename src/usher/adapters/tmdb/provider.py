@@ -57,6 +57,8 @@ CHANGES_WINDOW_DAYS = 14
 _DETAIL_PATH = {TitleKind.MOVIE: "/movie", TitleKind.SERIES: "/tv"}
 _SEARCH_PATH = {TitleKind.MOVIE: "/search/movie", TitleKind.SERIES: "/search/tv"}
 _CHANGES_PATH = {TitleKind.MOVIE: "/movie/changes", TitleKind.SERIES: "/tv/changes"}
+# Appended to a detail path: `/movie/{id}/recommendations`, `/tv/{id}/recommendations`.
+_RECOMMENDATIONS_SUFFIX = "/recommendations"
 _SEARCH_YEAR_PARAM = {
     TitleKind.MOVIE: "primary_release_year",
     TitleKind.SERIES: "first_air_date_year",
@@ -162,6 +164,13 @@ class TmdbMetadataProvider(MetadataProvider):
         if kind is TitleKind.SERIES:
             await self._compose_seasons(payload, tmdb_id)
         return payload
+
+    async def recommendations(self, ref: ProviderRef) -> list[MetadataCandidate]:
+        kind, tmdb_id = self._resolve(ref)
+        body = await self._client.get(
+            f"{_DETAIL_PATH[kind]}/{tmdb_id}{_RECOMMENDATIONS_SUFFIX}", {"page": "1"}
+        )
+        return search_candidates(body, kind)
 
     def to_result(self, payload: dict[str, Any], title_id: uuid.UUID) -> EnrichmentResult:
         seasons, episodes = seasons_and_episodes(payload, title_id)

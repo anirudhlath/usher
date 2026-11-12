@@ -41,6 +41,13 @@ from usher.db.users import DEFAULT_USER_NAME, ensure_default_user
 from usher.domain.enums import EnrichmentState, SourceKind, TitleKind
 from usher.domain.ids import new_id
 from usher.domain.jobs import JobKind, JobPriority
+from usher.domain.seed_rows import (
+    MIN_SEED_ROW_CARDS,
+    CardSource,
+    SeedRow,
+    SeedRowCard,
+    SeedRowOutcome,
+)
 from usher.domain.source import Source
 from usher.domain.sync import (
     STALE_AFTER,
@@ -1369,6 +1376,169 @@ async def test_similar_with_no_arguments_reports_the_whole_tables_age_and_stale_
     assert "1 neighbour rows were computed under a different blend" in stale, stale
     assert "no neighbour row disagrees" not in stale, stale
     assert stamped.isoformat() in stale, stale
+
+
+def _stored_row(
+    seed: Title,
+    cards: Sequence[Title],
+    *,
+    sources: frozenset[CardSource],
+    built_at: datetime,
+    attempted_at: datetime,
+    outcome: SeedRowOutcome = SeedRowOutcome.BUILT,
+) -> SeedRow:
+    return SeedRow(
+        seed_title_id=seed.id,
+        cards=tuple(SeedRowCard(title_id=one.id, sources=sources) for one in cards),
+        built_at=built_at,
+        built_recipe="b" * 32,
+        attempted_at=attempted_at,
+        attempt_outcome=outcome,
+        attempt_recipe="b" * 32,
+    )
+
+
+async def test_similar_prints_a_stored_row_beside_the_neighbours(
+    cli_settings: Settings,
+    clean_slate: None,
+    clean_search: None,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The read form shows the seed's stored record after its neighbours, from the table.
+
+    The sources are stored sorted and joined (`close+named`) and printed the same way,
+    and the latest attempt is a failure over an earlier build, so `outcome`,
+    `attempted_at` and `built_at` each have a different value to print.
+    """
+    seed, neighbour = _searchable("The Quiet Vacuum"), _searchable("Vane 4417")
+    mates = [_searchable(f"Cardmate {index}") for index in range(MIN_SEED_ROW_CARDS)]
+    built, attempted = (
+        datetime(2026, 11, 1, 9, 30, tzinfo=UTC),
+        datetime(2026, 11, 8, 4, 0, tzinfo=UTC),
+    )
+    assert built != attempted, "the premise: the build and the later attempt are two instants"
+    await _seed_searchable(cli_settings, [seed, neighbour, *mates])
+    async with _session_for(cli_settings) as session:
+        pipeline = build_pipeline(session, settings=cli_settings)
+        await pipeline.neighbors.replace(
+            [seed.id],
+            [ScoredNeighbor(title_id=seed.id, neighbor_title_id=neighbour.id, score=0.5, rank=0)],
+            blend_fingerprint=_FP,
+        )
+        await pipeline.seed_rows.save(
+            _stored_row(
+                seed,
+                mates,
+                sources=frozenset({CardSource.NAMED, CardSource.CLOSE}),
+                built_at=built,
+                attempted_at=attempted,
+                outcome=SeedRowOutcome.TOO_FEW,
+            )
+        )
+        await session.commit()
+
+    await _similar(cli_settings, title_id=seed.id, limit=5, rebuild=False)
+
+    lines = capsys.readouterr().out.splitlines()
+    neighbour_line = f"0.500  Vane 4417 (2021)  {neighbour.id}"
+    assert neighbour_line in lines, lines
+    assert "outcome: too_few" in lines, lines
+    assert f"attempted_at: {attempted.isoformat()}" in lines, lines
+    assert f"built_at: {built.isoformat()}" in lines, lines
+    assert "cards: 8" in lines, lines
+    assert [one for one in lines if one.endswith("[close+named]")] == [
+        f"{index:>2}. Cardmate {index - 1} (2021) [close+named]"
+        for index in range(1, MIN_SEED_ROW_CARDS + 1)
+    ]
+    assert lines.index(neighbour_line) < lines.index("outcome: too_few"), "neighbours come first"
+
+
+async def test_similar_prints_no_record_for_a_title_with_no_stored_row(
+    cli_settings: Settings,
+    clean_slate: None,
+    clean_search: None,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The neighbours alone, as before, when the seed has no record: no empty `outcome:` block."""
+    seed, neighbour = _searchable("The Quiet Vacuum"), _searchable("Vane 4417")
+    await _seed_searchable(cli_settings, [seed, neighbour])
+    async with _session_for(cli_settings) as session:
+        pipeline = build_pipeline(session, settings=cli_settings)
+        await pipeline.neighbors.replace(
+            [seed.id],
+            [ScoredNeighbor(title_id=seed.id, neighbor_title_id=neighbour.id, score=0.5, rank=0)],
+            blend_fingerprint=_FP,
+        )
+        await session.commit()
+
+    await _similar(cli_settings, title_id=seed.id, limit=5, rebuild=False)
+
+    printed = capsys.readouterr().out
+    assert f"0.500  Vane 4417 (2021)  {neighbour.id}" in printed, printed
+    assert "outcome:" not in printed, printed
+
+
+async def test_similar_build_row_stores_the_row_and_prints_it(
+    cli_settings: Settings,
+    clean_slate: None,
+    clean_search: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--build-row` through the real service and tables: stored, ledgered, printed, read back.
+
+    The model's answer names nine catalog titles in an order that is not their id order,
+    so the printed positions are the model's. No provider and no embeddings, so every
+    card is `named`. The stored record is read through a fresh session, which is what a
+    bare `usher similar <id>` afterwards would print.
+    """
+    seed = _searchable("The Quiet Vacuum")
+    named = [_searchable(f"Cardmate {index}") for index in range(9)]
+    order = [named[index] for index in (5, 2, 8, 0, 7, 3, 6, 1, 4)]
+    assert [one.id for one in order] != sorted(one.id for one in order), "model order is not id"
+    client = FakeLLMClient.returning(
+        {"films": [{"title": one.name, "year": one.year} for one in order]}
+    )
+    closed: list[str] = []
+
+    async def _client(
+        settings: Settings, *, report: bool = True
+    ) -> tuple[FakeLLMClient, AsyncCloser]:
+        async def aclose() -> None:
+            closed.append("client")
+
+        return client, aclose
+
+    async def _no_provider(settings: Settings) -> tuple[None, AsyncCloser]:
+        return None, nothing
+
+    monkeypatch.setattr("usher.cli.llm_client", _client)
+    monkeypatch.setattr("usher.cli.metadata_provider", _no_provider)
+    await _seed_searchable(cli_settings, [seed, *named])
+
+    await _similar(cli_settings, title_id=seed.id, limit=5, rebuild=False, build_row=True)
+
+    assert len(client.calls) == 1
+    assert closed == ["client"]
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == f"seed: The Quiet Vacuum (2021) {seed.id}"
+    assert "outcome: built" in lines, lines
+    assert "cards: 9" in lines, lines
+    assert [one for one in lines if one.endswith("[named]")] == [
+        f"{position:>2}. {one.name} (2021) [named]" for position, one in enumerate(order, start=1)
+    ]
+    async with _session_for(cli_settings) as session:
+        stored = (await build_pipeline(session, cli_settings).seed_rows.list_for([seed.id]))[
+            seed.id
+        ]
+        ledger = (
+            await session.execute(
+                text("SELECT ok FROM llm_calls WHERE purpose = 'because_you_watched'")
+            )
+        ).all()
+    assert [card.title_id for card in stored.cards] == [one.id for one in order]
+    assert stored.attempt_outcome is SeedRowOutcome.BUILT
+    assert [tuple(one) for one in ledger] == [(True,)]
 
 
 async def test_the_whole_table_report_prints_and_never_logs(

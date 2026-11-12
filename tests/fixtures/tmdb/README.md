@@ -77,3 +77,11 @@ something false:
 | `search_movie.json` | `GET /search/movie` |
 | `search_tv.json` | `GET /search/tv` |
 | `movie_changes.json` | `GET /movie/changes` |
+| `recommendations_movie.json` | `GET /movie/{id}/recommendations?page=1` |
+| `recommendations_tv.json` | `GET /tv/{id}/recommendations?page=1` |
+
+The two `recommendations_*` files were shape-recorded from the live endpoints (keys and
+types only, the way `capture_tmdb_fixture.py` prints them) and every value in them is
+invented. Their results are in a deliberate order that matches no sort by id, popularity or
+name, so a test can tell the provider's order from a sorted one. Recapture the shape with
+`--kind recommendations --title-kind movie|series --id <a real TMDb id>`.

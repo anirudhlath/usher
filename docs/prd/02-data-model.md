@@ -341,6 +341,7 @@ the top ten billed plus every stored crew name.
 | `collections` | TMDb franchise grouping: `(id, tmdb_id, name, created_at, updated_at)` |
 | `user_taste` | One centroid per user: `(user_id PK, centroid halfvec(1024), model_name, source_watermark, title_count, computed_at)`. `centroid` and `source_watermark` are both nullable: a household below five engaged titles gets a written refusal. `(model_name, source_watermark)` is its fingerprint, and the width moves with `title_embeddings.embedding` |
 | `title_neighbors` | Precomputed similarity: `(title_id, neighbor_id, score, rank, blend_fingerprint, computed_at)`. A batch artefact, rebuilt rather than repaired. `blend_fingerprint` hashes the blend's constants and **not** the embedding model, so a model swap needs the table emptied |
+| `seed_rows` | One stored "Because you watched" row per seed title, the same for anyone who watched the seed: `(seed_title_id PK, card_title_ids uuid[], card_sources text[], built_at, built_recipe, attempted_at, attempt_outcome, attempt_recipe)`. `card_title_ids` is ordered and `card_sources` has one entry per card, its source names sorted and joined by `+` (`close+named`). `card_title_ids`, `built_at` and `built_recipe` describe the last good build and are all present or all absent; `attempted_at`, `attempt_outcome` and `attempt_recipe` describe the latest try, so a failed rebuild keeps the old cards and records that it failed. A row holds no cards or 8 to 20; both recipes are 32 characters. Deleted with its seed title. A batch artefact, rebuilt rather than repaired |
 | `genome_scores` | One title's MovieLens tag-genome vector: `(title_id, relevance halfvec(1128), genome_revision, computed_at)`. One dense vector per title |
 | `genome_tags` | What each of that vector's 1,128 lanes means: `(tag_id PK, tag, genome_revision)`, loaded by `bootstrap --phase movielens` and stamped with the same revision |
 | `sync_runs` | Per-source run bookkeeping: kind, cursor, status, stats, `heartbeat_at`, which every walk moves when it starts, with every commit and at least once a minute between commits, except while a sweep re-describes what it keeps ([03](03-sources-and-sync.md)); and `planned`, true for a whole-library walk. One row per walk: an attempt that resumes an unfinished whole-library walk continues its row, and every other attempt starts one. `error` is prose and `error_code` is the kind — a nullable `VARCHAR(32)` holding `availability_ceiling` or `gap_delta_ceiling`, null for every failure an operator has no command for |
@@ -389,6 +390,7 @@ GenomeVector ·· GenomeTag    (1,128 lanes ↔ genome_tags; positional, no FK)
 User       1─1 UserTaste     (nullable centroid; user_taste)
 User       1─* CuratedRow    (curated_rows; replaced per generation, CASCADE)
 Title      *─* Title        (through title_neighbors, directed, precomputed)
+Title      1─1 SeedRow      (seed_rows; sparse, replaced whole, CASCADE)
 ```
 
 `CuratedRow *─* Title` is absent: it is a `uuid[]` column, so Postgres neither

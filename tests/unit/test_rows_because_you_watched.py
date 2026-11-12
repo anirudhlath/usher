@@ -5,13 +5,24 @@ from collections.abc import Sequence
 
 import pytest
 from loguru import logger
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from tests.unit.rows import Library, days_ago
 from usher.domain.rows import RowFamily
+from usher.domain.seed_rows import (
+    MIN_SEED_ROW_CARDS,
+    CardSource,
+    SeedRow,
+    SeedRowCard,
+    SeedRowOutcome,
+)
 from usher.ports.repository import ScoredNeighbor
 from usher.services.rows.because_you_watched import (
     BECAUSE_YOU_WATCHED_SCORE_CEILING,
     BecauseYouWatchedProvider,
+    BecauseYouWatchedRow,
 )
 
 # The blend these arranged rows claim to have been computed under. A literal,
@@ -372,3 +383,305 @@ async def test_the_unbuilt_warning_is_said_once_per_process_not_once_per_propose
         logger.remove(sink)
 
     assert len([m for m in messages if "usher similar --rebuild" in m]) == 1
+
+
+# -- stored rows ------------------------------------------------------------
+
+# The fingerprint a stored record carries. Any 32 characters will do: this provider
+# reads the cards and never compares a recipe.
+_RECIPE = "c" * 32
+
+
+async def _store(library: Library, seed_id: uuid.UUID, card_ids: Sequence[uuid.UUID]) -> None:
+    """One seed's stored row, saved through the port as the scheduled job saves it."""
+    built = days_ago(1)
+    await library.seed_rows.save(
+        SeedRow(
+            seed_title_id=seed_id,
+            cards=tuple(
+                SeedRowCard(title_id=one, sources=frozenset({CardSource.NAMED})) for one in card_ids
+            ),
+            built_at=built,
+            built_recipe=_RECIPE,
+            attempted_at=built,
+            attempt_outcome=SeedRowOutcome.BUILT,
+            attempt_recipe=_RECIPE,
+        )
+    )
+
+
+async def _card_titles(library: Library, name: str) -> list[uuid.UUID]:
+    """Exactly enough titles for a stored row, which is the smallest one that exists."""
+    return [await library.title(f"{name} card {index}") for index in range(MIN_SEED_ROW_CARDS)]
+
+
+async def _finished_seed(library: Library, name: str, *, at: float) -> uuid.UUID:
+    seed_id = await library.title(name)
+    await library.finished(seed_id, at=days_ago(at))
+    return seed_id
+
+
+async def _shown(library: Library, row: object) -> list[uuid.UUID]:
+    """The title ids a proposed row builds, in the order it shows them."""
+    assert isinstance(row, BecauseYouWatchedRow)
+    return [card.title_id for card in (await row.build(library.context())).cards]
+
+
+async def test_a_seed_with_a_stored_row_uses_its_cards_in_stored_order() -> None:
+    """The stored order is the answer, and it beats `title_neighbors` for the same seed.
+
+    The cards are stored in the reverse of the order they were minted, so a row that
+    sorted them, or hydrated through the store's physical order, would come back
+    ascending. The seed also carries neighbours of its own, none of which is a card:
+    a row that merged the two, or preferred them, would show one.
+    """
+    library = Library()
+    seed_id, neighbour_ids = await _seed_with_neighbours(library, "Solaris", at=2)
+    stored = list(reversed(await _card_titles(library, "Solaris")))
+    assert stored != sorted(stored), "the premise: stored order is not id order"
+    await _store(library, seed_id, stored)
+
+    rows = await BecauseYouWatchedProvider().propose(library.context())
+
+    assert [one.row.slug for one in rows] == [f"because-you-watched-{seed_id}"]
+    shown = await _shown(library, rows[0].row)
+    assert shown == stored
+    assert not set(shown) & set(neighbour_ids)
+
+
+async def test_a_seed_with_no_stored_row_falls_back_to_title_neighbors() -> None:
+    """Per seed: the seed with a stored row and the seed without one sit on one screen."""
+    library = Library()
+    stored_seed, _ = await _seed_with_neighbours(library, "Arrival", at=1)
+    await _store(library, stored_seed, await _card_titles(library, "Arrival"))
+    bare_seed, bare_neighbours = await _seed_with_neighbours(library, "Brazil", at=2)
+    assert bare_seed not in await library.seed_rows.list_for([bare_seed]), (
+        "the premise: Brazil has no stored row"
+    )
+
+    rows = await BecauseYouWatchedProvider().propose(library.context())
+
+    assert [one.row.slug for one in rows] == [
+        f"because-you-watched-{stored_seed}",
+        f"because-you-watched-{bare_seed}",
+    ]
+    assert await _shown(library, rows[1].row) == bare_neighbours
+
+
+@pytest.mark.parametrize("outcome", [SeedRowOutcome.TOO_FEW, SeedRowOutcome.UNUSABLE])
+async def test_a_seed_whose_record_is_only_a_failed_attempt_falls_back(
+    outcome: SeedRowOutcome,
+) -> None:
+    """A record with no cards is a ledger of a try, and nothing a screen can show."""
+    library = Library()
+    seed_id, neighbour_ids = await _seed_with_neighbours(library, "Stalker", at=1)
+    await library.seed_rows.save(
+        SeedRow(
+            seed_title_id=seed_id,
+            attempted_at=days_ago(1),
+            attempt_outcome=outcome,
+            attempt_recipe=_RECIPE,
+        )
+    )
+    assert (await library.seed_rows.list_for([seed_id]))[seed_id].cards == (), (
+        "the premise: the record is stored and holds no cards"
+    )
+
+    rows = await BecauseYouWatchedProvider().propose(library.context())
+
+    assert await _shown(library, rows[0].row) == neighbour_ids
+
+
+async def test_stored_rows_show_even_when_title_neighbors_was_never_built() -> None:
+    """A stored row needs no neighbour table, and says nothing about one.
+
+    Both halves: the row appears, and the "run `usher similar --rebuild`" warning
+    does not, because nothing here needed `title_neighbors`.
+    """
+    library = Library()
+    seed_id = await _finished_seed(library, "Dune", at=1)
+    cards = await _card_titles(library, "Dune")
+    await _store(library, seed_id, cards)
+    assert await library.neighbors.computed_at() is None, "the premise: nothing was ever built"
+
+    messages: list[str] = []
+    sink = logger.add(messages.append, level="WARNING", format="{message}")
+    try:
+        rows = await BecauseYouWatchedProvider().propose(library.context())
+    finally:
+        logger.remove(sink)
+
+    assert await _shown(library, rows[0].row) == cards
+    assert not [m for m in messages if "usher similar --rebuild" in m]
+
+
+async def test_a_seed_without_a_stored_row_still_warns_when_neighbors_were_never_built() -> None:
+    """The other seed on the screen is exactly what the warning is for."""
+    library = Library()
+    stored_seed = await _finished_seed(library, "Arrival", at=1)
+    await _store(library, stored_seed, await _card_titles(library, "Arrival"))
+    await _finished_seed(library, "Brazil", at=2)
+
+    messages: list[str] = []
+    sink = logger.add(messages.append, level="WARNING", format="{message}")
+    try:
+        rows = await BecauseYouWatchedProvider().propose(library.context())
+    finally:
+        logger.remove(sink)
+
+    assert [one.row.slug for one in rows] == [f"because-you-watched-{stored_seed}"]
+    assert len([m for m in messages if "usher similar --rebuild" in m]) == 1
+
+
+async def test_a_stored_row_says_because_you_watched() -> None:
+    """Decision 7: the "Similar genres" wording describes the metadata-only blend.
+
+    A stored row is not that blend, so it keeps the stronger sentence on a deployment
+    with no embedder. The fallback row beside it keeps the weaker one.
+    """
+    library = Library()
+    stored_seed = await _finished_seed(library, "Dune", at=1)
+    await _store(library, stored_seed, await _card_titles(library, "Dune"))
+    bare_seed, _ = await _seed_with_neighbours(library, "Zodiac", at=2)
+
+    rows = await BecauseYouWatchedProvider(semantic=False).propose(library.context())
+
+    assert [one.row.slug for one in rows] == [
+        f"because-you-watched-{stored_seed}",
+        f"because-you-watched-{bare_seed}",
+    ]
+    assert rows[0].row.reason == "Because you watched Dune."
+    assert rows[1].row.reason == "Similar genres and themes to Zodiac."
+
+
+async def test_the_overlap_rule_applies_to_stored_rows() -> None:
+    """Two seeds whose stored cards are the same shelf are one row, and the newer wins."""
+    library = Library()
+    shared = await _card_titles(library, "Shared")
+    first = await _finished_seed(library, "Sequel", at=1)
+    second = await _finished_seed(library, "Original", at=2)
+    third = await _finished_seed(library, "Unrelated", at=3)
+    await _store(library, first, shared)
+    await _store(library, second, list(reversed(shared)))
+    other = await _card_titles(library, "Other")
+    await _store(library, third, other)
+    assert set(shared).isdisjoint(other), "the premise: the third shelf shares nothing"
+
+    rows = await BecauseYouWatchedProvider().propose(library.context())
+
+    assert [one.row.slug for one in rows] == [
+        f"because-you-watched-{first}",
+        f"because-you-watched-{third}",
+    ]
+
+
+async def test_a_stored_card_whose_title_was_deleted_is_dropped() -> None:
+    """A row stored last week can name a title deleted yesterday, and that is not a 500."""
+    library = Library()
+    seed_id = await _finished_seed(library, "Stalker", at=1)
+    cards = await _card_titles(library, "Stalker")
+    gone = uuid.uuid4()
+    await _store(library, seed_id, [gone, *cards[1:]])
+
+    rows = await BecauseYouWatchedProvider().propose(library.context())
+
+    shown = await _shown(library, rows[0].row)
+    assert shown == cards[1:]
+    assert gone not in shown
+
+
+@pytest.mark.parametrize("stored", [True, False], ids=["stored", "fallback"])
+async def test_watched_cards_are_marked_and_unwatched_ones_are_not(stored: bool) -> None:
+    """The mark is on the card, for both sources, and a series counts through its episodes."""
+    library = Library()
+    seed_id = await _finished_seed(library, "Solaris", at=1)
+    series_id = await library.series("A Series Of Which One Episode Was Seen")
+    await library.episode(series_id, season=1, number=1, played=True)
+    cards = [series_id, *await _card_titles(library, "Solaris")]
+    watched = [cards[1], cards[3]]
+    for one in watched:
+        await library.finished(one, at=days_ago(400))
+    unwatched = [one for one in cards if one not in watched and one != series_id]
+    assert watched and unwatched, "the premise: both kinds of card are on the shelf"
+    if stored:
+        await _store(library, seed_id, cards[: MIN_SEED_ROW_CARDS + 1])
+    else:
+        await _neighbours(library, seed_id, cards)
+
+    rows = await BecauseYouWatchedProvider().propose(library.context())
+    built = await rows[0].row.build(library.context())
+
+    played = {card.title_id: card.played for card in built.cards}
+    assert set(played) == set(cards)
+    assert {one for one, mark in played.items() if mark} == {series_id, *watched}
+    assert not any(played[one] for one in unwatched)
+
+
+async def test_the_watched_mark_costs_one_read_per_propose(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Three rows, one `played_title_ids`, covering every card, and `build` adds none."""
+    library = Library()
+    stored_seed = await _finished_seed(library, "Arrival", at=1)
+    await _store(library, stored_seed, await _card_titles(library, "Arrival"))
+    await _seed_with_neighbours(library, "Brazil", at=2)
+    await _seed_with_neighbours(library, "Cache", at=3)
+    reads: list[list[uuid.UUID]] = []
+    real = library.watch_states.played_title_ids
+
+    async def counting(user_id: uuid.UUID, title_ids: Sequence[uuid.UUID]) -> set[uuid.UUID]:
+        reads.append(list(title_ids))
+        return await real(user_id, title_ids)
+
+    monkeypatch.setattr(library.watch_states, "played_title_ids", counting)
+
+    rows = await BecauseYouWatchedProvider().propose(library.context())
+    assert len(rows) == 3, "the premise: three rows are on the screen"
+    shown = [await _shown(library, one.row) for one in rows]
+
+    assert len(reads) == 1
+    assert set(reads[0]) == {title_id for row in shown for title_id in row}
+
+
+async def test_a_screen_with_no_rows_reads_no_watch_marks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one read is for the rows chosen, so none chosen is none read."""
+    library = Library()
+    thin = await _finished_seed(library, "Thin", at=1)
+    await _neighbours(library, thin, [await library.title("Only neighbour")])
+    reads: list[Sequence[uuid.UUID]] = []
+    real = library.watch_states.played_title_ids
+
+    async def counting(user_id: uuid.UUID, title_ids: Sequence[uuid.UUID]) -> set[uuid.UUID]:
+        reads.append(title_ids)
+        return await real(user_id, title_ids)
+
+    monkeypatch.setattr(library.watch_states, "played_title_ids", counting)
+
+    assert await BecauseYouWatchedProvider().propose(library.context()) == []
+    assert reads == []
+
+
+@pytest.mark.parametrize(("stored", "fallback"), [(2, 1), (0, 2), (3, 0)])
+async def test_the_span_counts_stored_and_fallback_rows(stored: int, fallback: int) -> None:
+    """Two numbers that say whether the scheduled job is reaching the household's screen."""
+    library = Library()
+    for index in range(stored):
+        seed_id = await _finished_seed(library, f"Stored {index}", at=index + 1)
+        await _store(library, seed_id, await _card_titles(library, f"Stored {index}"))
+    for index in range(fallback):
+        await _seed_with_neighbours(library, f"Bare {index}", at=stored + index + 1)
+    exporter = InMemorySpanExporter()
+    tracing = TracerProvider()
+    tracing.add_span_processor(SimpleSpanProcessor(exporter))
+
+    with tracing.get_tracer(__name__).start_as_current_span("propose"):
+        rows = await BecauseYouWatchedProvider().propose(library.context())
+
+    assert len(rows) == stored + fallback, "the premise: every seed made a row"
+    spans = exporter.get_finished_spans()
+    assert len(spans) == 1, "the harness recorded no span, so this proves nothing"
+    assert spans[0].attributes is not None
+    assert spans[0].attributes["usher.home.because_you_watched.stored"] == stored
+    assert spans[0].attributes["usher.home.because_you_watched.fallback"] == fallback
