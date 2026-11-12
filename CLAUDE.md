@@ -216,7 +216,7 @@ functions entirely** — see `.claude/rules/db-and-sql.md` before trusting it.
 
 ### The CLI
 
-`usher` is a console script; `python -m usher` is the same code path. 21
+`usher` is a console script; `python -m usher` is the same code path. 22
 subcommands — `uv run usher --help` is authoritative.
 
 ```bash
@@ -234,6 +234,7 @@ uv run usher schedule [--once]                  # scheduled batches whose period
 uv run usher backup [--output OUTPUT]           # everything nothing else can rebuild, one file
 uv run usher restore [--dry-run] [--skip-unresolvable] <artifact>
 uv run usher rotate-secret --new-key-env VAR    # the variable's NAME, never the key
+uv run usher set-credentials --source NAME_OR_ID --username-env VAR --password-env VAR  # the variables' NAMES
 uv sync --extra embedding                       # optional: fastembed, 167 MiB, no torch
 ```
 

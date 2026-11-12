@@ -98,10 +98,12 @@ says nothing about a source left out of step by a parked write-back.
 - **`PushSupervisor` resets its failure counter on *delivery*, not on
   connection, and any frame is delivery** — a buffering proxy connects perfectly
   every time, so a reset on connection means PRD 08's "mark `supports_push =
-  false` after N failures" never fires, and a reset on *events* parks an idle
-  library, whose frames are `Sessions` mapping to none. `_streak` compares
-  `push_messages_received` across a connection, so N empty stale-outs in a row
-  still park it: N stale limits of unbroken silence is what reads as broken.
+  false` after N failures" never fires, and a reset on *events* marks an idle
+  library unavailable, whose frames are `Sessions` mapping to none. `_streak`
+  compares `push_messages_received` across a connection, so N empty stale-outs
+  in a row still mark it unavailable: N stale limits of unbroken silence is what
+  reads as broken. The lane keeps trying either way; only `SourceNotSupported`
+  ends it.
 - **`ItemsRemoved` fires on a library from which nothing was removed**, so
   retract only what `confirm_gone` reports `gone`, or one refresh marks a present file
   unavailable. **One `Ids` listing names one version of a version group**

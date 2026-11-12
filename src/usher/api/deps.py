@@ -330,13 +330,13 @@ def get_source_service(
     adapters: Annotated[SourceAdapterFactory, Depends(get_source_adapter_factory)],
     lanes: LaneSupervisorDep,
 ) -> SourceService:
-    """The service, plus the *running lane's* push health.
+    """The service, plus the *lane's* push health.
 
     `SourceStatus.push_available` is never a probe of a throwaway socket: a
     handshake against a nonexistent path also upgrades, so the handshake is not
     the answer. The lane's own adapter holds a message ledger, and that is what
-    an operator reads. `None` when no lane is running for that source, which is
-    "not probed" rather than "push is broken".
+    an operator reads. `None` when no lane adapter is open for that source,
+    which is "not probed" rather than "push is broken".
     """
     return SourceService(sources, credentials, adapters, lanes.push_available)
 

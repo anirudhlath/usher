@@ -108,7 +108,7 @@ grep -rhn '^class .*BaseModel' src/usher/api/dto/ | grep -v 'Response\|Request'
   workers never steal live claims. `def startup` is gone; the greps are prose.
 - **`SourceStatus` refuses "push available without authenticated" and
   `dataclasses.replace` re-runs `__post_init__`**, so `_with_lane_push_health`
-  (`services/sources.py:166`) takes the lane's answer only when authenticated.
+  (`services/sources.py`) takes the lane's answer only when authenticated.
 - **Set `USHER_PUSH_ENABLED=false` and `USHER_WORKER_ENABLED=false` for a
   bounded live run** — otherwise a websocket and a gap closer decide the count.
 - **`push_gap_min_interval_seconds` bounds how *often* the gap is closed, not
@@ -183,8 +183,8 @@ grep -rhn '^class .*BaseModel' src/usher/api/dto/ | grep -v 'Response\|Request'
 ## The worker lane
 
 - **The lane builds the worker once per *process***, lazily inside the loop
-  (`if worker is None`, `api/lanes.py:623`), because `_user_id()` is a database
-  call and `start()` must connect to nothing. Rule at `api/lanes.py:595`.
+  (`WorkerLoop.pass_once`'s `if self._built is None`), because `_user_id()` is
+  a database call and `start()` must connect to nothing. Rule at `WorkerLoop`.
 - **`SourceRegistry` holds only the adapter cache** and takes the scope's
   pipeline as an argument (`bound(pipeline)`) — a signature, not a convention.
 - **Adapter construction is double-checked-locked**, re-read inside the lock; a

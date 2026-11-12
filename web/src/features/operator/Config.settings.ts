@@ -610,7 +610,8 @@ export const CONFIG: readonly SettingRow[] = [
     key: 'USHER_PUSH_MAX_CONSECUTIVE_FAILURES',
     group: 'lanes',
     def: '5',
-    about: 'After this many, supports_push is set false and the nightly walk carries the source.',
+    about:
+      'After this many failures in a row, supports_push is set false and one ERROR is logged; the lane keeps trying.',
     secret: false,
     measured: false,
   },

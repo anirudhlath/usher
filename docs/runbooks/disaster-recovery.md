@@ -262,7 +262,7 @@ two restore lines as the sanctioned replacement for a step that no longer works.
 
 - [ ] The artifact **and** the `USHER_SECRET_KEY` it was taken under are both in
       hand. Without the key every source credential restores unreadable,
-      and you re-enter each one by hand.
+      and you re-enter each source's login with `usher set-credentials`.
 - [ ] `USHER_DATABASE_URL` is exported and names the **new** database. Do not
       rely on `.env`.
 - [ ] `alembic upgrade head`, then `SELECT version_num FROM alembic_version`

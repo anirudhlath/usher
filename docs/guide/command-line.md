@@ -1,8 +1,9 @@
 # Command line
 
 Most operator work can also be driven from the `usher` command. Managing
-sources and row-provider settings, playback, and watch writes are API-only. In
-the compose stack, run it inside the container:
+sources and row-provider settings, playback, and watch writes are API-only,
+apart from storing a source's new password. In the compose stack, run it inside
+the container:
 
 ```sh
 docker compose exec usher usher <command>
@@ -36,7 +37,7 @@ on the host, publish a different host port.
 | Run background work | `work`, `schedule` |
 | Search and similarity | `search`, `suggest`, `index`, `similar`, `derive`, `genres` |
 | Home screen and curation | `home`, `curate` |
-| Backup and secrets | `backup`, `restore`, `rotate-secret` |
+| Backup and secrets | `backup`, `restore`, `rotate-secret`, `set-credentials` |
 | Measure quality | `eval` |
 
 **Errors are short.** When something you can fix goes wrong, a command exits 1
@@ -312,6 +313,27 @@ docker compose exec -e USHER_NEW_SECRET_KEY usher usher rotate-secret --new-key-
 
 Follow the [rotation runbook](../runbooks/rotation.md): changing `.env` first
 leaves credentials nothing can decrypt.
+
+`usher set-credentials --source NAME_OR_ID --username-env VAR --password-env VAR`
+stores a new username and password for one source, for example after the
+password was changed on the media server. Like `rotate-secret`, it takes the
+*names* of two exported variables, never the values, and prints neither.
+`--source` takes the source's id, as `GET /admin/sources` lists it, or its name
+exactly as registered. Two sources can share a name, and then the name is
+refused and the id is how you say which one you mean. The source keeps its id
+and its rows, and a disabled source can be updated too. In the compose stack,
+read both into your shell, export them (not into `.env`), and forward them with
+`-e`; `read -s` keeps the password off the screen and out of your history:
+
+```bash
+read -r SOURCE_USERNAME && export SOURCE_USERNAME
+read -rs SOURCE_PASSWORD && export SOURCE_PASSWORD
+docker compose exec -e SOURCE_USERNAME -e SOURCE_PASSWORD usher usher set-credentials --source "Living Room Emby" --username-env SOURCE_USERNAME --password-env SOURCE_PASSWORD
+docker compose restart usher
+```
+
+Restart Usher afterwards, as the last line does: running push lanes and the
+worker keep using the old password until they start again.
 
 ## Measuring quality
 

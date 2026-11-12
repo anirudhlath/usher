@@ -57,9 +57,9 @@ Any received frame counts as liveness; on an idle library `Sessions` is the
 only thing keeping `push_available` true, and those come minutes apart.
 `push_stale_after_seconds` defaults to 300 s: a channel silent that long is
 reconnected, and a run of reconnects that each stay silent marks push
-unavailable ([08](08-operations.md)) — at the defaults, about 25 minutes of
-unbroken silence. `usher.source.push.reconnects` shows a household where the
-window is too tight.
+unavailable while the lane goes on reconnecting ([08](08-operations.md)) — at
+the defaults, about 25 minutes of unbroken silence.
+`usher.source.push.reconnects` shows a household where the window is too tight.
 
 **No admin privileges are required** — a normal user token works. Not required
 is not prevented: `POST /admin/sources` ([07](07-client-api.md)) takes whatever
@@ -79,7 +79,8 @@ Operational requirements:
   on reconnect to recover anything missed while disconnected.
 - **Fall back cleanly.** A reverse proxy that does not forward `Upgrade`
   returns 404 instead of 101. If the socket cannot be established the adapter
-  reports `supports_push = false` and the reconciler covers the gap.
+  reports `supports_push = false` and the lane keeps retrying; a connection that
+  returns closes the gap with its delta.
 
 **Push health is judged on received messages**, never on a successful upgrade.
 
@@ -194,9 +195,13 @@ plan expected. `usher sync-status` prints the same under each of a source's
 five most recent runs, and lists a live whole-library walk those leave out
 after them; every `sync.progress` frame carries it ([07](07-client-api.md)).
 
-`push_available` is three-valued: `null` ("not probed") when no push lane is
-running for the source, otherwise the live answer — a connection *and* at least
-one received message *and* a recent one. The status check opens no socket.
+`push_available` is three-valued: `null` ("not probed") when the status check
+could not authenticate (`authenticated: false`), when the source has no push
+lane, or from the first refresh of the push lanes after its lane ended because
+the source has no push channel (before that refresh, a check that authenticates
+answers `false`); otherwise the live answer — a connection *and* at least one
+received message *and* a recent one — which for a crashed lane is `false` until
+it restarts. The status check opens no socket.
 
 The on-demand answer is `usher push --probe`, which opens a channel on purpose,
 listens for one `push_stale_after_seconds` window, and reports **what arrived**
