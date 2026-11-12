@@ -393,11 +393,13 @@ class LaneSupervisor:
             gap_min_interval_seconds=self._settings.push_gap_min_interval_seconds,
         )
         self._lanes[source.id] = asyncio.create_task(
-            self._guard(source, supervisor.run(source, adapter)),
+            self._guard(source, supervisor, adapter),
             name=f"usher.lane.push.{source.name}",
         )
 
-    async def _guard(self, source: Source, lane: Awaitable[None]) -> None:
+    async def _guard(
+        self, source: Source, supervisor: PushSupervisor, adapter: SourceAdapter
+    ) -> None:
         """One crashed lane costs its own source and nothing else, and not for good.
 
         `PushSupervisor.run` never raises a `UsherPortError`; what escapes it is a
@@ -407,9 +409,13 @@ class LaneSupervisor:
 
         The crash is recorded, and `refresh` starts the lane again on a new adapter
         at the first refresh at least `push_max_backoff_seconds` later.
+
+        `run` is called here, inside the task, rather than handed in as a coroutine: a
+        lane cancelled before its first step -- by a `stop()` straight after the refresh
+        that launched it -- then never builds one, so none is left unawaited.
         """
         try:
-            await lane
+            await supervisor.run(source, adapter)
         except asyncio.CancelledError:
             raise
         except Exception as exc:

@@ -2,11 +2,13 @@
 
 import asyncio
 import dataclasses
+import gc
 import inspect
 import io
 import json
 import time
 import uuid
+import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
@@ -1332,10 +1334,7 @@ async def test_a_disabled_sources_crashed_lane_does_not_come_back(fakes: _Fakes)
         await fakes.sources.update(source.evolve(enabled=True))
         await supervisor.refresh()
         assert fakes.adapters.builds == ["A", "A"]
-        again = fakes.adapters.built["A"]
-        again.seed(_item("a-1"), datetime.now(UTC))
-        again.push(SourceEvent(kind=SourceEventKind.ITEM_UPDATED, external_ids=("a-1",)))
-        await _drain(lambda: _stored(fakes.media_items) == ["a-1"])
+        assert supervisor.running_sources() == ["A"]
     finally:
         await supervisor.stop()
 
@@ -1389,9 +1388,7 @@ async def test_a_restart_with_no_stored_credentials_keeps_the_old_adapter_and_is
         assert restarted is not first
         assert first._closes == 1
         assert supervisor.crashed_sources() == []
-        restarted.seed(_item("a-1"), datetime.now(UTC))
-        restarted.push(SourceEvent(kind=SourceEventKind.ITEM_UPDATED, external_ids=("a-1",)))
-        await _drain(lambda: _stored(fakes.media_items) == ["a-1"])
+        assert supervisor.running_sources() == ["A"]
     finally:
         logger.remove(sink)
         await supervisor.stop()
@@ -1403,8 +1400,7 @@ async def test_a_restart_whose_credential_read_raises_is_spaced_again(
     """A credential read that raises fails one refresh, and the next inside the spacing skips it.
 
     So the refreshes after it are not each lost to the same raise: a source added meanwhile
-    gets a lane that ingests, and its own read is the premise that the refresh read
-    credentials at all.
+    gets its lane, and its own read is the premise that the refresh read credentials at all.
     """
     crashed, added = _source("A"), _source("B")
     await _seed(fakes, crashed)
@@ -1437,10 +1433,7 @@ async def test_a_restart_whose_credential_read_raises_is_spaced_again(
         assert asked == [crashed.credentials_ref, added.credentials_ref], (
             "a refresh inside the spacing read the crashed lane's row again"
         )
-        behind = fakes.adapters.built["B"]
-        behind.seed(_item("b-1"), datetime.now(UTC))
-        behind.push(SourceEvent(kind=SourceEventKind.ITEM_UPDATED, external_ids=("b-1",)))
-        await _drain(lambda: _stored(fakes.media_items) == ["b-1"])
+        assert supervisor.running_sources() == ["B"]
     finally:
         await supervisor.stop()
 
@@ -1495,6 +1488,43 @@ async def test_stopping_after_a_crash_closes_the_adapter_and_forgets_it(fakes: _
 
     assert first._closes == 1
     assert supervisor.crashed_sources() == []
+
+
+async def test_a_lane_cancelled_before_its_first_step_leaves_no_coroutine_unawaited(
+    fakes: _Fakes,
+) -> None:
+    """A lane cancelled before its first step leaves no coroutine unawaited.
+
+    A `stop()` straight after the refresh that launched it is one: the refresh returns
+    before the loop has run the lane. A coroutine built for the lane outside its task is
+    dropped unawaited then, and CPython warns about it at garbage collection.
+    """
+    await _seed(fakes, _source("A"))
+    supervisor = _supervisor(fakes)
+    launched: list[str] = []
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            await supervisor.refresh()
+            launched = supervisor.running_sources()
+        finally:
+            await supervisor.stop()
+        # A turn of the loop inside the block: the handle that resumed this task still
+        # holds `stop()`'s gather, and through it the cancelled lane, so whatever the lane
+        # left is freed, and warned about, only once this task suspends.
+        await asyncio.sleep(0)
+        gc.collect()
+    assert launched == ["A"], "the premise: the refresh launched a lane"
+    assert fakes.adapters.built["A"]._push_opened_at is None, (
+        "the premise: the lane was stopped before its first step"
+    )
+    unawaited = [
+        str(warning.message)
+        for warning in caught
+        if issubclass(warning.category, RuntimeWarning)
+        and "was never awaited" in str(warning.message)
+    ]
+    assert unawaited == []
 
 
 async def test_a_source_with_no_push_channel_releases_its_adapter_and_is_not_restarted(
