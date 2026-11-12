@@ -861,8 +861,8 @@ class ReconcileService:
 
         The chunks hold their rows and the job rows they enqueue until the run commits, so a push
         writing those rows can deadlock with them, and Postgres aborts one. A sweep's run closes as
-        abandoned and the next full walk sweeps again; a push lane stays down until Usher restarts
-        or its source is disabled and enabled again.
+        abandoned and the next full walk sweeps again; a push lane crashes and comes back after
+        `USHER_PUSH_MAX_BACKOFF_SECONDS`.
         """
         run = progress.run
         if kind is not SyncRunKind.FULL:

@@ -1,12 +1,13 @@
 """The server process's background lanes (PRD 01's concurrency model)."""
 
 import asyncio
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 from loguru import logger
-from opentelemetry import trace
+from opentelemetry import metrics, trace
 from opentelemetry.context import Context
 from opentelemetry.trace import Link
 
@@ -46,6 +47,10 @@ from usher.telemetry import (
 )
 
 _tracer = trace.get_tracer("usher.rows")
+_meter = metrics.get_meter("usher.push")
+_lane_crashes = _meter.create_counter(
+    "usher.source.push.crashes", unit="1", description="Push lanes that crashed, by source"
+)
 
 # How long the worker lane waits after a pass that claimed nothing. Not a
 # setting, for the reason `usher.cli`'s copy is not: it is the polling floor of
@@ -69,6 +74,7 @@ class LaneSupervisor:
         refreshes: RefreshQueue | None = None,
         sessions: SessionFactory | None = None,
         idle_seconds: float = IDLE_SLEEP_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._settings = settings
         self._work = unit_of_work
@@ -101,9 +107,16 @@ class LaneSupervisor:
         # Injected only so a test can run several worker passes without spending
         # five seconds each. Nothing in `src/` passes it.
         self._idle_seconds = idle_seconds
+        # The clock a crashed lane's spacing is counted on, injected for the same
+        # reason: a case stands on the spacing's boundary instead of waiting it out.
+        self._clock = clock
         self._lanes: dict[uuid.UUID, asyncio.Task[None]] = {}
         self._names: dict[uuid.UUID, str] = {}
         self._open_adapters: dict[uuid.UUID, SourceAdapter] = {}
+        # When each crashed lane crashed, or last tried to start again, on `self._clock`.
+        # A lane that ended because its source has no push channel has no entry: it
+        # did not crash, and it is not restarted.
+        self._crashed_at: dict[uuid.UUID, float] = {}
         self._worker: asyncio.Task[None] | None = None
         self._refresher: asyncio.Task[None] | None = None
         self._rows_lane: asyncio.Task[None] | None = None
@@ -179,6 +192,7 @@ class LaneSupervisor:
         if self._scheduler is not None:
             await self._scheduler.stop()
         self._lanes.clear()
+        self._crashed_at.clear()
         self._worker = None
         self._refresher = None
         self._rows_lane = None
@@ -194,17 +208,16 @@ class LaneSupervisor:
         )
 
     def crashed_sources(self) -> list[str]:
-        """Lanes whose task has finished, which is not a state a healthy lane reaches.
+        """Lanes that crashed and have not yet been restarted.
 
-        `PushSupervisor.run` returns only after the failure ceiling, and `_guard`
-        catches everything else.
+        `_guard` records the crash, and `refresh` starts the lane again at the first
+        refresh at least `push_max_backoff_seconds` later. A lane that ended because
+        its source has no push channel did not crash and is not named.
 
         Reported so a case can tell "the lane crashed" from "the lane was never
         started", which `running_sources()` alone cannot.
         """
-        return sorted(
-            self._names[source_id] for source_id, task in self._lanes.items() if task.done()
-        )
+        return sorted(self._names[source_id] for source_id in self._crashed_at)
 
     def worker_running(self) -> bool:
         return self._worker is not None and not self._worker.done()
@@ -281,7 +294,7 @@ class LaneSupervisor:
     def push_available(self, source_id: uuid.UUID) -> bool | None:
         """What `GET /admin/sources/{id}/status` reports.
 
-        `None` when no lane is running for that source -- "not probed", a different
+        `None` when no adapter is open for that source -- "not probed", a different
         answer from "push is broken" and the honest one.
         """
         adapter = self._open_adapters.get(source_id)
@@ -292,8 +305,10 @@ class LaneSupervisor:
     async def refresh(self) -> None:
         """Start a lane for every enabled source that has none.
 
-        Lanes of sources that have gone or been disabled are dropped, and a lane
-        that has finished **releases its adapter** without being restarted.
+        Lanes of sources that have gone or been disabled are dropped. A lane that
+        ended because its source has no push channel **releases its adapter** without
+        being restarted, and a crashed one starts again on a new adapter at the first
+        refresh at least `push_max_backoff_seconds` after the crash or its last try.
         """
         async with self._work() as pipeline:
             wanted = {source.id: source for source in await selected_sources(pipeline)}
@@ -301,10 +316,15 @@ class LaneSupervisor:
                 if source_id not in wanted:
                     await self._stop_lane(source_id)
             for source_id, task in list(self._lanes.items()):
-                # `task.done()` is the whole predicate, and the only thing between
-                # this and releasing a *live* lane's adapter mid-stream.
-                if task.done():
+                # `task.done()` is the only thing between this and releasing, or
+                # replacing, a *live* lane's adapter mid-stream.
+                if not task.done():
+                    continue
+                crashed_at = self._crashed_at.get(source_id)
+                if crashed_at is None:
                     await self._release_adapter(source_id)
+                elif self._clock() - crashed_at >= self._settings.push_max_backoff_seconds:
+                    await self._restart_lane(pipeline, wanted[source_id])
             for source_id, source in wanted.items():
                 if source_id not in self._lanes:
                     await self._start_lane(pipeline, source)
@@ -333,6 +353,34 @@ class LaneSupervisor:
             # Logged by `open_adapter`, and deliberately not fatal: an
             # operator with three sources needs the other two to run.
             return
+        self._launch(source, adapter)
+
+    async def _restart_lane(self, pipeline: Pipeline, source: Source) -> None:
+        """Start a crashed lane again on a new adapter, then close the old one.
+
+        **Re-spaced before the open**, so a credential row that is gone or cannot be
+        read is tried again a whole spacing later -- not on every refresh, each one a
+        WARNING or a stack, in front of the sources behind it. `None` keeps the old
+        adapter and its finished task, so the push gauge reads 0.
+
+        **Launched before the old adapter closes**, so a close that fails leaves the
+        new lane running and `_refresh_loop` to log the failure.
+        """
+        self._crashed_at[source.id] = self._clock()
+        adapter = await open_adapter(pipeline, source)
+        if adapter is None:
+            return
+        del self._crashed_at[source.id]
+        old = self._open_adapters[source.id]
+        self._launch(source, adapter)
+        await old.aclose()
+
+    def _launch(self, source: Source, adapter: SourceAdapter) -> None:
+        """Run a lane on an adapter that is already open.
+
+        Synchronous, so a restart puts the new lane and its adapter in place of the
+        old ones with no suspension in between.
+        """
         self._names[source.id] = source.name
         self._open_adapters[source.id] = adapter
         supervisor = PushSupervisor(
@@ -350,22 +398,28 @@ class LaneSupervisor:
         )
 
     async def _guard(self, source: Source, lane: Awaitable[None]) -> None:
-        """One crashed lane costs its own source and nothing else.
+        """One crashed lane costs its own source and nothing else, and not for good.
 
-        `PushSupervisor.run` never raises a `UsherPortError`; anything that
-        escapes it is a bug, and a bug in one source's lane must not take
-        the other sources' lanes -- or the HTTP server -- down with it. A
-        single `TaskGroup` over every lane would do exactly that.
+        `PushSupervisor.run` never raises a `UsherPortError`; what escapes it is a
+        bug or a failed database write, and one source's lane must not take the
+        other sources' lanes -- or the HTTP server -- down with it. A single
+        `TaskGroup` over every lane would do exactly that.
+
+        The crash is recorded, and `refresh` starts the lane again on a new adapter
+        at the first refresh at least `push_max_backoff_seconds` later.
         """
         try:
             await lane
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            self._crashed_at[source.id] = self._clock()
+            _lane_crashes.add(1, {"source": source.name})
             logger.exception(
-                "the push lane for {source} crashed and will not restart until the "
-                "next refresh: {error}",
+                "the push lane for {source} crashed and restarts at the first refresh at "
+                "least {wait:.0f} s from now: {error}",
                 source=source.name,
+                wait=self._settings.push_max_backoff_seconds,
                 error=str(exc),
             )
 
@@ -374,6 +428,8 @@ class LaneSupervisor:
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        # After the gather, so a lane that crashes on its way out leaves no record.
+        self._crashed_at.pop(source_id, None)
         await self._release_adapter(source_id)
 
     async def _release_adapter(self, source_id: uuid.UUID) -> None:
@@ -384,8 +440,8 @@ class LaneSupervisor:
         `push_source_refresh_seconds` for the life of the process -- and `aclose`
         is idempotent on both implementations, so nothing would say so.
 
-        Shared with `_stop_lane` deliberately: a source whose lane is stopped and
-        one whose lane finished on its own must release the adapter the same way.
+        Shared with `_stop_lane` deliberately: a source whose lane is stopped and one
+        whose lane ended for want of a push channel must release the adapter the same way.
         """
         adapter = self._open_adapters.pop(source_id, None)
         if adapter is not None:
