@@ -148,6 +148,8 @@ class FakeTitleEmbeddingRepository(TitleEmbeddingRepository):
         keywords: Sequence[str] = (),
         model_name: str = "fake:test-embedding",
         genome: Sequence[float] | None = None,
+        tmdb_vote_count: int | None = None,
+        enrichment_state: EnrichmentState = EnrichmentState.ENRICHED,
     ) -> Title:
         """Seed one embedded title, its tag sets, and its vector."""
         title = Title(
@@ -157,7 +159,8 @@ class FakeTitleEmbeddingRepository(TitleEmbeddingRepository):
             sort_name=f"title {title_id}",
             genres=tuple(genres),
             keywords=tuple(keywords),
-            enrichment_state=EnrichmentState.ENRICHED,
+            tmdb_vote_count=tmdb_vote_count,
+            enrichment_state=enrichment_state,
         )
         self.titles = [existing for existing in self.titles if existing.id != title_id]
         self.titles.append(title)
@@ -258,6 +261,29 @@ class FakeTitleEmbeddingRepository(TitleEmbeddingRepository):
             scored.sort(key=lambda pair: (pair[0], pair[1].title_id))
             answer[seed_id] = [candidate for _, candidate in scored[: max(limit, 0)]]
         return answer
+
+    async def nearest_known(
+        self, seed_id: uuid.UUID, *, min_votes: int, limit: int
+    ) -> list[uuid.UUID]:
+        row = self.rows.get(seed_id)
+        if row is None or row.embedding is None:
+            return []
+        scored: list[tuple[float, uuid.UUID]] = []
+        for title in self._embedded():
+            candidate_row = self.rows[title.id]
+            if title.id == seed_id or candidate_row.embedding is None:
+                continue
+            # The catalog's copy when there is one: a caller that updated a title there
+            # has changed what the real join would read.
+            known = (await self._catalog.get(title.id) if self._catalog else None) or title
+            if known.enrichment_state is EnrichmentState.SKELETON:
+                continue
+            if (known.tmdb_vote_count or 0) < min_votes:
+                continue
+            scored.append((_distance(row.embedding, candidate_row.embedding), title.id))
+        # `(distance, title_id)`, as the statement's `ORDER BY` is.
+        scored.sort()
+        return [title_id for _, title_id in scored[: max(limit, 0)]]
 
     def _genome_cosine(self, seed_id: uuid.UUID, candidate_id: uuid.UUID) -> float | None:
         """The pair's genome cosine, or `None` when **either** side has no row.

@@ -77,6 +77,9 @@ from usher.ports.repository.search_query import (
     SearchQueryRecord,
     SearchQueryRepository,
 )
+from usher.ports.repository.seed_row import (
+    SeedRowRepository,
+)
 from usher.ports.repository.source import (
     SourceRepository,
 )
@@ -94,6 +97,7 @@ from usher.ports.repository.title import (
     BrowseCursorPosition,
     BrowseFacets,
     BrowseSort,
+    NamedTitle,
     TitleGenres,
     TitleRepository,
 )
@@ -131,6 +135,7 @@ __all__ = [
     "LLMCallRepository",
     "LibraryGenres",
     "MediaItemRepository",
+    "NamedTitle",
     "NeighborCandidate",
     "NeighborSeed",
     "OwnedCollection",
@@ -145,6 +150,7 @@ __all__ = [
     "ScoredNeighbor",
     "SearchQueryRecord",
     "SearchQueryRepository",
+    "SeedRowRepository",
     "SourceRepository",
     "StoredEmbedding",
     "StoredTaste",

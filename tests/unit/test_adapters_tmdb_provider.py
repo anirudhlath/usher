@@ -143,6 +143,11 @@ class _Server:
             return httpx.Response(200, json=self._changes(request, first=[90000550, 90090210]))
         if path == "/3/tv/changes":
             return httpx.Response(200, json=self._changes(request, first=[90001399]))
+        # Matched before the detail prefixes below, which would otherwise answer a
+        # recommendations request with a whole movie or series payload.
+        if path.endswith("/recommendations"):
+            name = "recommendations_tv" if path.startswith("/3/tv/") else "recommendations_movie"
+            return httpx.Response(200, json=load_tmdb_fixture(name))
         if path == "/3/search/movie":
             return httpx.Response(200, json=load_tmdb_fixture("search_movie"))
         if path == "/3/search/tv":
@@ -557,6 +562,120 @@ async def test_a_non_numeric_ref_value_is_malformed_rather_than_a_bad_url() -> N
             await provider.fetch(
                 ProviderRef(provider="tmdb", value="unknown", kind=TitleKind.MOVIE)
             )
+    assert server.paths() == []
+
+
+# -- recommendations ------------------------------------------------------
+
+_MOVIE_SEED = ProviderRef(provider="tmdb", value="90000001", kind=TitleKind.MOVIE)
+_SERIES_SEED = ProviderRef(provider="tmdb", value="90000002", kind=TitleKind.SERIES)
+
+
+async def test_recommendations_read_the_first_page_of_the_movie_endpoint() -> None:
+    """One request for page one, and the provider's order comes back untouched.
+
+    The fixture's order is deliberately neither by id, by popularity nor by name, so a
+    sort anywhere between the wire and the caller is visible. Each premise is asserted
+    first: editing the fixture into one of those orders disarms the ordering check
+    without touching a line of code.
+    """
+    fixture = load_tmdb_fixture("recommendations_movie")["results"]
+    ids = [one["id"] for one in fixture]
+    popularity = [one["popularity"] for one in fixture]
+    names = [one["title"] for one in fixture]
+    assert ids != sorted(ids)
+    assert popularity != sorted(popularity) and popularity != sorted(popularity, reverse=True)
+    assert names != sorted(names)
+
+    server = _Server()
+    provider, http = _provider(server)
+    async with http:
+        found = await provider.recommendations(_MOVIE_SEED)
+
+    assert server.paths() == ["/3/movie/90000001/recommendations"]
+    assert server.requests[0].url.params["page"] == "1"
+    assert [one.provider_id for one in found] == ids
+    assert [one.name for one in found] == names
+    assert {one.kind for one in found} == {TitleKind.MOVIE}
+    assert [one.popularity for one in found] == popularity
+    # `release_date` for a film, and an empty date is no year rather than a failure.
+    assert [one.year for one in found] == [1999, 2003, 1975, None]
+
+
+async def test_a_series_reads_the_tv_endpoint() -> None:
+    """A series seed asks `/tv/...`, and its candidates are named from `name`/`first_air_date`."""
+    fixture = load_tmdb_fixture("recommendations_tv")["results"]
+    ids = [one["id"] for one in fixture]
+    assert ids != sorted(ids)
+    assert all("title" not in one and "release_date" not in one for one in fixture)
+
+    server = _Server()
+    provider, http = _provider(server)
+    async with http:
+        found = await provider.recommendations(_SERIES_SEED)
+
+    assert server.paths() == ["/3/tv/90000002/recommendations"]
+    assert server.requests[0].url.params["page"] == "1"
+    assert [one.provider_id for one in found] == ids
+    assert [one.name for one in found] == [one["name"] for one in fixture]
+    assert {one.kind for one in found} == {TitleKind.SERIES}
+    assert [one.year for one in found] == [2011, 2016, None]
+
+
+async def test_recommendations_are_one_request_and_never_the_second_page() -> None:
+    """The fixture advertises more pages, and the provider still stops after the first.
+
+    Premise first: `total_pages` above 1, or "never asks for page two" is satisfied by a
+    feed that has none.
+    """
+    assert load_tmdb_fixture("recommendations_movie")["total_pages"] > 1
+    server = _Server()
+    provider, http = _provider(server)
+    async with http:
+        await provider.recommendations(_MOVIE_SEED)
+    assert len(server.requests) == 1
+
+
+async def test_a_provider_with_no_entity_at_the_ref_is_malformed() -> None:
+    """A 404 is `PortDataMalformed`, as `fetch` documents, and the request was made.
+
+    The request is asserted so the refusal cannot be one made before asking: TMDb is the
+    only authority on which ids it still serves.
+    """
+    server = _Server()
+    server.status_for["/3/movie/90000001/recommendations"] = 404
+    provider, http = _provider(server)
+    async with http:
+        with pytest.raises(PortDataMalformed):
+            await provider.recommendations(_MOVIE_SEED)
+    assert server.paths() == ["/3/movie/90000001/recommendations"]
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        pytest.param(ProviderRef(provider="tmdb", value="90000001", kind=None), id="no-kind"),
+        pytest.param(
+            ProviderRef(provider="imdb", value="tt99000020", kind=TitleKind.MOVIE),
+            id="other-provider",
+        ),
+        pytest.param(
+            ProviderRef(provider="tmdb", value="unknown", kind=TitleKind.MOVIE), id="non-numeric"
+        ),
+    ],
+)
+async def test_a_ref_with_no_kind_is_refused_not_guessed(ref: ProviderRef) -> None:
+    """A ref this provider cannot serve is malformed, and costs no request.
+
+    The kind-less ref is the dangerous one: ids are live in both spaces, so guessing
+    `/movie/{id}/recommendations` for a series seed returns real recommendations for an
+    unrelated film. The other two are the same refusal `fetch` makes.
+    """
+    server = _Server()
+    provider, http = _provider(server)
+    async with http:
+        with pytest.raises(PortDataMalformed):
+            await provider.recommendations(ref)
     assert server.paths() == []
 
 

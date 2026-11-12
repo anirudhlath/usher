@@ -76,7 +76,7 @@ _NO_CALL_OF_ITS_OWN: dict[str, str] = {
 #: is stated in both directions rather than as a subset.
 _PACED_THROUGH_ANOTHER_MODULE: dict[str, str] = {
     "usher.adapters.tmdb.provider": (
-        "its `self._client` is a `TmdbClient`, not an `httpx.AsyncClient` -- six calls "
+        "its `self._client` is a `TmdbClient`, not an `httpx.AsyncClient` -- seven calls "
         "through Usher's own client, which is where the bucket and the httpx import both "
         "live. This is the row that makes the module census and the httpx-import census "
         "different sets rather than one set counted twice"
@@ -437,7 +437,7 @@ def test_the_module_census_is_the_one_the_records_quote() -> None:
         "the module census moved, so `docs/prd/01-architecture.md`'s table and this file's "
         f"docstring are both now quoting a different tree: {sorted(modules)}"
     )
-    assert len(_call_sites()) == 16, (
+    assert len(_call_sites()) == 17, (
         "the httpx call-site count moved -- PRD 01 prints it, so it is corrected there "
         "in the same commit as the adapter that changed it"
     )
@@ -503,6 +503,7 @@ _WORDS: dict[int, str] = {
     9: "nine",
     10: "ten",
     16: "sixteen",
+    17: "seventeen",
 }
 
 #: The header row of the census table in `docs/prd/01-architecture.md`. Scoped

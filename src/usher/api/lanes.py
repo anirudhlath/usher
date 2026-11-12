@@ -144,7 +144,15 @@ class LaneSupervisor:
         if self._settings.scheduler_enabled:
             # **Off by default, unlike the two switches above**, so an existing app
             # fixture does not have to grow a third `scheduler_enabled=False`.
-            self._scheduler = build_scheduler(self._settings, sessions=self._sessions)
+            # The process's own client and provider, never new ones: the seed-row job
+            # is registered only where this process already holds a client.
+            self._scheduler = build_scheduler(
+                self._settings,
+                sessions=self._sessions,
+                client=self._client,
+                metadata=self._provider,
+                user_id=self._user_id,
+            )
             # Registered here rather than unconditionally in `create_app`: with no
             # scheduler there is no snapshot to read, and "no reader, no observation"
             # keeps a scheduler-less process from publishing a series about jobs it

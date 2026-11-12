@@ -57,6 +57,7 @@ from usher.db.repositories.search import (
     PostgresTitleNeighborRepository,
 )
 from usher.db.repositories.search_query import PostgresSearchQueryRepository
+from usher.db.repositories.seed_row import PostgresSeedRowRepository
 from usher.db.repositories.source import PostgresSourceRepository
 from usher.db.repositories.sync import PostgresRawPayloadStore, PostgresSyncRunRepository
 from usher.db.repositories.taste import PostgresTasteRepository
@@ -91,6 +92,7 @@ from usher.ports.repository import (
     PersonRepository,
     RawPayloadStore,
     RowProviderSettingsRepository,
+    SeedRowRepository,
     SourceRepository,
     SyncRunRepository,
     TasteRepository,
@@ -142,6 +144,7 @@ from usher.services.scheduler import (
     SearchQueryScope,
 )
 from usher.services.search import SearchAnalytics, SearchQueryBuffer, SearchService
+from usher.services.seed_rows import SeedRowJob, SeedRowScope, SeedRowService
 from usher.services.similar import (
     NeighborRebuildJob,
     SimilarityScope,
@@ -227,6 +230,9 @@ class Pipeline:
     # dependencies -- `CuratedProvider` reads `list_for_user` through the context and a
     # CLI that could not fill that field would compose a screen the route does not.
     curated_rows: CuratedRowRepository
+    # `BecauseYouWatchedProvider` reads it through the context, so `usher home` and the
+    # `rows.refresh` lane need it on the pipeline as they need `curated_rows`.
+    seed_rows: SeedRowRepository
     # M8's cost ledger. Write-only from here -- nothing in `src/` reads it
     # back, and PRD 10's spend dashboards are SQL against the table -- so it
     # is on the pipeline for the reason every other port is: `services/` may
@@ -332,6 +338,7 @@ def build_pipeline(
     neighbors = PostgresTitleNeighborRepository(session)
     taste_rows = PostgresTasteRepository(session)
     curated_rows = PostgresCuratedRowRepository(session)
+    seed_rows = PostgresSeedRowRepository(session)
     llm_calls = PostgresLLMCallRepository(session)
     queue = PostgresJobQueue(
         session,
@@ -379,6 +386,7 @@ def build_pipeline(
         neighbors=neighbors,
         taste_rows=taste_rows,
         curated_rows=curated_rows,
+        seed_rows=seed_rows,
         llm_calls=llm_calls,
         people=people,
         credits=credits,
@@ -795,10 +803,60 @@ def similarity_scope(
     )
 
 
+def seed_row_service(
+    session: AsyncSession,
+    settings: Settings,
+    *,
+    client: LLMClient,
+    metadata: MetadataProvider | None,
+) -> SeedRowService:
+    """One session's repositories plus the process's completion client and provider.
+
+    `session.commit` is the ledger's commit, and it covers the record each build saves
+    just before it.
+    """
+    return SeedRowService(
+        titles=PostgresTitleRepository(session),
+        embeddings=PostgresTitleEmbeddingRepository(session),
+        watch_states=PostgresWatchStateRepository(session),
+        rows=PostgresSeedRowRepository(session),
+        calls=PostgresLLMCallRepository(session),
+        client=client,
+        metadata=metadata,
+        commit=session.commit,
+        model=settings.llm_model,
+        now=lambda: datetime.now(UTC),
+    )
+
+
+def seed_row_scope(
+    sessions: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    *,
+    client: LLMClient,
+    metadata: MetadataProvider | None,
+) -> SeedRowScope:
+    """One `SeedRowService` per use, committing nothing on exit: each build commits itself."""
+    return scope(
+        sessions,
+        lambda session: seed_row_service(session, settings, client=client, metadata=metadata),
+        commit=False,
+    )
+
+
 def build_scheduler(
-    settings: Settings, *, sessions: async_sessionmaker[AsyncSession] | None
+    settings: Settings,
+    *,
+    sessions: async_sessionmaker[AsyncSession] | None,
+    client: LLMClient | None = None,
+    metadata: MetadataProvider | None = None,
+    user_id: Callable[[], Awaitable[uuid.UUID]] | None = None,
 ) -> Scheduler:
-    """The scheduled-work loop and its registry."""
+    """The scheduled-work loop and its registry.
+
+    The seed-row job uses the client and provider the calling process already holds, so
+    it is registered only where there is a client and a household to build for.
+    """
     scheduler = Scheduler(tick_seconds=settings.scheduler_tick_seconds)
     if sessions is not None:
         scheduler.register(
@@ -818,6 +876,14 @@ def build_scheduler(
                 period=timedelta(hours=settings.similar_rebuild_period_hours),
             )
         )
+        if client is not None and user_id is not None:
+            scheduler.register(
+                SeedRowJob(
+                    seed_row_scope(sessions, settings, client=client, metadata=metadata),
+                    user_id=user_id,
+                    now=lambda: datetime.now(UTC),
+                )
+            )
     return scheduler
 
 
@@ -1155,7 +1221,7 @@ def _load_embedder(settings: Settings) -> Embedder:
 
 
 def build_row_context(pipeline: Pipeline, user: User) -> RowContext:
-    """The thirteen values a row may reach, over one unit of work.
+    """The fourteen values a row may reach, over one unit of work.
 
     `api/deps.py` assembles the same context from request-scoped dependencies
     and `usher home` from a command's one session; this is the third caller --
@@ -1184,6 +1250,7 @@ def build_row_context(pipeline: Pipeline, user: User) -> RowContext:
         collections=pipeline.collections,
         affinities=lambda: pipeline.taste.genre_affinity(user.id),
         curated=pipeline.curated_rows,
+        seed_rows=pipeline.seed_rows,
         images=pipeline.images,
     )
 
@@ -2054,6 +2121,8 @@ __all__ = [
     "run_bootstrap",
     "search_query_buffer",
     "search_query_scope",
+    "seed_row_scope",
+    "seed_row_service",
     "selected_sources",
     "source_gates",
     "unit_of_work",

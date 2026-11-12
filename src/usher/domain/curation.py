@@ -30,6 +30,7 @@ class LLMPurpose(StrEnum):
 
     CURATION = "curation"
     QUERY_EXPANSION = "query_expansion"
+    BECAUSE_YOU_WATCHED = "because_you_watched"
 
 
 class CuratedRow(DomainModel):

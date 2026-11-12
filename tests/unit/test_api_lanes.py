@@ -42,6 +42,7 @@ from tests.fakes.search_index import (
     FakeSearchIndex,
     FakeSuggestIndex,
 )
+from tests.fakes.seed_row_repository import FakeSeedRowRepository
 from tests.fakes.source_adapter import FakeSourceAdapter
 from tests.fakes.source_repository import FakeSourceRepository
 from tests.fakes.sync_run_repository import FakeSyncRunRepository
@@ -492,6 +493,9 @@ def _pipeline(
         # `rows=pipeline.curated_rows` and a generation replaces the household's shelves
         # through it.
         curated_rows=FakeCuratedRowRepository(),
+        # The `rows.refresh` lane builds a `RowContext` from this pipeline, and
+        # `BecauseYouWatchedProvider` reads the record through it.
+        seed_rows=FakeSeedRowRepository(),
         # Over the port double for the same reason, one table over. The
         # worker lane *does* reach this one whenever it holds an
         # `LLMClient` -- `build_curation_service` writes the cost ledger

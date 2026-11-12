@@ -377,6 +377,9 @@ def collection_from_payload(payload: Mapping[str, Any]) -> Collection | None:
 def search_candidates(body: Mapping[str, Any], kind: TitleKind) -> list[MetadataCandidate]:
     """One `/search/movie` or `/search/tv` page -> candidates.
 
+    `/{movie,tv}/{id}/recommendations` answers in the same result shape, so
+    `recommendations` reads its page through here too.
+
     `kind` is the caller's, not the payload's: TMDb's two search endpoints
     each return one space and neither labels its results. `/search/multi`
     does label them, and supports neither endpoint's year filter — which is
