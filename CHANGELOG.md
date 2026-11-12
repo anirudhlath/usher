@@ -10,6 +10,13 @@ Versioning is `0.x` while the wire contract may still move —
 
 ### Added
 
+- **`usher set-credentials` stores a source's new username and password.** It
+  reads them from the exported environment variables its `--username-env` and
+  `--password-env` flags name, and refuses a credential typed on the command
+  line. `--source` takes the source's name or its id. On a `set-credentials` or
+  `rotate-secret` command line, the argument parser's refusals quote no
+  argument. Running push lanes and the worker's cached adapters keep the old
+  password until Usher restarts, so restart it afterwards.
 - Listing pages adapt. Each source's pages start at `USHER_SOURCE_PAGE_SIZE`
   and double while a doubling hands items over at least 10% faster per walker,
   up to the new `USHER_SOURCE_PAGE_SIZE_MAX` (default 10,000). After the first
@@ -144,6 +151,16 @@ Versioning is `0.x` while the wire contract may still move —
 
 ### Fixed
 
+- **The push lane comes back by itself.** After
+  `USHER_PUSH_MAX_CONSECUTIVE_FAILURES` failures in a row it marks push
+  unavailable and keeps trying, at most `USHER_PUSH_MAX_BACKOFF_SECONDS` apart,
+  where it used to stop until Usher restarted or the source was disabled and
+  enabled again. A rejected login marks push unavailable at once and waits a
+  day before trying again, and its ERROR line names `usher set-credentials`. A
+  lane that crashes, on a bug or a database write that failed, starts again on
+  a new adapter at the first refresh at least `USHER_PUSH_MAX_BACKOFF_SECONDS`
+  later. Until then `/health/ready` names its source in `lanes.crashed_sources`,
+  and the counter `usher.source.push.crashes` counts the crashes.
 - **Every version of a title now plays as itself.** Reading one version of a
   group answered with the group's best file, so a copy could describe and stream
   another version's. A copy now takes its description and its stream from its
@@ -214,8 +231,8 @@ Versioning is `0.x` while the wire contract may still move —
   library where nothing is changing, Emby's only messages are `Sessions` frames
   minutes apart, and those never reset the lane's failure count, so a few quiet
   spells — however far apart — marked push unavailable until a restart. Any
-  message now counts as delivery, so only unbroken silence parks the lane: about
-  25 minutes of it at the defaults.
+  message now counts as delivery, so on a quiet library only unbroken silence
+  marks push unavailable: about 25 minutes of it at the defaults.
 
 ## [0.1.0] - 2026-09-24
 
