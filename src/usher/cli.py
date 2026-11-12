@@ -1459,7 +1459,7 @@ class _Unquoted(str):
 
 
 class _Parser(argparse.ArgumentParser):
-    """`ArgumentParser`, quoting no argument of a command line that names a secret command.
+    """`ArgumentParser`, quoting nothing typed in a refusal while `_QUOTING_NOTHING` is set.
 
     `add_subparsers` builds every subparser from this class too, so the scrub reaches a
     subcommand's own refusals as well as the top level's. It fails closed: a refusal

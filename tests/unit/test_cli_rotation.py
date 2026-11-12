@@ -1,6 +1,5 @@
 """`usher rotate-secret` -- its argument surface, its dispatch arm, its report."""
 
-import argparse
 import os
 import re
 
@@ -159,24 +158,35 @@ def test_a_name_that_is_not_an_environment_variable_name_is_refused_without_bein
     assert "environment variable" in seen
 
 
-def test_an_unrecognised_argument_names_its_value_on_every_command_except_this_one(
+def test_an_unrecognised_argument_is_named_unless_the_line_names_a_secret_command(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The scrub is scoped, and the control is what says so.
+    """The scrub is scoped to a line naming a secret command, and the control says so.
 
-    argparse's *"unrecognized arguments: %s"* is how an operator fixes a typo,
-    so it is kept verbatim everywhere else. It is suppressed on
-    `rotate-secret` alone, where an unrecognised value is most likely a key.
+    argparse's *"unrecognized arguments: %s"* is how an operator fixes a typo, so it
+    is kept verbatim on a line naming neither `rotate-secret` nor `set-credentials`.
+    Each of those counts its own unknowns instead, since an unknown there is most
+    likely a key or a password, and the control's refusal is scrubbed once its line
+    names one of them too.
     """
     configured(monkeypatch)
 
     _, elsewhere = merged(["backup", "--nonsense", NEW_KEY])
     assert "unrecognized arguments" in elsewhere
-    assert NEW_KEY in elsewhere, "the control: other commands still name what they refused"
+    assert NEW_KEY in elsewhere, "the control: a line naming no secret command names the value"
 
-    _, here = merged(["rotate-secret", "--nonsense", NEW_KEY, "--new-key-env", VAR])
-    assert "unrecognized arguments for rotate-secret" in here
-    assert NEW_KEY not in here
+    _, naming = merged(["backup", "set-credentials", "--nonsense", NEW_KEY])
+    assert "an argument was refused and is not shown" in naming
+    assert NEW_KEY not in naming, "one name anywhere on the line scrubs the whole refusal"
+
+    _, rotation = merged(["rotate-secret", "--nonsense", NEW_KEY, "--new-key-env", VAR])
+    assert "unrecognized arguments for rotate-secret" in rotation
+    assert NEW_KEY not in rotation
+
+    rest = ["--source", "a source", "--username-env", "U", "--password-env", "P"]
+    _, credentials = merged(["set-credentials", "--nonsense", NEW_KEY, *rest])
+    assert "unrecognized arguments for set-credentials" in credentials
+    assert NEW_KEY not in credentials
 
 
 #: The two subcommands whose arguments are secrets, or names standing in for them.
@@ -218,19 +228,10 @@ def _every_subcommand() -> list[str]:
 
 
 def _rotate_secret_help() -> str:
-    """The `rotate-secret` subparser's own help.
-
-    Not `build_parser().format_help()`, which lists subcommand *names* and no
-    option of any of them -- so an assertion about `--new-key` against it
-    passes whatever the subparser declares.
-    """
-    subparsers = next(
-        action
-        for action in build_parser()._actions
-        if isinstance(action, argparse._SubParsersAction)
-    )
-    parser = subparsers.choices["rotate-secret"]
-    return str(parser.format_help())
+    """`usher rotate-secret --help`, read the way an operator reads it."""
+    code, seen = merged(["rotate-secret", "--help"])
+    assert code == 0, seen
+    return seen
 
 
 def test_the_key_itself_is_absent_from_argv_and_from_the_parsed_namespace(
