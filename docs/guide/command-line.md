@@ -287,16 +287,18 @@ docker compose exec -e USHER_NEW_SECRET_KEY usher usher rotate-secret --new-key-
 Follow the [rotation runbook](../runbooks/rotation.md): changing `.env` first
 leaves credentials nothing can decrypt.
 
-`usher set-credentials --source NAME --username-env VAR --password-env VAR`
+`usher set-credentials --source NAME_OR_ID --username-env VAR --password-env VAR`
 stores a new username and password for one source, for example after the
 password was changed on the media server. Like `rotate-secret`, it takes the
 *names* of two exported variables, never the values, and prints neither.
-`--source` is the source's name exactly as registered. The source keeps its id
+`--source` takes the source's id, as `GET /admin/sources` lists it, or its name
+exactly as registered. Two sources can share a name, and then the name is
+refused and the id is how you say which one you mean. The source keeps its id
 and its rows, and a disabled source can be updated too. In the compose stack,
 read both into your shell, export them (not into `.env`), and forward them with
 `-e`; `read -s` keeps the password off the screen and out of your history:
 
-```sh
+```bash
 read -r SOURCE_USERNAME && export SOURCE_USERNAME
 read -rs SOURCE_PASSWORD && export SOURCE_PASSWORD
 docker compose exec -e SOURCE_USERNAME -e SOURCE_PASSWORD usher usher set-credentials --source "Living Room Emby" --username-env SOURCE_USERNAME --password-env SOURCE_PASSWORD

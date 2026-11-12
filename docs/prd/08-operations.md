@@ -168,9 +168,11 @@ cursors are not signed with this key.
 
 **The new key is read from the environment, never from an argument.**
 `--new-key-env` takes the *name* of an exported variable. `--new-key` is
-refused, and no refusal prints the key back. A well-formed variable name that is
-unset is echoed, so an operator who forgot the `export` sees which variable was
-looked for.
+refused, and no refusal prints the key back, wherever on the command line it
+was typed: a refusal from the argument parser on a line naming `rotate-secret`
+repeats no value, before the subcommand or after it. A well-formed variable
+name that is unset is echoed, so an operator who forgot the `export` sees which
+variable was looked for.
 
 ⚠️ **Export it; do not add it to `.env`.** An exported `USHER_NEW_SECRET_KEY`
 is invisible to `Settings`; the same name written into `.env` makes every entry
@@ -210,13 +212,21 @@ uv run usher set-credentials --source "Living Room Emby" \
 **The login is read from the environment, never from an argument.**
 `--username-env` and `--password-env` take the *names* of two exported
 variables. `--username` and `--password` are refused, and no refusal repeats
-any argument — not a value, not a variable's name and not the `--source` name.
-A variable that is unset or empty is refused before the database is read.
+any argument — not a value, not a variable's name and not what `--source` was
+given — wherever on the command line it was typed, before the subcommand or
+after it. A variable that is unset or empty is refused before the database is
+read.
 
 **It overwrites the source's stored login**, under the current
-`USHER_SECRET_KEY`. The source keeps its id and every row that refers to it.
-`--source` matches a source's name exactly, a disabled source's included; a name
-matching no source, or more than one, is refused and nothing is written.
+`USHER_SECRET_KEY` and without reading the login it replaces, so a login stored
+under a key the deployment no longer holds is replaced too. The source keeps
+its id and every row that refers to it.
+
+**`--source` takes a source's id, as `GET /admin/sources` lists it, or its exact
+name.** A value that parses as a UUID is matched as an id, and anything else as
+a name. Either finds a disabled source too. A value matching no source is
+refused, and so is a name more than one source has, with the advice to pass the
+id instead; a refusal writes nothing.
 
 **It prints neither value.** On success it names the source and says to
 restart. It attempts no login, so a wrong password shows up at the source's

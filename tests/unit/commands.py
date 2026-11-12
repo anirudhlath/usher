@@ -1,6 +1,8 @@
 """Driving a `usher` subcommand in a unit test, with no database and no socket."""
 
+import contextlib
 import inspect
+import io
 from typing import Any
 
 import pytest
@@ -17,6 +19,25 @@ def configured(monkeypatch: pytest.MonkeyPatch) -> None:
     """The two variables `Settings` has no default for."""
     monkeypatch.setenv("USHER_DATABASE_URL", UNREACHABLE)
     monkeypatch.setenv("USHER_SECRET_KEY", "0" * 32)
+
+
+def merged(argv: list[str]) -> tuple[object, str]:
+    """Run `main` and return its exit code beside **everything an operator sees**.
+
+    Stdout, stderr and the `SystemExit` string, joined by newlines so that a case can
+    assert a whole line. argparse refuses on stderr and a command through `SystemExit`,
+    so a case reading only one of them can watch a value go past on the other.
+    """
+    out, err = io.StringIO(), io.StringIO()
+    code: object = 0
+    message = ""
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            main(argv)
+    except SystemExit as exc:
+        code = exc.code
+        message = "" if isinstance(exc.code, int) or exc.code is None else str(exc.code)
+    return code, "\n".join((out.getvalue(), err.getvalue(), message))
 
 
 def dispatched(

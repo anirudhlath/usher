@@ -1,15 +1,13 @@
 """`usher rotate-secret` -- its argument surface, its dispatch arm, its report."""
 
 import argparse
-import contextlib
-import io
 import os
 import re
 
 import pytest
 from pydantic import SecretStr
 
-from tests.unit.commands import configured, dispatched
+from tests.unit.commands import configured, dispatched, merged
 from usher.cli import _new_secret_key, _print_rotation_report, build_parser, main, parse_args
 from usher.config import Settings
 from usher.services.rotation import RotationReport
@@ -48,25 +46,6 @@ HEX_KEY_THAT_IS_A_LEGAL_NAME = "f72e4ec32beea584456a" + "a" * 44
 BASE64_KEY = "aB3/xY+9zQ7wE1rT2uI5oP8kL0jH6gF4dS2aZ1xC3v=="
 
 
-def _merged(argv: list[str]) -> tuple[object, str]:
-    """Run `main` and return its exit code beside **everything an operator sees**.
-
-    Stdout, stderr and the `SystemExit` string, concatenated: argparse writes its
-    refusals to stderr and this command writes its own to `SystemExit`, so a case
-    reading only one of them can watch a key go past on the other.
-    """
-    out, err = io.StringIO(), io.StringIO()
-    code: object = 0
-    message = ""
-    try:
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            main(argv)
-    except SystemExit as exc:
-        code = exc.code
-        message = "" if isinstance(exc.code, int) or exc.code is None else str(exc.code)
-    return code, out.getvalue() + err.getvalue() + message
-
-
 def test_rotate_secret_takes_a_variable_name_and_never_a_key() -> None:
     """The acceptance criterion, run through the real parser.
 
@@ -97,7 +76,7 @@ def test_a_key_passed_as_new_key_is_refused_and_never_appears_anywhere(
     argv = ["rotate-secret", "--new-key", NEW_KEY]
     assert NEW_KEY in argv, "the premise: the key really is in this invocation"
 
-    code, seen = _merged(argv)
+    code, seen = merged(argv)
 
     assert code == 2
     assert NEW_KEY not in seen
@@ -129,7 +108,7 @@ def test_an_abbreviation_cannot_bind_a_value_into_the_variable_name(
         ["rotate-secret", "--newkey", NEW_KEY, "--new-key-env", VAR],
     ):
         assert NEW_KEY in argv
-        code, seen = _merged(argv)
+        code, seen = merged(argv)
         assert code == 2, argv
         assert NEW_KEY not in seen, argv
 
@@ -154,7 +133,7 @@ def test_a_key_given_to_the_variable_flag_itself_is_refused_without_being_echoed
     ).secret_key
     assert accepted.get_secret_value() == HEX_KEY_THAT_IS_A_LEGAL_NAME
 
-    code, seen = _merged(["rotate-secret", "--new-key-env", HEX_KEY_THAT_IS_A_LEGAL_NAME])
+    code, seen = merged(["rotate-secret", "--new-key-env", HEX_KEY_THAT_IS_A_LEGAL_NAME])
 
     assert code != 0
     assert HEX_KEY_THAT_IS_A_LEGAL_NAME not in seen
@@ -173,7 +152,7 @@ def test_a_name_that_is_not_an_environment_variable_name_is_refused_without_bein
     configured(monkeypatch)
     assert not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", BASE64_KEY), "the premise"
 
-    code, seen = _merged(["rotate-secret", "--new-key-env", BASE64_KEY])
+    code, seen = merged(["rotate-secret", "--new-key-env", BASE64_KEY])
 
     assert code != 0
     assert BASE64_KEY not in seen
@@ -191,34 +170,51 @@ def test_an_unrecognised_argument_names_its_value_on_every_command_except_this_o
     """
     configured(monkeypatch)
 
-    _, elsewhere = _merged(["backup", "--nonsense", NEW_KEY])
+    _, elsewhere = merged(["backup", "--nonsense", NEW_KEY])
     assert "unrecognized arguments" in elsewhere
     assert NEW_KEY in elsewhere, "the control: other commands still name what they refused"
 
-    _, here = _merged(["rotate-secret", "--nonsense", NEW_KEY, "--new-key-env", VAR])
+    _, here = merged(["rotate-secret", "--nonsense", NEW_KEY, "--new-key-env", VAR])
     assert "unrecognized arguments for rotate-secret" in here
     assert NEW_KEY not in here
 
 
-def test_prefix_matching_is_off_for_this_command_and_on_for_every_other(
+#: The two subcommands whose arguments are secrets, or names standing in for them.
+SECRET_COMMANDS = {"rotate-secret", "set-credentials"}
+
+
+def test_prefix_matching_is_off_for_both_secret_commands_and_on_for_every_other(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The blast radius of `allow_abbrev=False`, pinned rather than left to a comment.
+    """The blast radius of `allow_abbrev=False`, pinned for every subcommand there is.
 
     It is set per subparser -- a subparser does **not** inherit it from the parser that
-    created it -- so this command's three option strings lose prefix matching, as do
-    `set-credentials`', and every other command keeps it.
+    created it. `--hel` is the probe because every subparser has `--help`: with prefix
+    matching on it *is* `--help` and prints that command's help, and with it off it is
+    an unknown flag and the command refuses. The list is read off `usher --help`, so a
+    subcommand added later is covered without anybody remembering to add it here.
     """
     configured(monkeypatch)
+    commands = _every_subcommand()
+    assert set(commands) > SECRET_COMMANDS, "the premise: both exist, and are not all there is"
 
-    # Off here: an abbreviation of the one real flag no longer parses.
-    with pytest.raises(SystemExit):
-        parse_args(["rotate-secret", "--new-key-e", VAR])
+    for command in commands:
+        code, seen = merged([command, "--hel"])
+        # The help string of `-h` itself, which a refusal's usage line does not carry.
+        helped = "show this help message and exit" in seen
+        if command in SECRET_COMMANDS:
+            assert (code, helped) == (2, False), command
+        else:
+            assert (code, helped) == (0, True), command
 
-    # On everywhere else: `usher backup --out` still means `--output`.
-    assert parse_args(["backup", "--out", "usher-backup.jsonl.gz"]).output.name == (
-        "usher-backup.jsonl.gz"
-    )
+
+def _every_subcommand() -> list[str]:
+    """Every subcommand, read off the `{serve,bootstrap,...}` group `usher --help` prints."""
+    code, seen = merged(["--help"])
+    assert code == 0
+    group = re.search(r"\{([a-z,-]+)\}", seen)
+    assert group is not None, seen
+    return group.group(1).split(",")
 
 
 def _rotate_secret_help() -> str:

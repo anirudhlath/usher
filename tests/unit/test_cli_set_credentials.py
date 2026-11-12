@@ -3,16 +3,13 @@
 No refusal repeats an argument, because a password can be a legal variable name.
 """
 
-import argparse
-import contextlib
-import io
 import os
 import re
 
 import pytest
 
-from tests.unit.commands import configured, dispatched
-from usher.cli import build_parser, main, parse_args
+from tests.unit.commands import configured, dispatched, merged
+from usher.cli import parse_args
 
 #: What a correct invocation names. A refusal repeats none of the three: the
 #: command cannot tell which of its arguments an operator got wrong.
@@ -43,24 +40,6 @@ VALID = [
     "--password-env",
     PASSWORD_VAR,
 ]
-
-
-def _merged(argv: list[str]) -> tuple[object, str]:
-    """Run `main` and return its exit code beside everything an operator sees.
-
-    `test_cli_rotation.py`'s helper, joined by newlines so that a case can assert a
-    whole line: argparse refuses on stderr and this command through `SystemExit`.
-    """
-    out, err = io.StringIO(), io.StringIO()
-    code: object = 0
-    message = ""
-    try:
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            main(argv)
-    except SystemExit as exc:
-        code = exc.code
-        message = "" if isinstance(exc.code, int) or exc.code is None else str(exc.code)
-    return code, "\n".join((out.getvalue(), err.getvalue(), message))
 
 
 def _repeated(seen: str, *values: str) -> list[str]:
@@ -144,7 +123,7 @@ def test_a_credential_on_the_command_line_is_refused_and_not_repeated(
     argv = [*VALID, *tokens]
     assert any(value in token for token in argv), "the premise: the value really is in argv"
 
-    code, seen = _merged(argv)
+    code, seen = merged(argv)
 
     assert code == 2
     assert _tripwire(flag) in seen.splitlines()
@@ -174,7 +153,7 @@ def test_an_abbreviated_flag_is_unrecognised_and_not_repeated(
     """
     _exported(monkeypatch)
 
-    code, seen = _merged([*VALID, *tokens])
+    code, seen = merged([*VALID, *tokens])
 
     assert code == 2
     assert _unrecognised(len(tokens)) in seen.splitlines()
@@ -192,7 +171,7 @@ def test_an_unrecognised_value_is_counted_and_not_repeated(
     """
     _exported(monkeypatch)
 
-    code, seen = _merged([*VALID, *values])
+    code, seen = merged([*VALID, *values])
 
     assert code == 2
     assert _unrecognised(len(values)) in seen.splitlines()
@@ -208,7 +187,7 @@ def test_a_value_that_is_no_variable_name_is_refused_and_not_repeated(
     _exported(monkeypatch)
     assert not re.fullmatch(LEGAL_NAME, value), "the premise: this is no variable name"
 
-    code, seen = _merged(_argv_with(flag, value))
+    code, seen = merged(_argv_with(flag, value))
 
     assert code == _not_a_name(flag)
     assert _repeated(seen, value) == []
@@ -222,7 +201,7 @@ def test_a_value_beginning_with_a_hyphen_is_refused_either_way_and_not_repeated(
     _exported(monkeypatch)
     value = "-my-pass"
 
-    code, seen = _merged(_argv_with(flag, value))
+    code, seen = merged(_argv_with(flag, value))
 
     assert code == 2
     assert f"usher set-credentials: error: argument {flag}: expected one argument" in (
@@ -230,7 +209,7 @@ def test_a_value_beginning_with_a_hyphen_is_refused_either_way_and_not_repeated(
     )
     assert _repeated(seen, value) == []
 
-    code, seen = _merged(_argv_with(flag, value, joined=True))
+    code, seen = merged(_argv_with(flag, value, joined=True))
 
     assert code == _not_a_name(flag)
     assert _repeated(seen, value) == []
@@ -252,7 +231,7 @@ def test_a_password_that_is_a_legal_name_is_refused_as_unset_and_not_repeated(
     assert re.fullmatch(LEGAL_NAME, value), "the premise: a legal variable name"
     assert value not in os.environ, "the premise: and nothing is exported under it"
 
-    code, seen = _merged(_argv_with(flag, value))
+    code, seen = merged(_argv_with(flag, value))
 
     assert code == _unset(flag)
     assert _repeated(seen, value) == []
@@ -268,7 +247,7 @@ def test_an_empty_variable_is_refused_like_an_unset_one(
     monkeypatch.setenv(variable, "")
     assert os.environ[variable] == "", "the premise: set, and empty"
 
-    code, seen = _merged(VALID)
+    code, seen = merged(VALID)
 
     assert code == _unset(flag)
     assert _repeated(seen) == []
@@ -284,9 +263,7 @@ def test_it_has_its_own_dispatch_arm(monkeypatch: pytest.MonkeyPatch) -> None:
 
     calls = dispatched(monkeypatch, arm="_set_credentials", argv=VALID)
 
-    assert calls == [
-        {"source_name": SOURCE, "username_env": USERNAME_VAR, "password_env": PASSWORD_VAR}
-    ]
+    assert calls == [{"source": SOURCE, "username_env": USERNAME_VAR, "password_env": PASSWORD_VAR}]
     assert USERNAME_VALUE not in repr(calls)
     assert PASSWORD_VALUE not in repr(calls)
 
@@ -312,11 +289,18 @@ def test_the_namespace_holds_three_names_and_the_help_hides_the_tripwires() -> N
     assert not re.search(r"--(username|password)(?!-env)", shown)
 
 
+def test_the_help_says_source_takes_an_id_or_a_name() -> None:
+    """Both spellings, in the metavar and in the help, where an operator with duplicates looks."""
+    shown = " ".join(_set_credentials_help().split())
+
+    assert "--source NAME_OR_ID" in shown
+    assert (
+        "the source's id, as GET /admin/sources lists it, or its name exactly as registered"
+    ) in shown
+
+
 def _set_credentials_help() -> str:
-    """The subparser's own help, which `build_parser().format_help()` does not include."""
-    subparsers = next(
-        action
-        for action in build_parser()._actions
-        if isinstance(action, argparse._SubParsersAction)
-    )
-    return str(subparsers.choices["set-credentials"].format_help())
+    """`usher set-credentials --help`, read the way an operator reads it."""
+    code, seen = merged(["set-credentials", "--help"])
+    assert code == 0, seen
+    return seen

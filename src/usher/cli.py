@@ -9,9 +9,10 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Final
+from typing import Final, NoReturn
 
 import httpx
 from pydantic import SecretStr, ValidationError
@@ -1429,6 +1430,52 @@ def _print_backup_report(report: BackupReport) -> None:
 #: fails here.
 _ENVIRONMENT_VARIABLE_NAME: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
+#: The subcommands whose command lines may hold a key or a password where it does not belong.
+_SECRET_COMMANDS: Final = frozenset({"rotate-secret", "set-credentials"})
+
+#: True while `_parse_without_echoing_unknown_values` parses a command line naming
+#: one of them. The whole line, because the top-level parser refuses a value typed
+#: before the subcommand, as in `usher --password <it> set-credentials`.
+_QUOTING_NOTHING: Final[ContextVar[bool]] = ContextVar("_QUOTING_NOTHING", default=False)
+
+#: argparse's refusals that are made of the parser's own literals and quote nothing
+#: typed. Every other refusal on such a line can: an invalid choice, an ignored
+#: explicit argument, an ambiguous option and an unrecognized argument each do.
+_LITERAL_REFUSAL: Final = re.compile(
+    r"the following arguments are required: [\w/, -]+"
+    r"|argument [\w/-]+: expected (?:one|at most one|at least one|\d+) arguments?"
+)
+
+_NOT_SHOWN: Final = (
+    "an argument was refused and is not shown (on a command line naming rotate-secret or "
+    "set-credentials, a refused value is most likely a key or a password) -- a secret is "
+    "named only with --new-key-env, --username-env or --password-env, which take the NAMES "
+    "of exported environment variables"
+)
+
+
+class _Unquoted(str):
+    """A refusal this module wrote from its own literals, which `_Parser` passes through."""
+
+
+class _Parser(argparse.ArgumentParser):
+    """`ArgumentParser`, quoting no argument of a command line that names a secret command.
+
+    `add_subparsers` builds every subparser from this class too, so the scrub reaches a
+    subcommand's own refusals as well as the top level's. It fails closed: a refusal
+    that is neither `_Unquoted` nor a `_LITERAL_REFUSAL` becomes `_NOT_SHOWN`, because
+    argparse can quote part of a token (`-h-<value>` is refused as `'-<value>'`).
+    """
+
+    def error(self, message: str) -> NoReturn:
+        if (
+            _QUOTING_NOTHING.get()
+            and not isinstance(message, _Unquoted)
+            and not _LITERAL_REFUSAL.fullmatch(message)
+        ):
+            message = _NOT_SHOWN
+        super().error(message)
+
 
 class _RefuseAKeyOnTheCommandLine(argparse.Action):
     """`--new-key` exists so that typing it is a refusal rather than a leak."""
@@ -1443,10 +1490,12 @@ class _RefuseAKeyOnTheCommandLine(argparse.Action):
         # `parser.error`: exit 2 with usage on stderr, the way every other
         # argument failure in this CLI exits. The value is not interpolated.
         parser.error(
-            "--new-key is not an argument of this command, and the value after it is not "
-            "repeated here because it is probably your new key. A key in argv is in your "
-            "shell history and in `ps` output for every user on this box. Export it and "
-            "pass the variable's NAME: --new-key-env USHER_NEW_SECRET_KEY"
+            _Unquoted(
+                "--new-key is not an argument of this command, and the value after it is not "
+                "repeated here because it is probably your new key. A key in argv is in your "
+                "shell history and in `ps` output for every user on this box. Export it and "
+                "pass the variable's NAME: --new-key-env USHER_NEW_SECRET_KEY"
+            )
         )
 
 
@@ -1587,10 +1636,12 @@ class _RefuseACredentialOnTheCommandLine(argparse.Action):
         # message is built from the parser's literals alone.
         flag = self.option_strings[0]
         parser.error(
-            f"{flag} is not an argument of this command, and the value after it is not "
-            "repeated here because it is probably a credential. A credential in argv is in "
-            "your shell history and in `ps` output for every user on this box. Export it "
-            f"and pass the variable's NAME: {flag}-env VAR"
+            _Unquoted(
+                f"{flag} is not an argument of this command, and the value after it is not "
+                "repeated here because it is probably a credential. A credential in argv is in "
+                "your shell history and in `ps` output for every user on this box. Export it "
+                f"and pass the variable's NAME: {flag}-env VAR"
+            )
         )
 
 
@@ -1617,41 +1668,58 @@ def _credential_from(flag: str, variable: str) -> SecretStr:
 
 
 async def _set_credentials(
-    settings: Settings, *, source_name: str, username_env: str, password_env: str
+    settings: Settings, *, source: str, username_env: str, password_env: str
 ) -> None:
     """Overwrite one source's stored login with the values of two exported variables.
 
-    Both are read before the first query, so every refusal arrives before the database
-    is touched. The source is found among *all* sources rather than `selected_sources`,
+    Both are read before the first query, so every refusal about a variable arrives
+    before the database is touched. `source` is matched as an id when it parses as one
+    and as an exact name otherwise, among *all* sources rather than `selected_sources`,
     which skips a disabled one, and a disabled source is one an operator may be fixing.
     No login is attempted: an extra rejection can count against an account that locks.
     """
     username = _credential_from("--username-env", username_env)
     password = _credential_from("--password-env", password_env)
+    matches_source = _source_matcher(source)
     async with _session_for(settings) as session:
         pipeline = build_pipeline(session, settings)
         matches = [
-            source for source in await pipeline.sources.list_all() if source.name == source_name
+            candidate
+            for candidate in await pipeline.sources.list_all()
+            if matches_source(candidate)
         ]
-        # Neither refusal names the source: `--source` is an argument too.
+        # Neither refusal repeats what `--source` was given: it is an argument too.
         if not matches:
-            raise SystemExit("usher set-credentials: no source has the name given to --source")
+            raise SystemExit(
+                "usher set-credentials: no source has the name or id given to --source"
+            )
         if len(matches) > 1:
+            # Only a name can match twice, since an id is the primary key.
             raise SystemExit(
                 f"usher set-credentials: {len(matches)} sources have the name given to "
-                "--source, and this command cannot tell them apart"
+                "--source, and this command cannot tell them apart -- pass the id of the one "
+                "you mean instead, as `GET /admin/sources` lists them"
             )
-        (source,) = matches
+        (chosen,) = matches
         await pipeline.credentials.put(
-            source.credentials_ref,
+            chosen.credentials_ref,
             SourceCredentials(username=username.get_secret_value(), password=password),
-            owner_id=source.id,
+            owner_id=chosen.id,
         )
         await session.commit()
     print(
-        f"usher set-credentials: stored new credentials for {source.name}. Restart Usher: "
+        f"usher set-credentials: stored new credentials for {chosen.name}. Restart Usher: "
         "running lanes and the worker's cached adapters hold the old password until then."
     )
+
+
+def _source_matcher(given: str) -> Callable[[Source], bool]:
+    """Which source `--source`'s value names: the id it parses as, or else the exact name."""
+    try:
+        wanted = uuid.UUID(given)
+    except ValueError:
+        return lambda source: source.name == given
+    return lambda source: source.id == wanted
 
 
 async def _push(settings: Settings, *, source_name: str | None, probe: bool) -> None:
@@ -1745,7 +1813,7 @@ def _as_uuid(value: str, what: str) -> uuid.UUID:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="usher")
+    parser = _Parser(prog="usher")
     # The error boundary's own escape hatch, and the reason the boundary is allowed to
     # swallow a stack at all.
     parser.add_argument(
@@ -2043,7 +2111,10 @@ def build_parser() -> argparse.ArgumentParser:
             help=argparse.SUPPRESS,
         )
     set_credentials.add_argument(
-        "--source", required=True, metavar="NAME", help="the source's name, exactly as registered"
+        "--source",
+        required=True,
+        metavar="NAME_OR_ID",
+        help="the source's id, as GET /admin/sources lists it, or its name exactly as registered",
     )
     # **Variable names, never values**, and required rather than defaulted.
     set_credentials.add_argument(
@@ -2067,29 +2138,42 @@ def build_parser() -> argparse.ArgumentParser:
 def _parse_without_echoing_unknown_values(
     parser: argparse.ArgumentParser, argv: list[str]
 ) -> argparse.Namespace:
-    """`parser.parse_args`, without echoing `rotate-secret`'s or `set-credentials`' unknowns."""
-    args, unknown = parser.parse_known_args(argv)
-    if unknown:
-        if getattr(args, "command", None) == "rotate-secret":
-            parser.error(
-                f"unrecognized arguments for rotate-secret ({len(unknown)}, not shown -- on "
-                "this command an unrecognized value is most likely your new key). The only "
-                "way to name a key here is --new-key-env, which takes the NAME of an "
-                "exported environment variable"
-            )
-        if getattr(args, "command", None) == "set-credentials":
-            parser.error(
-                f"unrecognized arguments for set-credentials ({len(unknown)}, not shown -- on "
-                "this command an unrecognized value is most likely a password). The only way "
-                "to name a credential here is --username-env and --password-env, which take "
-                "the NAMES of exported environment variables"
-            )
-        # argparse's own wording, kept byte-for-byte so every other command's
-        # refusal reads exactly as it did before this function existed. (Its
-        # `%`-formatting is spelled as an f-string here only because ruff's
-        # UP031 refuses the original.)
-        parser.error(f"unrecognized arguments: {' '.join(unknown)}")
-    return args
+    """`parser.parse_args`, quoting no argument of a command line naming a secret command.
+
+    `rotate-secret`'s and `set-credentials`' unknowns are counted here, and every other
+    refusal on such a line is `_Parser`'s to scrub, while `_QUOTING_NOTHING` is set.
+    """
+    quoting_nothing = _QUOTING_NOTHING.set(not _SECRET_COMMANDS.isdisjoint(argv))
+    try:
+        args, unknown = parser.parse_known_args(argv)
+        if unknown:
+            if getattr(args, "command", None) == "rotate-secret":
+                parser.error(
+                    _Unquoted(
+                        f"unrecognized arguments for rotate-secret ({len(unknown)}, not shown "
+                        "-- on this command an unrecognized value is most likely your new "
+                        "key). The only way to name a key here is --new-key-env, which takes "
+                        "the NAME of an exported environment variable"
+                    )
+                )
+            if getattr(args, "command", None) == "set-credentials":
+                parser.error(
+                    _Unquoted(
+                        f"unrecognized arguments for set-credentials ({len(unknown)}, not "
+                        "shown -- on this command an unrecognized value is most likely a "
+                        "password). The only way to name a credential here is --username-env "
+                        "and --password-env, which take the NAMES of exported environment "
+                        "variables"
+                    )
+                )
+            # argparse's own wording, kept byte-for-byte so a line naming neither
+            # secret command reads exactly as it did before this function existed.
+            # (Its `%`-formatting is spelled as an f-string here only because ruff's
+            # UP031 refuses the original.)
+            parser.error(f"unrecognized arguments: {' '.join(unknown)}")
+        return args
+    finally:
+        _QUOTING_NOTHING.reset(quoting_nothing)
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
@@ -2326,7 +2410,7 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> None:
         asyncio.run(
             _set_credentials(
                 settings,
-                source_name=args.source,
+                source=args.source,
                 username_env=args.username_env,
                 password_env=args.password_env,
             )

@@ -2,7 +2,7 @@
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
@@ -25,9 +25,11 @@ from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
 from usher.domain.source import Source
 from usher.ports.credentials import SourceCredentials
-from usher.ports.errors import PortAuthFailed
+from usher.ports.errors import PortAuthFailed, PortDataMalformed
 
 KEY = SecretStr("credentials-case-key-" + "k" * 19)
+#: A key this deployment does not hold: the restore runbooks' lost key.
+OTHER_KEY = SecretStr("credentials-case-other-key-" + "o" * 13)
 
 SOURCE_NAME = "credentials-case source"
 REF_PREFIX = "credentials-case-"
@@ -39,6 +41,8 @@ NEW_USERNAME, NEW_PASSWORD = "new-account-canary", "n3w-password-canary"
 
 USERNAME_VAR = "CASE_SOURCE_USERNAME"
 PASSWORD_VAR = "CASE_SOURCE_PASSWORD"
+
+NO_MATCH = "usher set-credentials: no source has the name or id given to --source"
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -82,6 +86,15 @@ async def _main(argv: list[str]) -> None:
     await asyncio.to_thread(main, argv)
 
 
+async def _refusal(argv: list[str]) -> str | None:
+    """`_main`'s refusal, or `None` once it stored the login, so a refusal fails on its text."""
+    try:
+        await _main(argv)
+    except SystemExit as exc:
+        return str(exc)
+    return None
+
+
 def _argv(source_name: str) -> list[str]:
     return [
         "set-credentials",
@@ -95,7 +108,12 @@ def _argv(source_name: str) -> list[str]:
 
 
 async def _seed(
-    sessions: async_sessionmaker[AsyncSession], ref: str, *, name: str, enabled: bool = True
+    sessions: async_sessionmaker[AsyncSession],
+    ref: str,
+    *,
+    name: str,
+    enabled: bool = True,
+    key: SecretStr = KEY,
 ) -> uuid.UUID:
     """One source and its old login, written through the shipped store and committed."""
     source_id = new_id()
@@ -112,7 +130,7 @@ async def _seed(
             )
         )
         await session.flush()
-        await PostgresCredentialStore(session, KEY).put(
+        await PostgresCredentialStore(session, key).put(
             ref,
             SourceCredentials(username=OLD_USERNAME, password=SecretStr(OLD_PASSWORD)),
             owner_id=source_id,
@@ -280,7 +298,7 @@ async def test_a_name_matching_no_source_is_refused_and_writes_nothing(
         await _main(_argv(given))
 
     captured = capsys.readouterr()
-    assert str(exit_info.value) == "usher set-credentials: no source has the name given to --source"
+    assert str(exit_info.value) == NO_MATCH
     assert given not in captured.out + captured.err + str(exit_info.value)
     assert await _ciphertext(sessions, ref) == before
 
@@ -310,7 +328,8 @@ async def test_a_name_matching_two_sources_is_refused_and_writes_nothing(
     captured = capsys.readouterr()
     assert str(exit_info.value) == (
         f"usher set-credentials: {count} sources have the name given to --source, and this "
-        "command cannot tell them apart"
+        "command cannot tell them apart -- pass the id of the one you mean instead, as "
+        "`GET /admin/sources` lists them"
     )
     assert name not in captured.out + captured.err + str(exit_info.value)
     assert {ref: await _ciphertext(sessions, ref) for ref in refs} == before
@@ -341,3 +360,97 @@ async def test_a_disabled_source_can_have_its_credentials_stored(
     await _main(_argv(name))
 
     assert await _logs_in(sessions, server, source_id) is True
+
+
+@pytest.mark.parametrize(
+    "spelling", [str, lambda source_id: source_id.hex.upper()], ids=["canonical", "hex"]
+)
+@pytest.mark.usefixtures("command_environment")
+async def test_an_id_names_one_of_several_sources_sharing_a_name(
+    sessions: async_sessionmaker[AsyncSession], spelling: Callable[[uuid.UUID], str]
+) -> None:
+    """The way past the several-match refusal, in any spelling `uuid.UUID` reads.
+
+    The middle one of three, so neither the first nor the last match can stand in for
+    it. Its premise is the first arm: the name alone is refused and writes nothing.
+    """
+    name = f"{SOURCE_NAME} shared by id"
+    refs = [f"{REF_PREFIX}by-id-{number}" for number in range(3)]
+    ids = [await _seed(sessions, ref, name=name) for ref in refs]
+    before = {ref: await _ciphertext(sessions, ref) for ref in refs}
+    assert await _refusal(_argv(name)) is not None
+    assert {ref: await _ciphertext(sessions, ref) for ref in refs} == before
+
+    assert await _refusal(_argv(spelling(ids[1]))) is None
+
+    moved = [await _ciphertext(sessions, ref) != before[ref] for ref in refs]
+    assert moved == [False, True, False]
+    async with sessions() as session:
+        stored = await PostgresCredentialStore(session, KEY).get(refs[1])
+    assert stored is not None
+    assert (stored.username, stored.password.get_secret_value()) == (NEW_USERNAME, NEW_PASSWORD)
+
+
+@pytest.mark.usefixtures("command_environment")
+async def test_a_disabled_sources_id_names_it(sessions: async_sessionmaker[AsyncSession]) -> None:
+    """An id is looked for among every source too, not only the enabled ones."""
+    server = FakeEmbyServer(username=NEW_USERNAME, password=NEW_PASSWORD)
+    name = f"{SOURCE_NAME} disabled by id"
+    source_id = await _seed(sessions, f"{REF_PREFIX}disabled-by-id", name=name, enabled=False)
+    assert (await _source(sessions, source_id)).enabled is False, "the premise: it is disabled"
+    assert await _logs_in(sessions, server, source_id) is False, "the premise: the old login"
+
+    assert await _refusal(_argv(str(source_id))) is None
+
+    assert await _logs_in(sessions, server, source_id) is True
+
+
+@pytest.mark.usefixtures("command_environment")
+async def test_an_id_matching_no_source_is_refused_and_writes_nothing(
+    sessions: async_sessionmaker[AsyncSession], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The no-match refusal, which repeats no id either.
+
+    Its premise is the last arm: the seeded source's own id moves the row.
+    """
+    name = f"{SOURCE_NAME} unknown id"
+    ref = f"{REF_PREFIX}unknown-id"
+    source_id = await _seed(sessions, ref, name=name)
+    before = await _ciphertext(sessions, ref)
+    given = str(new_id())
+    assert given != str(source_id), "the premise: an id nothing was seeded under"
+
+    with pytest.raises(SystemExit) as exit_info:
+        await _main(_argv(given))
+
+    captured = capsys.readouterr()
+    assert str(exit_info.value) == NO_MATCH
+    assert given not in captured.out + captured.err + str(exit_info.value)
+    assert await _ciphertext(sessions, ref) == before
+
+    assert await _refusal(_argv(str(source_id))) is None
+
+    assert await _ciphertext(sessions, ref) != before
+
+
+@pytest.mark.usefixtures("command_environment")
+async def test_a_login_stored_under_a_lost_key_is_overwritten(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    """The restore runbooks' recovery: a row no key this deployment holds can open.
+
+    Nothing the command does reads the row it replaces, so it needs no key but its own.
+    """
+    name = f"{SOURCE_NAME} lost key"
+    ref = f"{REF_PREFIX}lost-key"
+    await _seed(sessions, ref, name=name, key=OTHER_KEY)
+    async with sessions() as session:
+        with pytest.raises(PortDataMalformed):
+            await PostgresCredentialStore(session, KEY).get(ref)
+
+    assert await _refusal(_argv(name)) is None
+
+    async with sessions() as session:
+        stored = await PostgresCredentialStore(session, KEY).get(ref)
+    assert stored is not None
+    assert (stored.username, stored.password.get_secret_value()) == (NEW_USERNAME, NEW_PASSWORD)
