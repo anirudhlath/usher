@@ -42,7 +42,7 @@ Derive counts (`alembic heads`, `docker compose config`), never quote them.
 
 ## What the CLI boundary catches, and what it must not
 
-- **`cli.OPERATOR_ERRORS` (`cli.py:166`) is an enumerated tuple** — `OSError`,
+- **`cli.OPERATOR_ERRORS` is an enumerated tuple** — `OSError`,
   `DBAPIError`, `httpx.HTTPError`, `PortUnavailable`, `PortAuthFailed`,
   `PortRateLimited`. Every membership decision is recorded there.
 - **`OSError` is a member because asyncpg lets `ConnectionRefusedError` out

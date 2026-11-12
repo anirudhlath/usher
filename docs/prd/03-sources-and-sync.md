@@ -195,11 +195,12 @@ plan expected. `usher sync-status` prints the same under each of a source's
 five most recent runs, and lists a live whole-library walk those leave out
 after them; every `sync.progress` frame carries it ([07](07-client-api.md)).
 
-`push_available` is three-valued: `null` ("not probed") when the source has no
-push lane, or its lane ended because the source has no push channel, otherwise
+`push_available` is three-valued: `null` ("not probed") when the status check
+could not authenticate (`authenticated: false`), when the source has no push
+lane, or when its lane ended because the source has no push channel; otherwise
 the live answer — a connection *and* at least one received message *and* a
-recent one; a crashed lane answers `false` until it restarts. The status check
-opens no socket.
+recent one — which for a crashed lane is `false` until it restarts. The status
+check opens no socket.
 
 The on-demand answer is `usher push --probe`, which opens a channel on purpose,
 listens for one `push_stale_after_seconds` window, and reports **what arrived**
