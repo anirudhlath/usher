@@ -7,12 +7,13 @@ import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Final
 
 from loguru import logger
 from opentelemetry import metrics, trace
 
 from usher.domain.source import Source
-from usher.ports.errors import UsherPortError
+from usher.ports.errors import PortAuthFailed, UsherPortError
 from usher.ports.events import ClientEvent, ClientEventKind, EventPublisher
 from usher.ports.repository import MediaItemRepository
 from usher.ports.source import (
@@ -34,6 +35,11 @@ _meter = metrics.get_meter("usher.push")
 _events_applied = _meter.create_counter(
     "usher.source.push.events", unit="1", description="Push events applied, by source and kind"
 )
+
+# How long a lane waits after a rejected login before it tries again. Asking sooner cannot
+# fix a wrong password, and a server the household does not run may lock an account that is
+# not the household's to unlock.
+_REJECTED_LOGIN_WAIT_SECONDS: Final = 86_400.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -364,10 +370,11 @@ class PushSupervisor:
         Stops only for `SourceNotSupported`, which every later attempt would answer the
         same way. Any other `UsherPortError` is retried. At PRD 08's
         `USHER_PUSH_MAX_CONSECUTIVE_FAILURES` the source is marked unavailable and the lane
-        keeps trying, at most `USHER_PUSH_MAX_BACKOFF_SECONDS` apart. The push gauge reads
-        delivery rather than this loop, so it reads 0 meanwhile and a lane retrying against
-        a proxy stripping `Upgrade` does not look like a working one. Anything else escapes,
-        a bug or a failed database write: this loop retries the channel and nothing more.
+        keeps trying, at most `USHER_PUSH_MAX_BACKOFF_SECONDS` apart. A rejected login marks
+        it at once, and the next try waits a day. The push gauge reads delivery rather than
+        this loop, so it reads 0 meanwhile and a lane retrying against a proxy stripping
+        `Upgrade` does not look like a working one. Anything else escapes, a bug or a failed
+        database write: this loop retries the channel and nothing more.
         """
         gate, outage, failures, delivering = _Gate(), _Outage(), 0, False
         while True:
@@ -398,6 +405,20 @@ class PushSupervisor:
             except asyncio.CancelledError:
                 # Shutdown is not a push failure.
                 raise
+            except PortAuthFailed as exc:
+                # Before `UsherPortError`, its parent. A wrong password stays wrong however
+                # soon it is asked again, so the source is marked at once and waits a day.
+                failures, delivering = self._streak(failures, adapter, received), False
+                outage.marked = True
+                logger.error(
+                    "{source}'s login was rejected; marking push unavailable and trying again in "
+                    "a day. Store the new password with `usher set-credentials` and restart "
+                    "Usher: {error}",
+                    source=source.name,
+                    error=str(exc),
+                )
+                await self._set_push_available(source, False)
+                wait = _REJECTED_LOGIN_WAIT_SECONDS
             except UsherPortError as exc:
                 failures, delivering = self._streak(failures, adapter, received), False
                 logger.warning(
@@ -462,8 +483,8 @@ class PushSupervisor:
         rather than in a socket being open. This layer neither knows nor
         guesses -- and writing only on the *transition* keeps `sources` from
         taking one `UPDATE` per second of playback for a value that changed
-        once. A delivery says it came back only if the ceiling had marked the
-        source, so an ordinary reconnect logs nothing.
+        once. A delivery says it came back only if the source was marked, at
+        the ceiling or on a rejected login, so an ordinary reconnect logs nothing.
         """
         now_delivering = adapter.supports_push
         if now_delivering != was:

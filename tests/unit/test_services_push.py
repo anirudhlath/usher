@@ -32,7 +32,7 @@ from usher.domain.ids import new_id
 from usher.domain.jobs import JobKind
 from usher.domain.rows import BuiltRow, DisplayHint, RowFamily
 from usher.domain.source import Source
-from usher.ports.errors import PortUnavailable, UsherPortError
+from usher.ports.errors import PortAuthFailed, PortUnavailable, UsherPortError
 from usher.ports.events import ClientEvent, ClientEventKind
 from usher.ports.ingest import MediaItemUpsert, Retraction
 from usher.ports.source import (
@@ -1573,6 +1573,111 @@ async def test_cancelling_a_lane_in_its_backoff_ends_it_at_once(lane: _Lane) -> 
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, timeout=5.0)
     assert lane.push_available == [False]
+
+
+async def test_a_rejected_login_waits_a_day_and_does_not_return(lane: _Lane) -> None:
+    """A rejected login marks the source at once, waits a day, and does not end the lane.
+
+    Marked below the ceiling, so the false is the rejection's own write. The try after the
+    day delivers, which is a return worth its one INFO line, and the drop that ends it is
+    the first failure of a new streak.
+    """
+    i1 = _event("i1")
+    adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [PortAuthFailed("rejected"), [i1]])
+    sleeps: list[float] = []
+    supervisor = _supervisor(lane, sleeps=sleeps)
+    logged = await _logged_run(supervisor, adapter)
+    assert sleeps == [86_400.0, 5.0]
+    assert lane.push_available == [False, True]
+    assert lane.gaps == 1
+    assert lane.applied == [i1]
+    assert _at("ERROR", logged) == [
+        "Living Room Emby's login was rejected; marking push unavailable and trying again in a "
+        "day. Store the new password with `usher set-credentials` and restart Usher: rejected"
+    ]
+    assert _at("INFO", logged) == ["Living Room Emby's push channel is back on attempt 2"]
+
+
+async def test_a_401_that_survives_a_good_login_waits_the_same_day(lane: _Lane) -> None:
+    """A 401 that survives a good login is the same rejection, and waits the same day.
+
+    The session logs in again on a 401 and raises when the retry is refused too, which
+    reaches the lane from the applier rather than from `events()`.
+    """
+    refusals = [PortAuthFailed("GET /Items still returned 401 after re-authenticating")]
+    record = lane.apply
+
+    async def refuse_once(
+        source: Source, adapter: SourceAdapter, event: SourceEvent
+    ) -> PushOutcome:
+        if refusals:
+            raise refusals.pop()
+        return await record(source, adapter, event)
+
+    lane.apply = refuse_once  # type: ignore[method-assign]
+    adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [[_event("i1")], [_event("i2")]])
+    sleeps: list[float] = []
+    supervisor = _supervisor(lane, sleeps=sleeps)
+    await _run_until_spent(supervisor, adapter)
+    assert sleeps == [86_400.0, 5.0]
+    assert lane.push_available == [True, False, True]
+
+
+async def test_a_login_rejected_every_day_stays_a_day_apart(lane: _Lane) -> None:
+    """A login rejected on every try is asked once a day, however long the streak runs.
+
+    Three rejections against a ceiling of three: counted through the ceiling like an
+    ordinary failure, the third would log the ceiling's ERROR and wait its backoff.
+    """
+    adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [PortAuthFailed("rejected") for _ in range(3)])
+    sleeps: list[float] = []
+    supervisor = _supervisor(lane, sleeps=sleeps, max_consecutive_failures=3)
+    logged = await _logged_run(supervisor, adapter)
+    assert sleeps == [86_400.0] * 3
+    rejections = [message for message in _at("ERROR", logged) if "login was rejected" in message]
+    assert len(rejections) == 3, "the premise: the log saw each rejection"
+    assert [message for _, message in logged if "times in a row" in message] == []
+
+
+async def test_cancelling_a_lane_waiting_out_its_day_ends_it_at_once(lane: _Lane) -> None:
+    """A rejected login spends its day in this sleep, so it is where shutdown finds it."""
+    waiting = asyncio.Event()
+    asked: list[float] = []
+
+    async def wait_forever(seconds: float) -> None:
+        asked.append(seconds)
+        waiting.set()
+        await asyncio.Event().wait()
+
+    adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [PortAuthFailed("rejected")])
+    supervisor = _supervisor(lane, sleep=wait_forever)
+    task = asyncio.create_task(supervisor.run(SUPERVISED_SOURCE, adapter))
+    await asyncio.wait_for(waiting.wait(), timeout=5.0)
+    assert asked == [86_400.0]
+    assert lane.push_available == [False], "the premise: the rejection's write came first"
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=5.0)
+    assert lane.push_available == [False]
+
+
+async def test_a_database_failure_on_a_rejected_login_escapes_the_lane(lane: _Lane) -> None:
+    """A failed write on a rejected login escapes before the day's wait, as at the ceiling.
+
+    The column is the database's rather than the channel's, so `_guard` answers it.
+    """
+
+    async def refuse(source: Source, available: bool) -> None:
+        raise RuntimeError("the database went away")
+
+    lane.set_push_available = refuse  # type: ignore[method-assign]
+    adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [PortAuthFailed("rejected")])
+    sleeps: list[float] = []
+    supervisor = _supervisor(lane, sleeps=sleeps)
+    with pytest.raises(RuntimeError, match="the database went away"):
+        await asyncio.wait_for(supervisor.run(SUPERVISED_SOURCE, adapter), timeout=5.0)
+    assert adapter.attempts == 1
+    assert sleeps == []
 
 
 async def test_a_pushed_watch_state_invalidates_that_users_rows(fixture: _Fixture) -> None:

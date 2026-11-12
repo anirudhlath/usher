@@ -67,7 +67,7 @@ from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus
 from usher.domain.watch import User
 from usher.ports.credentials import SourceCredentials
 from usher.ports.embedding import Embedder
-from usher.ports.errors import PortUnavailable
+from usher.ports.errors import PortAuthFailed, PortUnavailable
 from usher.ports.events import EventPublisher
 from usher.ports.jobs import JobQueue, JobRequest
 from usher.ports.llm import LLMClient
@@ -144,6 +144,13 @@ class _DownAdapter(FakeSourceAdapter):
         raise PortUnavailable("down")
 
 
+class _RejectedAdapter(FakeSourceAdapter):
+    """A lane whose every login is rejected, which waits a day rather than an outage's backoff."""
+
+    def events(self) -> AbstractAsyncContextManager[AsyncIterator[SourceEvent]]:
+        raise PortAuthFailed("rejected")
+
+
 class _SlowAdapter(FakeSourceAdapter):
     """Records the wall-clock window its lane spent resolving a pushed id.
 
@@ -176,12 +183,13 @@ class _Adapters(SourceAdapterFactory):
         self.built: dict[str, FakeSourceAdapter] = {}
         self.crashing: set[str] = set()
         self.down: set[str] = set()
+        self.rejecting: set[str] = set()
         self.slow: set[str] = set()
-        # Two spellings of one precondition, kept because each side's cases use its own:
-        # `_start_lane` builds the adapter and hands it straight to
-        # `PushSupervisor.run`, whose first act after connecting is to close the gap, so
-        # seeding off `built[...]` afterwards races the very walk the case is trying to
-        # observe -- and a case that lost the race would assert against a library of
+        # Two spellings of one precondition: `library` seeds items, and `prepare`, which runs
+        # first, does any other set-up. `_start_lane` hands the adapter straight to
+        # `PushSupervisor.run`, which closes the gap as soon as it connects, so seeding off
+        # `built[...]` afterwards races the walk under observation -- and losing that race
+        # reads as a library of zero items, which is exactly what a broken ceiling produces.
         self.prepare: Callable[[FakeSourceAdapter], None] | None = None
         self.library: list[tuple[SourceItem, datetime]] = []
 
@@ -196,6 +204,8 @@ class _Adapters(SourceAdapterFactory):
             kind: type[FakeSourceAdapter] = _CrashingAdapter
         elif source.name in self.down:
             kind = _DownAdapter
+        elif source.name in self.rejecting:
+            kind = _RejectedAdapter
         elif source.name in self.slow:
             kind = _SlowAdapter
         else:
@@ -1199,6 +1209,36 @@ async def test_a_lane_past_the_ceiling_keeps_its_adapter_and_reads_zero(
         assert gauge_readings(meter_reader, "usher.source.push.connected") == [
             (0.0, {"source": "A"})
         ]
+    finally:
+        await asyncio.wait_for(supervisor.stop(), 5.0)
+
+
+async def test_a_rejected_login_parks_its_lane_reads_zero_and_stops_at_once(
+    fakes: _Fakes, meter_reader: InMemoryMetricReader
+) -> None:
+    """A rejected login parks the lane for a day: still running, reading 0, and cancellable.
+
+    Seeded `supports_push=True`, so the false the drain waits for is this lane's write. At
+    the default ceiling an ordinary failure writes nothing inside the drain's bound, so the
+    write is the rejection's. The real sleep then holds the lane until `stop()` cancels it.
+    """
+    source = _source("A").evolve(supports_push=True)
+    await _seed(fakes, source)
+    fakes.adapters.rejecting.add("A")
+    supervisor = _supervisor(fakes)
+    register_push_gauges(supervisor.push_snapshots)
+    await supervisor.start()
+    try:
+        await _drain(lambda: fakes.sources._sources[source.id].supports_push is False)
+
+        assert supervisor.running_sources() == ["A"]
+        assert supervisor.crashed_sources() == []
+        assert gauge_readings(meter_reader, "usher.source.push.connected") == [
+            (0.0, {"source": "A"})
+        ]
+        stored = await fakes.sources.get(source.id)
+        assert stored is not None
+        assert stored.supports_push is False
     finally:
         await asyncio.wait_for(supervisor.stop(), 5.0)
 
