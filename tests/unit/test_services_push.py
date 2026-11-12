@@ -1639,6 +1639,42 @@ async def test_a_login_rejected_every_day_stays_a_day_apart(lane: _Lane) -> None
     assert [message for _, message in logged if "times in a row" in message] == []
 
 
+async def test_a_rejected_login_counts_in_the_streak_it_interrupts(lane: _Lane) -> None:
+    """A rejected login is a failed connection, so it counts in the streak it interrupts.
+
+    Down, rejected, down against a ceiling of three: the second down is the third failure in
+    a row, so it reaches the ceiling and waits the doubling's third step, not its second.
+    """
+    script: list[list[SourceEvent] | UsherPortError] = [
+        PortUnavailable("down"),
+        PortAuthFailed("rejected"),
+        PortUnavailable("down"),
+    ]
+    adapter = _ScriptedAdapter(SUPERVISED_SOURCE, script)
+    sleeps: list[float] = []
+    supervisor = _supervisor(lane, sleeps=sleeps, max_consecutive_failures=3)
+    ceiling = supervisor._max_failures
+    assert len(script) == ceiling, "the premise: the script's last failure is the ceiling's"
+    logged = await _logged_run(supervisor, adapter)
+    assert sleeps == [5.0, 86_400.0, 20.0]
+    assert [line for line in logged if line[0] in {"WARNING", "ERROR"}] == [
+        ("WARNING", "Living Room Emby's push channel failed (1 in a row): down"),
+        (
+            "ERROR",
+            "Living Room Emby's login was rejected; marking push unavailable and trying again "
+            "in a day. Store the new password with `usher set-credentials` and restart Usher: "
+            "rejected",
+        ),
+        ("WARNING", f"Living Room Emby's push channel failed ({ceiling} in a row): down"),
+        (
+            "ERROR",
+            f"Living Room Emby's push channel failed {ceiling} times in a row; marking it "
+            f"unavailable and still trying, at most {supervisor._max_backoff:.0f} s apart",
+        ),
+    ]
+    assert lane.push_available == [False, False]
+
+
 async def test_cancelling_a_lane_waiting_out_its_day_ends_it_at_once(lane: _Lane) -> None:
     """A rejected login spends its day in this sleep, so it is where shutdown finds it."""
     waiting = asyncio.Event()
