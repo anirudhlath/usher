@@ -211,8 +211,9 @@ class LaneSupervisor:
         """Lanes that crashed and have not yet been restarted.
 
         `_guard` records the crash, and `refresh` starts the lane again at the first
-        refresh at least `push_max_backoff_seconds` later. A lane that ended because
-        its source has no push channel did not crash and is not named.
+        refresh at least `push_max_backoff_seconds` after the crash or its last try. A
+        lane that ended because its source has no push channel did not crash and is not
+        named.
 
         Reported so a case can tell "the lane crashed" from "the lane was never
         started", which `running_sources()` alone cannot.
@@ -309,6 +310,9 @@ class LaneSupervisor:
         ended because its source has no push channel **releases its adapter** without
         being restarted, and a crashed one starts again on a new adapter at the first
         refresh at least `push_max_backoff_seconds` after the crash or its last try.
+
+        It must not run concurrently with itself: `_refresh_loop` is its one caller in
+        `src/`, and `stop()` cancels that task first.
         """
         async with self._work() as pipeline:
             wanted = {source.id: source for source in await selected_sources(pipeline)}
@@ -360,8 +364,8 @@ class LaneSupervisor:
 
         **Re-spaced before the open**, so a credential row that is gone or cannot be
         read is tried again a whole spacing later -- not on every refresh, each one a
-        WARNING or a stack, in front of the sources behind it. `None` keeps the old
-        adapter and its finished task, so the push gauge reads 0.
+        WARNING, in front of the sources behind it. `None` keeps the old adapter and its
+        finished task, so the push gauge reads 0.
 
         **Launched before the old adapter closes**, so a close that fails leaves the
         new lane running and `_refresh_loop` to log the failure.
@@ -408,7 +412,8 @@ class LaneSupervisor:
         `TaskGroup` over every lane would do exactly that.
 
         The crash is recorded, and `refresh` starts the lane again on a new adapter
-        at the first refresh at least `push_max_backoff_seconds` later.
+        at the first refresh at least `push_max_backoff_seconds` after the crash, or
+        after the last restart that could not open one.
 
         `run` is called here, inside the task, rather than handed in as a coroutine: a
         lane cancelled before its first step -- by a `stop()` straight after the refresh
@@ -422,8 +427,8 @@ class LaneSupervisor:
             self._crashed_at[source.id] = self._clock()
             _lane_crashes.add(1, {"source": source.name})
             logger.exception(
-                "the push lane for {source} crashed and restarts at the first refresh at "
-                "least {wait:.0f} s from now: {error}",
+                "the push lane for {source} crashed and is retried at the first refresh "
+                "at least {wait:.0f} s from now: {error}",
                 source=source.name,
                 wait=self._settings.push_max_backoff_seconds,
                 error=str(exc),

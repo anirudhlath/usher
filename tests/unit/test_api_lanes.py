@@ -1140,7 +1140,7 @@ async def test_a_crashed_lane_says_so(fakes: _Fakes) -> None:
     CPython reports at garbage-collection time, to stderr, with no source
     name in it. An operator whose second Emby stopped updating would have
     nothing to search for. This is a log assertion on purpose: the log line
-    is the deliverable, and it says when the lane comes back.
+    is the deliverable, and it says when the lane is retried.
     """
     await _seed(fakes, _source("A"))
     fakes.adapters.crash("A")
@@ -1156,7 +1156,7 @@ async def test_a_crashed_lane_says_so(fakes: _Fakes) -> None:
     crash = [json.loads(line)["record"] for line in lines if "crashed" in line]
     assert crash, lines
     assert crash[0]["message"] == (
-        "the push lane for A crashed and restarts at the first refresh at least "
+        "the push lane for A crashed and is retried at the first refresh at least "
         f"{_settings().push_max_backoff_seconds:.0f} s from now: a bug in the lane"
     )
     assert crash[0]["level"]["name"] == "ERROR"
@@ -1303,6 +1303,51 @@ async def test_the_second_lane_keeps_ingesting_after_the_first_crashes_and_while
         await supervisor.stop()
 
 
+async def test_a_restart_whose_old_adapter_fails_to_close_leaves_the_new_lane_running(
+    fakes: _Fakes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restart whose crashed adapter fails to close fails the refresh and nothing else.
+
+    The new lane is launched before the old adapter closes, so it is running, the source is
+    not named, and an event pushed at the new adapter lands. The close refuses only once: a
+    regression that left the old adapter open would otherwise have `stop()` raise over the
+    assertion that names it.
+    """
+    source = _source("A")
+    await _seed(fakes, source)
+    fakes.adapters.crash("A")
+    clock = _Clock()
+    supervisor = _supervisor(fakes, clock=clock)
+    await supervisor.start()
+    try:
+        await _drain(lambda: supervisor.crashed_sources() == ["A"])
+        first = fakes.adapters.built["A"]
+        refused: list[str] = []
+
+        async def refusing_close() -> None:
+            if not refused:
+                refused.append(source.name)
+                raise RuntimeError("the crashed adapter's socket would not close")
+            await FakeSourceAdapter.aclose(first)
+
+        monkeypatch.setattr(first, "aclose", refusing_close)
+        fakes.adapters.crashing.discard("A")
+        clock.advance(_settings().push_max_backoff_seconds)
+        with pytest.raises(RuntimeError, match="would not close"):
+            await supervisor.refresh()
+        restarted = fakes.adapters.built["A"]
+        assert restarted is not first, "the premise: the refresh opened a new adapter"
+        assert supervisor.running_sources() == ["A"], (
+            "the new lane is not running after the old adapter failed to close"
+        )
+        assert supervisor.crashed_sources() == []
+        restarted.seed(_item("a-1"), datetime.now(UTC))
+        restarted.push(SourceEvent(kind=SourceEventKind.ITEM_UPDATED, external_ids=("a-1",)))
+        await _drain(lambda: _stored(fakes.media_items) == ["a-1"])
+    finally:
+        await supervisor.stop()
+
+
 async def test_a_disabled_sources_crashed_lane_does_not_come_back(fakes: _Fakes) -> None:
     """Disabling a source drops its crashed lane at the next refresh, crash and adapter both.
 
@@ -1401,6 +1446,8 @@ async def test_a_restart_whose_credential_read_raises_is_spaced_again(
 
     So the refreshes after it are not each lost to the same raise: a source added meanwhile
     gets its lane, and its own read is the premise that the refresh read credentials at all.
+    A's row raises on its first read only, so a read inside the spacing is recorded, and the
+    assertion that names it reports it rather than the raise.
     """
     crashed, added = _source("A"), _source("B")
     await _seed(fakes, crashed)
@@ -1417,7 +1464,7 @@ async def test_a_restart_whose_credential_read_raises_is_spaced_again(
 
         async def unreadable(ref: str) -> SourceCredentials | None:
             asked.append(ref)
-            if ref == crashed.credentials_ref:
+            if ref == crashed.credentials_ref and asked.count(ref) == 1:
                 raise RuntimeError("A's credential row cannot be decrypted")
             return await stored(ref)
 
@@ -1502,6 +1549,8 @@ async def test_a_lane_cancelled_before_its_first_step_leaves_no_coroutine_unawai
     await _seed(fakes, _source("A"))
     supervisor = _supervisor(fakes)
     launched: list[str] = []
+    # Collected before the block as well, so what it records is only what this case leaves.
+    gc.collect()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         try:
