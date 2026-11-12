@@ -159,8 +159,9 @@ Versioning is `0.x` while the wire contract may still move —
   day before trying again, and its ERROR line names `usher set-credentials`. A
   lane that crashes, on a bug or a database write that failed, starts again on
   a new adapter at the first refresh at least `USHER_PUSH_MAX_BACKOFF_SECONDS`
-  later. Until then `/health/ready` names its source in `lanes.crashed_sources`,
-  and the counter `usher.source.push.crashes` counts the crashes.
+  after the crash, or after the last try to start it again. Until then
+  `/health/ready` names its source in `lanes.crashed_sources`, and the counter
+  `usher.source.push.crashes` counts the crashes.
 - **Every version of a title now plays as itself.** Reading one version of a
   group answered with the group's best file, so a copy could describe and stream
   another version's. A copy now takes its description and its stream from its
@@ -231,8 +232,8 @@ Versioning is `0.x` while the wire contract may still move —
   library where nothing is changing, Emby's only messages are `Sessions` frames
   minutes apart, and those never reset the lane's failure count, so a few quiet
   spells — however far apart — marked push unavailable until a restart. Any
-  message now counts as delivery, so on a quiet library only unbroken silence
-  marks push unavailable: about 25 minutes of it at the defaults.
+  message now counts as delivery, so silence alone marks push unavailable only
+  once it is unbroken: about 25 minutes of it at the defaults.
 
 ## [0.1.0] - 2026-09-24
 
