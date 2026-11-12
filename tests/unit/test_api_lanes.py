@@ -1481,6 +1481,9 @@ async def test_a_restart_whose_credential_read_raises_is_spaced_again(
         await _seed(fakes, added)
         clock.advance(spacing - 1)
         await supervisor.refresh()
+        assert added.credentials_ref in asked, (
+            "the premise: the refresh inside the spacing read credentials at all"
+        )
         assert asked == [crashed.credentials_ref, added.credentials_ref], (
             "a refresh inside the spacing read the crashed lane's row again"
         )

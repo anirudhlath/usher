@@ -1443,7 +1443,7 @@ async def test_a_channel_failing_two_thousand_times_raises_nothing(lane: _Lane) 
     await _run_until_spent(supervisor, adapter, timeout=30.0)
     assert adapter.attempts == 2001
     assert len(sleeps) == 2000
-    assert sleeps[-1] == 300.0
+    assert sleeps[-1] == supervisor._max_backoff
     assert lane.push_available == [False]
 
 
