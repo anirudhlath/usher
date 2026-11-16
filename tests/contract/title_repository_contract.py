@@ -17,6 +17,7 @@ from usher.ports.errors import RepositoryConflict, RepositoryNotFound
 from usher.ports.repository import (
     BrowseCursorPosition,
     BrowseSort,
+    NamedTitle,
     TitleGenres,
     TitleReference,
     TitleRepository,
@@ -1963,3 +1964,159 @@ class TitleRepositoryNaturalKeyContract:
         carried = self._reference(held)
 
         assert await repo.resolve_natural_keys([carried, carried, carried]) == {carried: held.id}
+
+
+class TitleRepositoryNameContract:
+    """`resolve_names` -- the read that turns an LLM's titles into catalog ids.
+
+    Every title is seeded through `add`. Whether the Postgres arm reaches
+    `ix_titles_name_lower_year` and runs one statement is asserted beside it in
+    `tests/integration/test_title_repository.py`; a dict has neither.
+    """
+
+    @staticmethod
+    async def _add(
+        repo: TitleRepository,
+        name: str,
+        year: int | None,
+        *,
+        kind: TitleKind = TitleKind.MOVIE,
+        votes: int | None = None,
+        state: EnrichmentState = EnrichmentState.ENRICHED,
+        title_id: uuid.UUID | None = None,
+    ) -> Title:
+        title = Title(
+            id=title_id or new_id(),
+            kind=kind,
+            name=name,
+            sort_name=name.lower(),
+            year=year,
+            tmdb_vote_count=votes,
+            enrichment_state=state,
+        )
+        await repo.add(title)
+        return title
+
+    async def test_a_name_matches_within_one_year_and_not_two(self, repo: TitleRepository) -> None:
+        """Either side of the year, because a model is off by one about as often as it is right."""
+        earlier = await self._add(repo, "Harbour Lantern", 2009)
+        later = await self._add(repo, "Ashgrove Tide", 2011)
+        exact = await self._add(repo, "Quiet Meridian", 2010)
+        await self._add(repo, "Salt Cellar", 2008)
+        await self._add(repo, "Paper Ledger", 2012)
+
+        probes = {
+            name: NamedTitle(name=name, year=2010)
+            for name in ("Harbour Lantern", "Ashgrove Tide", "Quiet Meridian")
+        }
+        too_far = [
+            NamedTitle(name="Salt Cellar", year=2010),
+            NamedTitle(name="Paper Ledger", year=2010),
+        ]
+
+        answers = await repo.resolve_names([*probes.values(), *too_far])
+
+        assert answers == {
+            probes["Harbour Lantern"]: earlier.id,
+            probes["Ashgrove Tide"]: later.id,
+            probes["Quiet Meridian"]: exact.id,
+        }
+
+    async def test_case_does_not_matter(self, repo: TitleRepository) -> None:
+        held = await self._add(repo, "The Salt Cellar", 2015)
+        probe = NamedTitle(name="the SALT cellar", year=2015)
+        assert held.name != probe.name, "the premise: the two spellings really differ"
+
+        assert await repo.resolve_names([probe]) == {probe: held.id}
+
+    async def test_of_two_titles_sharing_a_name_and_year_the_one_with_more_votes_wins(
+        self, repo: TitleRepository
+    ) -> None:
+        """The low-vote title goes in first, so insertion order and `id` both favour it."""
+        low_votes, high_votes = 1_200, 48_000
+        assert low_votes < high_votes
+        low = await self._add(repo, "Pale Meridian", 2023, votes=low_votes)
+        high = await self._add(repo, "Pale Meridian", 2023, votes=high_votes)
+        assert low.id < high.id, "the premise: an id-only tie-break would pick the wrong one"
+
+        probe = NamedTitle(name="Pale Meridian", year=2023)
+
+        assert await repo.resolve_names([probe]) == {probe: high.id}
+
+    async def test_a_title_with_votes_beats_one_whose_votes_are_unknown(
+        self, repo: TitleRepository
+    ) -> None:
+        """A genuine zero is a count, and `NULL` is not one."""
+        unknown = await self._add(repo, "Third Lantern", 2001, votes=None)
+        zero = await self._add(repo, "Third Lantern", 2001, votes=0)
+        assert unknown.id < zero.id, "the premise: the id tie-break would pick the unknown one"
+
+        probe = NamedTitle(name="Third Lantern", year=2001)
+
+        assert await repo.resolve_names([probe]) == {probe: zero.id}
+
+    async def test_equal_votes_fall_to_the_lower_id(self, repo: TitleRepository) -> None:
+        """The higher id is stored first, so storage order is not the answer."""
+        lower, higher = sorted([new_id(), new_id()])
+        await self._add(repo, "Twin Orchard", 1999, votes=700, title_id=higher)
+        await self._add(repo, "Twin Orchard", 1999, votes=700, title_id=lower)
+
+        probe = NamedTitle(name="Twin Orchard", year=1999)
+
+        assert await repo.resolve_names([probe]) == {probe: lower}
+
+    async def test_a_skeleton_never_matches(self, repo: TitleRepository) -> None:
+        """The skeleton carries the most votes, so only the state can keep it out."""
+        skeleton_votes, enriched_votes = 90_000, 10
+        assert enriched_votes < skeleton_votes, "the premise: the votes alone would pick it"
+        await self._add(
+            repo, "Ember Gate", 2018, votes=skeleton_votes, state=EnrichmentState.SKELETON
+        )
+        enriched = await self._add(repo, "Ember Gate", 2018, votes=enriched_votes)
+        await self._add(repo, "Tin Almanac", 2018, votes=5, state=EnrichmentState.SKELETON)
+
+        both = NamedTitle(name="Ember Gate", year=2018)
+        alone = NamedTitle(name="Tin Almanac", year=2018)
+
+        answers = await repo.resolve_names([both, alone])
+
+        assert answers == {both: enriched.id}
+        assert alone not in answers
+
+    async def test_a_series_matches_as_well_as_a_film(self, repo: TitleRepository) -> None:
+        show = await self._add(repo, "Long Winter Row", 2016, kind=TitleKind.SERIES)
+        film = await self._add(repo, "Brief Summer Row", 2016, kind=TitleKind.MOVIE)
+
+        series_probe = NamedTitle(name="Long Winter Row", year=2016)
+        film_probe = NamedTitle(name="Brief Summer Row", year=2016)
+
+        assert await repo.resolve_names([series_probe, film_probe]) == {
+            series_probe: show.id,
+            film_probe: film.id,
+        }
+
+    async def test_an_undated_title_matches_nothing(self, repo: TitleRepository) -> None:
+        """`BETWEEN` over a `NULL` year is never true, whatever the probe's year."""
+        undated = await self._add(repo, "Hollow Index", None)
+        dated = await self._add(repo, "Hollow Index", 2004)
+
+        probe = NamedTitle(name="Hollow Index", year=2004)
+
+        answers = await repo.resolve_names([probe])
+        assert answers == {probe: dated.id}
+        assert undated.id not in answers.values()
+
+    async def test_two_spellings_of_one_name_are_each_answered(self, repo: TitleRepository) -> None:
+        """Two probes, one title: the answer is keyed by what the caller asked."""
+        held = await self._add(repo, "Cobalt Verge", 2012)
+        plain = NamedTitle(name="Cobalt Verge", year=2012)
+        shouted = NamedTitle(name="COBALT VERGE", year=2012)
+        stray = NamedTitle(name="Unheld Name", year=2012)
+
+        assert await repo.resolve_names([plain, shouted, plain, stray]) == {
+            plain: held.id,
+            shouted: held.id,
+        }
+
+    async def test_no_probes_resolve_to_nothing(self, repo: TitleRepository) -> None:
+        assert await repo.resolve_names([]) == {}

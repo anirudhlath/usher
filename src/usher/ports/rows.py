@@ -18,6 +18,7 @@ from usher.ports.repository import (
     ImageRepository,
     MediaItemRepository,
     PersonRepository,
+    SeedRowRepository,
     TitleNeighborRepository,
     TitleRepository,
     WatchStateRepository,
@@ -45,6 +46,9 @@ class RowContext:
     # `list_for_user` answers the newest generation, so `CuratedProvider`
     # never asks which night it is looking at.
     curated: CuratedRowRepository
+    # The same record for every household, which is why a provider asks for the
+    # seeds it wants rather than for "this user's rows".
+    seed_rows: SeedRowRepository
     # Read by `BaseRow.hydrate` rather than by any single provider, which is
     # why it is a port here and not a mapping the composer computes.
     images: ImageRepository

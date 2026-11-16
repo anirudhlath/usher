@@ -1,17 +1,22 @@
-"""The Emby push channel: the ledger, the mapper, the socket, the watchdog."""
+"""The Emby push channel: the ledger, the mapper, the socket, the watchdog, and a lane over it."""
 
 import asyncio
+import gc
 import json
 import logging
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
 from typing import Any
 
+import httpx
 import pytest
 from loguru import logger as loguru_logger
+from pydantic import SecretStr
 
 from tests.fakes.emby_fixtures import load_emby_fixture
+from tests.fakes.emby_server import USER_ID, FakeEmbyServer
 from tests.fakes.push_connection import FakePushConnection, FakePushConnector
+from usher.adapters.emby.adapter import EmbyAdapter
 from usher.adapters.emby.push import (
     SUBSCRIBE_FRAME,
     WEBSOCKET_PATH,
@@ -25,8 +30,13 @@ from usher.adapters.emby.push import (
 )
 from usher.adapters.websocket import DEFAULT_MAX_FRAME_BYTES
 from usher.config import Settings
+from usher.domain.enums import SourceKind
+from usher.domain.ids import new_id
+from usher.domain.source import Source
+from usher.ports.credentials import SourceCredentials
 from usher.ports.errors import PortUnavailable
-from usher.ports.source import SourceEvent, SourceEventKind
+from usher.ports.source import SourceAdapter, SourceEvent, SourceEventKind
+from usher.services.push import PushOutcome, PushSupervisor
 from usher.telemetry import configure_logging
 
 # The two `UserDataList` entries of `push_user_data_changed.json`, and the
@@ -727,7 +737,15 @@ async def test_a_consumer_and_a_producer_genuinely_overlap() -> None:
                 if len(consumed) == rounds:
                     return
 
-        await asyncio.wait_for(asyncio.gather(produce(), consume()), timeout=BOUND)
+        # The windows last a fraction of a millisecond, about one collector pass, so a pass
+        # landing inside them reads as serialisation. Collection waits for the timestamps.
+        was = gc.isenabled()
+        gc.disable()
+        try:
+            await asyncio.wait_for(asyncio.gather(produce(), consume()), timeout=BOUND)
+        finally:
+            if was:
+                gc.enable()
 
     # Serialised would mean every produce() timestamp precedes every
     # consume() one. Genuine interleaving means the consumer had already
@@ -1370,3 +1388,81 @@ async def test_the_real_connection_translates_a_failed_send_by_type(
     assert "api_key" not in message
     assert WEBSOCKET_PATH in message
     assert "send failed: ConnectionClosed" in message
+
+
+# -- a rejected login, through a real adapter --------------------------------
+
+
+async def test_a_rejected_login_reaches_the_server_once_until_the_day_has_passed() -> None:
+    """A rejected login reaches the server once, and the next login waits for the day.
+
+    `reauth_cooldown_seconds=0.0` because the session's cooldown runs on real time, which
+    the adapter's `clock` never reaches. The lane's own wait is then all that holds a
+    second login back, and the hook standing in for it ends the day by making the stored
+    password right again.
+    """
+    server = FakeEmbyServer()
+    source = Source(
+        kind=SourceKind.EMBY,
+        name="Living Room Emby",
+        base_url="https://emby.invalid",
+        credentials_ref="ref-emby",
+        device_id=str(new_id()),
+    )
+    frame = load_emby_fixture("push_library_changed")
+    expected = list(to_source_events(frame, source_user_id=USER_ID))
+    connection = FakePushConnection()
+    connection.deliver(json.dumps(frame))
+    client = httpx.AsyncClient(transport=server.transport(), base_url=source.base_url)
+    adapter = EmbyAdapter(
+        source,
+        SourceCredentials(username=server.username, password=SecretStr(server.password)),
+        client=client,
+        reauth_cooldown_seconds=0.0,
+        push_connect=FakePushConnector([connection]),
+    )
+    applied: list[SourceEvent] = []
+    gaps: list[str] = []
+    push_available: list[bool] = []
+    frame_applied = asyncio.Event()
+
+    async def apply(source: Source, adapter: SourceAdapter, event: SourceEvent) -> PushOutcome:
+        applied.append(event)
+        if applied == expected:
+            frame_applied.set()
+        return PushOutcome()
+
+    async def close_gap(source: Source, adapter: SourceAdapter) -> None:
+        gaps.append(source.name)
+
+    async def set_push_available(source: Source, available: bool) -> None:
+        push_available.append(available)
+
+    async def wait_out_the_day(seconds: float) -> None:
+        assert server.authentications == 1, "a second login reached the server inside the day"
+        assert adapter.supports_push is False
+        assert seconds == 86_400.0
+        server.credentials_valid = True
+
+    supervisor = PushSupervisor(apply, close_gap, set_push_available, sleep=wait_out_the_day)
+    server.reject_credentials()
+    lane = asyncio.create_task(supervisor.run(source, adapter))
+    applied_signal = asyncio.create_task(frame_applied.wait())
+    try:
+        done, _ = await asyncio.wait(
+            {lane, applied_signal}, timeout=BOUND, return_when=asyncio.FIRST_COMPLETED
+        )
+        if lane in done:
+            # Re-raises what escaped `run`, which is where a failed hook assertion goes.
+            lane.result()
+        assert applied_signal in done, "the lane never applied the frame"
+    finally:
+        lane.cancel()
+        applied_signal.cancel()
+        await asyncio.gather(lane, applied_signal, return_exceptions=True)
+        await adapter.aclose()
+        await client.aclose()
+    assert server.authentications == 2
+    assert applied == expected
+    assert gaps == ["Living Room Emby"]
+    assert push_available == [False, True]

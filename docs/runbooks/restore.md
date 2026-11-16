@@ -30,12 +30,16 @@ every source will ask to be re-entered
 
 The degradation is diagnosable rather than silent — Fernet's authentication tag
 makes a wrong key an `InvalidToken`, which surfaces as `PortDataMalformed` and
-renders on `GET /admin/sources/{id}/status` as *re-enter your credentials* — but
-that is a recovery you have to perform by hand, per source. **Store the key with
-the artifact, or its credentials restore as ciphertext nothing can read.**
+renders on `GET /admin/sources/{id}/status` as *re-enter your credentials* — and
+the recovery is exactly that: every source's login entered again, one
+`usher set-credentials` per source. It overwrites the unreadable row without
+trying to read it, so it needs only the key this deployment runs; the
+[command-line guide](../guide/command-line.md#backup-restore-and-secrets) has
+the invocation. **Store the key with the artifact, or its credentials restore
+as ciphertext nothing can read.**
 
-✅ **One case escapes the hand recovery, and it needs the old key rather than
-the credentials.** If you still hold the key the artifact was taken under, you
+✅ **One case escapes the re-entry, and it needs the old key rather than the
+credentials.** If you still hold the key the artifact was taken under, you
 do not have to re-enter anything: restore the file, then run the rotation
 command *from* that key *to* the one this deployment uses.
 
@@ -47,10 +51,11 @@ set -x USHER_SECRET_KEY $USHER_NEW_SECRET_KEY                # and restart
 ```
 
 It commits per row and re-running is the recovery, so an interrupted attempt is
-safe to repeat. Any row it reports as **refused** is one neither key opens, and
-that one really is a hand re-entry. If you do *not* have the old key at all,
-this buys nothing — there is no path from ciphertext to plaintext without it,
-which is the point of the paragraph above.
+safe to repeat. Any row it reports as **refused** is one neither key opens:
+re-enter that source's login with `usher set-credentials` after the last line
+above, so that it is stored under the key this deployment runs. If you do *not*
+have the old key at all, this buys nothing — there is no path from ciphertext
+to plaintext without it, which is the point of the paragraph above.
 
 ### 🔴 `.env` points at your real database, and `alembic` reads it
 

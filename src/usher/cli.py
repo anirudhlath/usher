@@ -9,9 +9,10 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Final
+from typing import Final, NoReturn
 
 import httpx
 from pydantic import SecretStr, ValidationError
@@ -39,6 +40,7 @@ from usher.composition import (
     nothing,
     open_adapter,
     run_bootstrap,
+    seed_row_service,
     selected_sources,
     unit_of_work,
 )
@@ -53,10 +55,12 @@ from usher.db.users import default_user, ensure_default_user
 from usher.domain.bootstrap import BootstrapPhase
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.jobs import JobKind, JobPriority
+from usher.domain.seed_rows import SeedRow
 from usher.domain.source import Source
 from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus, WalkProgress, walk_progress
 from usher.eval.errors import EvalDependencyMissing
 from usher.eval.goldens.suggest import GATE_SEED
+from usher.ports.credentials import SourceCredentials
 from usher.ports.errors import (
     PortAuthFailed,
     PortDataMalformed,
@@ -65,6 +69,7 @@ from usher.ports.errors import (
 )
 from usher.ports.events import NullEventPublisher
 from usher.ports.jobs import JobRequest
+from usher.ports.repository import TitleRepository
 from usher.ports.rows import RowContext
 from usher.ports.search import SearchFilters, SearchMode, SuggestTier
 from usher.ports.source import SourceAdapter
@@ -112,6 +117,9 @@ SYNC_KINDS = ("full", "delta")
 # answer, and a knob would invite tuning a number that is about to stop
 # mattering.
 _IDLE_SLEEP_SECONDS = 5.0
+# How many neighbours `usher similar <id>` lists when `--limit` is not given. The flag
+# has no argparse default so that `--build-row` can refuse it by being given.
+_SIMILAR_LIMIT = 10
 # The failures that are the *operator's* to fix, and so the ones `main` answers with a
 # message instead of a stack.
 OPERATOR_ERRORS: tuple[type[Exception], ...] = (
@@ -629,8 +637,19 @@ async def _schedule(settings: Settings, *, once: bool) -> None:
         pool_size=settings.db_pool_size,
         max_overflow=settings.db_max_overflow,
     )
+    sessions = build_session_factory(engine)
+    # Both built once and closed in the `finally`. With `USHER_LLM_ENABLED=false` the
+    # client is `None` and the seed-row job is not registered.
+    client, aclose_client = await llm_client(settings, report=False)
+    provider, aclose_provider = await metadata_provider(settings)
     try:
-        scheduler = build_scheduler(settings, sessions=build_session_factory(engine))
+        scheduler = build_scheduler(
+            settings,
+            sessions=sessions,
+            client=client,
+            metadata=provider,
+            user_id=DefaultUserId(sessions),
+        )
         register_scheduler_gauges(scheduler.read)
         registered = len(scheduler.jobs)
         if once:
@@ -643,6 +662,8 @@ async def _schedule(settings: Settings, *, once: bool) -> None:
         print(f"scheduling {registered} jobs every {settings.scheduler_tick_seconds:g}s")
         await scheduler.run()
     finally:
+        await aclose_provider()
+        await aclose_client()
         await engine.dispose()
 
 
@@ -976,8 +997,15 @@ async def _similar(
     rebuild: bool,
     resume: bool = False,
     max_seeds: int | None = None,
+    build_row: bool = False,
 ) -> None:
-    """Report the table's age, read one title's neighbours, or recompute it."""
+    """Report the table's age, read one title's neighbours and stored row, or write either."""
+    if build_row:
+        if title_id is None:
+            # `parse_args` refuses this; it is reachable only by a caller that skips it.
+            raise SystemExit("usher similar: --build-row needs a title id")
+        await _similar_build_row(settings, title_id=title_id)
+        return
     async with _session_for(settings) as session:
         pipeline = build_pipeline(session, settings)
         if rebuild:
@@ -1036,6 +1064,82 @@ async def _similar(
             print("no neighbours have ever been computed -- run `usher similar --rebuild`")
         elif not rows:
             print("no neighbours for this title")
+        # The home screen reads this record before it falls back to the neighbours above,
+        # so the two are shown together. A title with no record prints nothing here.
+        stored = (await pipeline.seed_rows.list_for([title_id])).get(title_id)
+        if stored is not None:
+            print("stored row:")
+            await _print_seed_row(pipeline.titles, stored)
+
+
+async def _similar_build_row(settings: Settings, *, title_id: uuid.UUID) -> None:
+    """Build one seed's row now, due or not, through the code the scheduled job runs."""
+    # Both releases start as the shared no-op and are replaced as each client opens, so a
+    # raise between the two still closes what was opened. The engine is `_session_for`'s.
+    aclose_client: Callable[[], Awaitable[None]] = nothing
+    aclose_provider: Callable[[], Awaitable[None]] = nothing
+    try:
+        client, aclose_client = await llm_client(settings, report=False)
+        if client is None:
+            raise SystemExit(
+                "usher similar --build-row: this deployment has no LLM, so there is no row "
+                "to build (set USHER_LLM_ENABLED=true and point USHER_LLM_BASE_URL at an "
+                "OpenAI-compatible endpoint)"
+            )
+        provider, aclose_provider = await metadata_provider(settings)
+        async with _session_for(settings) as session:
+            pipeline = build_pipeline(session, settings)
+            seed = await pipeline.titles.get(title_id)
+            if seed is None:
+                raise SystemExit(f"usher similar --build-row: no title has the id {title_id}")
+            service = seed_row_service(session, settings, client=client, metadata=provider)
+            try:
+                row = await service.build(seed)
+            except PortDataMalformed as exc:
+                raise SystemExit(
+                    f"usher similar --build-row: {exc}\n"
+                    "(the title's stored row, if it has one, still stands)"
+                ) from exc
+            year = f" ({seed.year})" if seed.year is not None else ""
+            print(f"seed: {seed.name}{year} {seed.id}")
+            if provider is None:
+                # Said once, since the sources below would otherwise show no `recommended`
+                # and leave an operator to guess whether the list was empty or never asked.
+                print(
+                    "recommended: not consulted, no metadata provider is configured "
+                    "(USHER_TMDB_API_KEY)"
+                )
+            await _print_seed_row(pipeline.titles, row)
+    finally:
+        await aclose_provider()
+        await aclose_client()
+
+
+async def _print_seed_row(titles: TitleRepository, row: SeedRow) -> None:
+    """A stored record's latest attempt, its last good build, and its cards in order.
+
+    `attempted_at` and `built_at` are both printed because a failed attempt keeps the
+    cards of an earlier build, and one time could not tell the two apart. Each card keeps
+    its position even when its title has since been deleted.
+    """
+    known = (
+        {one.id: one for one in await titles.list_by_ids([card.title_id for card in row.cards])}
+        if row.cards
+        else {}
+    )
+    print(f"outcome: {row.attempt_outcome.value}")
+    print(f"attempted_at: {row.attempted_at.isoformat()}")
+    print(f"built_at: {row.built_at.isoformat() if row.built_at is not None else 'never'}")
+    print(f"cards: {len(row.cards)}")
+    for position, card in enumerate(row.cards, start=1):
+        # Sorted, as the table stores them: a set has no order of its own.
+        sources = "+".join(sorted(source.value for source in card.sources))
+        title = known.get(card.title_id)
+        if title is None:
+            label = f"(title {card.title_id} is no longer in the catalog)"
+        else:
+            label = title.name if title.year is None else f"{title.name} ({title.year})"
+        print(f"{position:>2}. {label} [{sources}]")
 
 
 async def _home(settings: Settings, *, limit: int, repeat: int) -> None:
@@ -1059,6 +1163,7 @@ async def _home(settings: Settings, *, limit: int, repeat: int) -> None:
             collections=pipeline.collections,
             affinities=lambda: pipeline.taste.genre_affinity(user.id),
             curated=pipeline.curated_rows,
+            seed_rows=pipeline.seed_rows,
             images=pipeline.images,
         )
         cache = RowCache(clock=lambda: datetime.now(UTC))
@@ -1421,11 +1526,58 @@ def _print_backup_report(report: BackupReport) -> None:
     print(CREDENTIAL_KEY_WARNING)
 
 
-#: What POSIX calls an environment variable name, and what `--new-key-env`
-#: will accept as one. Anything else is refused **without being printed**:
-#: `usher rotate-secret --new-key-env <the key>` is the mistake this exists
-#: for, and a base64 key (`+/=`) or a hyphenated one fails here.
+#: What POSIX calls an environment variable name, and what every `--*-env`
+#: flag will accept as one. Anything else is refused **without being printed**:
+#: `--new-key-env <the key>` and `--password-env <the password>` are the
+#: mistakes this exists for, and a base64 value (`+/=`) or a hyphenated one
+#: fails here.
 _ENVIRONMENT_VARIABLE_NAME: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+#: The subcommands whose command lines may hold a key or a password where it does not belong.
+_SECRET_COMMANDS: Final = frozenset({"rotate-secret", "set-credentials"})
+
+#: True while `_parse_without_echoing_unknown_values` parses a command line naming
+#: one of them. The whole line, because the top-level parser refuses a value typed
+#: before the subcommand, as in `usher --password <it> set-credentials`.
+_QUOTING_NOTHING: Final[ContextVar[bool]] = ContextVar("_QUOTING_NOTHING", default=False)
+
+#: argparse's refusals that are made of the parser's own literals and quote nothing
+#: typed. Every other refusal on such a line can: an invalid choice, an ignored
+#: explicit argument, an ambiguous option and an unrecognized argument each do.
+_LITERAL_REFUSAL: Final = re.compile(
+    r"the following arguments are required: [\w/, -]+"
+    r"|argument [\w/-]+: expected (?:one|at most one|at least one|\d+) arguments?"
+)
+
+_NOT_SHOWN: Final = (
+    "an argument was refused and is not shown (on a command line naming rotate-secret or "
+    "set-credentials, a refused value is most likely a key or a password) -- a secret is "
+    "named only with --new-key-env, --username-env or --password-env, which take the NAMES "
+    "of exported environment variables"
+)
+
+
+class _Unquoted(str):
+    """A refusal this module wrote from its own literals, which `_Parser` passes through."""
+
+
+class _Parser(argparse.ArgumentParser):
+    """`ArgumentParser`, quoting nothing typed in a refusal while `_QUOTING_NOTHING` is set.
+
+    `add_subparsers` builds every subparser from this class too, so the scrub reaches a
+    subcommand's own refusals as well as the top level's. It fails closed: a refusal
+    that is neither `_Unquoted` nor a `_LITERAL_REFUSAL` becomes `_NOT_SHOWN`, because
+    argparse can quote part of a token (`-h-<value>` is refused as `'-<value>'`).
+    """
+
+    def error(self, message: str) -> NoReturn:
+        if (
+            _QUOTING_NOTHING.get()
+            and not isinstance(message, _Unquoted)
+            and not _LITERAL_REFUSAL.fullmatch(message)
+        ):
+            message = _NOT_SHOWN
+        super().error(message)
 
 
 class _RefuseAKeyOnTheCommandLine(argparse.Action):
@@ -1441,10 +1593,12 @@ class _RefuseAKeyOnTheCommandLine(argparse.Action):
         # `parser.error`: exit 2 with usage on stderr, the way every other
         # argument failure in this CLI exits. The value is not interpolated.
         parser.error(
-            "--new-key is not an argument of this command, and the value after it is not "
-            "repeated here because it is probably your new key. A key in argv is in your "
-            "shell history and in `ps` output for every user on this box. Export it and "
-            "pass the variable's NAME: --new-key-env USHER_NEW_SECRET_KEY"
+            _Unquoted(
+                "--new-key is not an argument of this command, and the value after it is not "
+                "repeated here because it is probably your new key. A key in argv is in your "
+                "shell history and in `ps` output for every user on this box. Export it and "
+                "pass the variable's NAME: --new-key-env USHER_NEW_SECRET_KEY"
+            )
         )
 
 
@@ -1530,8 +1684,8 @@ def _rotation_refusal(report: RotationReport) -> str:
     return (
         f"usher rotate-secret: {count} "
         f"{_unit('credential', count)} could not be decrypted by either key "
-        "and must be re-entered -- re-register those sources with "
-        "`POST /admin/sources` once the new key is in place"
+        "and must be re-entered -- store each with `usher set-credentials` "
+        "once the new key is in place"
     )
 
 
@@ -1569,6 +1723,106 @@ def _print_rotation_report(report: RotationReport, *, new_key_env: str) -> None:
             f"set USHER_SECRET_KEY to ${new_key_env}'s value and restart, "
             "or the next start cannot read what this run just wrote"
         )
+
+
+class _RefuseACredentialOnTheCommandLine(argparse.Action):
+    """`--username` and `--password` exist so that typing either is a refusal rather than a leak."""
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: object,
+        option_string: str | None = None,
+    ) -> None:
+        # This action's own option string rather than what was typed, so the
+        # message is built from the parser's literals alone.
+        flag = self.option_strings[0]
+        parser.error(
+            _Unquoted(
+                f"{flag} is not an argument of this command, and the value after it is not "
+                "repeated here because it is probably a credential. A credential in argv is in "
+                "your shell history and in `ps` output for every user on this box. Export it "
+                f"and pass the variable's NAME: {flag}-env VAR"
+            )
+        )
+
+
+def _credential_from(flag: str, variable: str) -> SecretStr:
+    """The value of the variable `flag` names, or a refusal that repeats neither.
+
+    `flag` is always one of this module's literals. `variable` is never interpolated:
+    a password can be a legal variable name, so the name may be the secret itself.
+    """
+    if not _ENVIRONMENT_VARIABLE_NAME.fullmatch(variable):
+        raise SystemExit(
+            f"usher set-credentials: {flag} takes the NAME of an exported environment "
+            "variable ([A-Za-z_][A-Za-z0-9_]*), and what it was given is not one. It is not "
+            "repeated here, because the commonest way to reach this message is to have "
+            "passed the value itself -- export it into a variable and name the variable"
+        )
+    value = os.environ.get(variable, "")
+    if not value:
+        raise SystemExit(
+            f"usher set-credentials: the variable {flag} names is not set or is empty; its "
+            "name is not repeated here, because a password can look like a variable name"
+        )
+    return SecretStr(value)
+
+
+async def _set_credentials(
+    settings: Settings, *, source: str, username_env: str, password_env: str
+) -> None:
+    """Overwrite one source's stored login with the values of two exported variables.
+
+    Both are read before the first query, so every refusal about a variable arrives
+    before the database is touched. `source` is matched as an id when it parses as one
+    and as an exact name otherwise, among *all* sources rather than `selected_sources`,
+    which skips a disabled one, and a disabled source is one an operator may be fixing.
+    No login is attempted: an extra rejection can count against an account that locks.
+    """
+    username = _credential_from("--username-env", username_env)
+    password = _credential_from("--password-env", password_env)
+    matches_source = _source_matcher(source)
+    async with _session_for(settings) as session:
+        pipeline = build_pipeline(session, settings)
+        matches = [
+            candidate
+            for candidate in await pipeline.sources.list_all()
+            if matches_source(candidate)
+        ]
+        # Neither refusal repeats what `--source` was given: it is an argument too.
+        if not matches:
+            raise SystemExit(
+                "usher set-credentials: no source has the name or id given to --source"
+            )
+        if len(matches) > 1:
+            # Only a name can match twice, since an id is the primary key.
+            raise SystemExit(
+                f"usher set-credentials: {len(matches)} sources have the name given to "
+                "--source, and this command cannot tell them apart -- pass the id of the one "
+                "you mean instead, as `GET /admin/sources` lists them"
+            )
+        (chosen,) = matches
+        await pipeline.credentials.put(
+            chosen.credentials_ref,
+            SourceCredentials(username=username.get_secret_value(), password=password),
+            owner_id=chosen.id,
+        )
+        await session.commit()
+    print(
+        f"usher set-credentials: stored new credentials for {chosen.name}. Restart Usher: "
+        "running lanes and the worker's cached adapters hold the old password until then."
+    )
+
+
+def _source_matcher(given: str) -> Callable[[Source], bool]:
+    """Which source `--source`'s value names: the id it parses as, or else the exact name."""
+    try:
+        wanted = uuid.UUID(given)
+    except ValueError:
+        return lambda source: source.name == given
+    return lambda source: source.id == wanted
 
 
 async def _push(settings: Settings, *, source_name: str | None, probe: bool) -> None:
@@ -1661,8 +1915,8 @@ def _as_uuid(value: str, what: str) -> uuid.UUID:
         raise SystemExit(f"{what} is not a uuid: {value}") from exc
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="usher")
+def build_parser() -> _Parser:
+    parser = _Parser(prog="usher")
     # The error boundary's own escape hatch, and the reason the boundary is allowed to
     # swallow a stack at all.
     parser.add_argument(
@@ -1834,14 +2088,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     similar = sub.add_parser(
-        "similar", help="how old the neighbour table is, one title's neighbours, or a rebuild"
+        "similar",
+        help="how old the neighbour table is, one title's neighbours and stored row, or a rebuild",
     )
     # Optional because `--rebuild` is the write form of the same command. Two
     # subcommands for one artefact is how `usher index` and its backfill would
     # have drifted; the cross-argument rule in `parse_args` is what argparse
     # cannot express.
     similar.add_argument("title_id", nargs="?")
-    similar.add_argument("--limit", type=int, default=10)
+    similar.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help=f"with a title id and no --build-row: neighbours to list (default {_SIMILAR_LIMIT})",
+    )
     similar.add_argument(
         "--rebuild",
         action="store_true",
@@ -1857,6 +2117,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="with --rebuild: stop after this many seeds; the rest stay stale for --resume",
+    )
+    similar.add_argument(
+        "--build-row",
+        action="store_true",
+        help="build this title's Because You Watched row now, due or not, and print it",
     )
 
     home = sub.add_parser("home", help="compose the home screen, and time it")
@@ -1944,28 +2209,83 @@ def build_parser() -> argparse.ArgumentParser:
             "export it, do not put it in .env"
         ),
     )
+
+    set_credentials = sub.add_parser(
+        "set-credentials",
+        help="store a new username and password for one source",
+        allow_abbrev=False,
+    )
+    # The tripwires, first for `rotate-secret`'s reason.
+    for tripwire in ("--username", "--password"):
+        set_credentials.add_argument(
+            tripwire,
+            nargs="?",
+            action=_RefuseACredentialOnTheCommandLine,
+            dest=argparse.SUPPRESS,
+            help=argparse.SUPPRESS,
+        )
+    set_credentials.add_argument(
+        "--source",
+        required=True,
+        metavar="NAME_OR_ID",
+        help="the source's id, as GET /admin/sources lists it, or its name exactly as registered",
+    )
+    # **Variable names, never values**, and required rather than defaulted.
+    set_credentials.add_argument(
+        "--username-env",
+        required=True,
+        metavar="VAR",
+        help="NAME of an exported environment variable holding the username",
+    )
+    set_credentials.add_argument(
+        "--password-env",
+        required=True,
+        metavar="VAR",
+        help=(
+            "NAME of an exported environment variable holding the password -- the name, "
+            "not the password; export it, do not put it in .env"
+        ),
+    )
     return parser
 
 
-def _parse_without_echoing_unknown_values(
-    parser: argparse.ArgumentParser, argv: list[str]
-) -> argparse.Namespace:
-    """`parser.parse_args`, without echoing `rotate-secret`'s unrecognised values."""
-    args, unknown = parser.parse_known_args(argv)
-    if unknown:
-        if getattr(args, "command", None) == "rotate-secret":
-            parser.error(
-                f"unrecognized arguments for rotate-secret ({len(unknown)}, not shown -- on "
-                "this command an unrecognized value is most likely your new key). The only "
-                "way to name a key here is --new-key-env, which takes the NAME of an "
-                "exported environment variable"
-            )
-        # argparse's own wording, kept byte-for-byte so every other command's
-        # refusal reads exactly as it did before this function existed. (Its
-        # `%`-formatting is spelled as an f-string here only because ruff's
-        # UP031 refuses the original.)
-        parser.error(f"unrecognized arguments: {' '.join(unknown)}")
-    return args
+def _parse_without_echoing_unknown_values(parser: _Parser, argv: list[str]) -> argparse.Namespace:
+    """`parser.parse_args`, quoting no argument of a command line naming a secret command.
+
+    `rotate-secret`'s and `set-credentials`' unknowns are counted here, and every other
+    refusal on such a line is `_Parser`'s to scrub, while `_QUOTING_NOTHING` is set.
+    """
+    quoting_nothing = _QUOTING_NOTHING.set(not _SECRET_COMMANDS.isdisjoint(argv))
+    try:
+        args, unknown = parser.parse_known_args(argv)
+        if unknown:
+            if getattr(args, "command", None) == "rotate-secret":
+                parser.error(
+                    _Unquoted(
+                        f"unrecognized arguments for rotate-secret ({len(unknown)}, not shown "
+                        "-- on this command an unrecognized value is most likely your new "
+                        "key). The only way to name a key here is --new-key-env, which takes "
+                        "the NAME of an exported environment variable"
+                    )
+                )
+            if getattr(args, "command", None) == "set-credentials":
+                parser.error(
+                    _Unquoted(
+                        f"unrecognized arguments for set-credentials ({len(unknown)}, not "
+                        "shown -- on this command an unrecognized value is most likely a "
+                        "password). The only way to name a credential here is --username-env "
+                        "and --password-env, which take the NAMES of exported environment "
+                        "variables"
+                    )
+                )
+            # argparse's own wording, kept byte-for-byte so a line naming neither
+            # secret command reads exactly as it did before this function existed.
+            # (Its `%`-formatting is spelled as an f-string here only because ruff's
+            # UP031 refuses the original.)
+            parser.error(f"unrecognized arguments: {' '.join(unknown)}")
+        return args
+    finally:
+        _QUOTING_NOTHING.reset(quoting_nothing)
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
@@ -2012,6 +2332,20 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         if args.repeat < 1:
             parser.error("--repeat must be at least 1")
     if args.command == "similar":
+        if args.build_row:
+            # Before the rules below, so `--build-row --rebuild` is refused by name and
+            # not by the neighbouring "a title id, or --rebuild" sentence.
+            if not args.title_id:
+                parser.error("--build-row needs a title id")
+            for flag, given in (
+                ("--rebuild", args.rebuild),
+                ("--resume", args.resume),
+                ("--max-seeds", args.max_seeds is not None),
+                # A row is up to 20 cards and all of them print, so a limit has no meaning.
+                ("--limit", args.limit is not None),
+            ):
+                if given:
+                    parser.error(f"--build-row cannot be combined with {flag}")
         # **No arguments is the whole-table report rather than an error**: the
         # per-title form prints two of the three staleness facts and has no
         # whole-table spelling, which is what issue #17 asks for.
@@ -2169,10 +2503,11 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> None:
             _similar(
                 settings,
                 title_id=None if args.title_id is None else _as_uuid(args.title_id, "title id"),
-                limit=args.limit,
+                limit=_SIMILAR_LIMIT if args.limit is None else args.limit,
                 rebuild=args.rebuild,
                 resume=args.resume,
                 max_seeds=args.max_seeds,
+                build_row=args.build_row,
             )
         )
     elif args.command == "home":
@@ -2197,6 +2532,16 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> None:
         # environment read is inside `_rotate`, so nothing between argparse
         # and the store ever holds a key in a frame a traceback would print.
         asyncio.run(_rotate(settings, new_key_env=args.new_key_env))
+    elif args.command == "set-credentials":
+        # Names again, for the same reason: the values are read inside the arm.
+        asyncio.run(
+            _set_credentials(
+                settings,
+                source=args.source,
+                username_env=args.username_env,
+                password_env=args.password_env,
+            )
+        )
     else:
         # Imported here, not at module scope: uvicorn.run blocks, and nothing
         # about the bootstrap path should pay for importing the server.

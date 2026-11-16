@@ -134,7 +134,7 @@ class LLMCallRow(Base):
     model: Mapped[str] = mapped_column(Text, nullable=False)
     # A closed vocabulary, so `GROUP BY purpose` stays a usable telemetry
     # dimension instead of a cardinality footgun. `VARCHAR(32)`;
-    # `query_expansion` is the longest member at 15 characters.
+    # `because_you_watched` is the longest member at 19 characters.
     purpose: Mapped[LLMPurpose] = mapped_column(enum_column(LLMPurpose, length=32), nullable=False)
     # Recorded exactly, and that is the mitigation for both prices defaulting
     # to `0`: spend is recomputable from this ledger after the fact when an

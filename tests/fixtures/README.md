@@ -89,6 +89,7 @@ can be matched up by eye.
 | `tt99001000` | the 8-digit-tconst validation case |
 | TMDb `90000550` / `90001399` | `tmdb/movie.json` / `tmdb/series.json` |
 | TMDb `96000000`/`96000001` | seasons; `97000001`/`97000002` episodes |
+| TMDb `9002xxxx` / `9003xxxx` | `tmdb/recommendations_movie.json` / `tmdb/recommendations_tv.json` results |
 | TMDb `93xxxxxx` / `94xxxxxx` / `95xxxxxx` | people / companies+networks / genres+keywords |
 
 `movie_ids.slice.jsonl` and `tv_series_ids.slice.jsonl` both carry

@@ -1,0 +1,61 @@
+{
+  "page": 1,
+  "results": [
+    {
+      "adult": false,
+      "backdrop_path": "/synthetic-recommended-series-backdrop-a.jpg",
+      "genre_ids": [95010765, 95000018],
+      "id": 90030002,
+      "media_type": "tv",
+      "name": "Invented Series One",
+      "origin_country": ["US"],
+      "original_language": "en",
+      "original_name": "Invented Series One",
+      "overview": "A synthetic overview for a series that does not exist.",
+      "popularity": 14.2,
+      "poster_path": "/synthetic-recommended-series-poster-a.jpg",
+      "first_air_date": "2011-04-17",
+      "softcore": false,
+      "vote_average": 8.0,
+      "vote_count": 2345
+    },
+    {
+      "adult": false,
+      "backdrop_path": "/synthetic-recommended-series-backdrop-b.jpg",
+      "genre_ids": [95000018],
+      "id": 90030003,
+      "media_type": "tv",
+      "name": "Invented Series Two",
+      "origin_country": ["GB"],
+      "original_language": "en",
+      "original_name": "Invented Series Two",
+      "overview": "A synthetic overview for a second series that does not exist.",
+      "popularity": 52.7,
+      "poster_path": "/synthetic-recommended-series-poster-b.jpg",
+      "first_air_date": "2016-09-02",
+      "softcore": false,
+      "vote_average": 7.3,
+      "vote_count": 640
+    },
+    {
+      "adult": false,
+      "backdrop_path": null,
+      "genre_ids": [],
+      "id": 90030001,
+      "media_type": "tv",
+      "name": "Invented Series Three",
+      "origin_country": [],
+      "original_language": "en",
+      "original_name": "Invented Series Three",
+      "overview": "",
+      "popularity": 2.4,
+      "poster_path": null,
+      "first_air_date": "",
+      "softcore": false,
+      "vote_average": 0.0,
+      "vote_count": 0
+    }
+  ],
+  "total_pages": 2,
+  "total_results": 31
+}

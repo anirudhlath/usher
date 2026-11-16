@@ -2023,9 +2023,9 @@ BUCKETS = ("safe", "translated", "exposed-copy", "exposed-sqlalchemy")
 
 #: The published figures this audit is pinned against, keyed by reading.
 PUBLISHED: Mapping[str, Mapping[str, int]] = {
-    "closure": {"safe": 22, "translated": 36, "exposed-copy": 30, "exposed-sqlalchemy": 1},
-    "path": {"safe": 20, "translated": 37, "exposed-copy": 31, "exposed-sqlalchemy": 1},
-    "pydantic": {"safe": 16, "translated": 37, "exposed-copy": 34, "exposed-sqlalchemy": 2},
+    "closure": {"safe": 22, "translated": 37, "exposed-copy": 30, "exposed-sqlalchemy": 1},
+    "path": {"safe": 20, "translated": 38, "exposed-copy": 31, "exposed-sqlalchemy": 1},
+    "pydantic": {"safe": 16, "translated": 38, "exposed-copy": 34, "exposed-sqlalchemy": 2},
 }
 
 #: Same, at M8's head, which is what the roadmap's corrections are scored

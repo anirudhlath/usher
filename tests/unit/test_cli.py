@@ -31,6 +31,7 @@ from tests.fakes.import_run_repository import FakeImportRunRepository
 from tests.fakes.llm_client import FakeLLMClient
 from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.title_repository import FakeTitleRepository
+from tests.unit.commands import configured, dispatched
 from usher.adapters.bulk.imdb import parse_akas_row
 from usher.adapters.bulk.movielens import MovieLensGenomeDataset
 from usher.cli import (
@@ -376,7 +377,9 @@ def test_similar_is_a_read_form_and_a_write_form_of_one_subcommand() -> None:
     read = parse_args(["similar", "0198c6b1-0000-7000-8000-000000000001"])
     assert read.title_id == "0198c6b1-0000-7000-8000-000000000001"
     assert read.rebuild is False
-    assert read.limit == 10
+    # Unset rather than 10: `--build-row` refuses a `--limit` only if it can tell one was
+    # given. The resolved default is pinned through the dispatch below.
+    assert read.limit is None
 
     write = parse_args(["similar", "--rebuild"])
     assert write.title_id is None
@@ -412,6 +415,89 @@ def test_the_rebuild_only_flags_are_refused_where_they_cannot_mean_anything() ->
         parse_args(["similar", "0198c6b1-0000-7000-8000-000000000001", "--max-seeds", "5"])
     with pytest.raises(SystemExit):
         parse_args(["similar", "--rebuild", "--max-seeds", "0"])
+
+
+_SEED_ID = "0198c6b1-0000-7000-8000-000000000001"
+
+
+def test_build_row_needs_a_title_id(capsys: pytest.CaptureFixture[str]) -> None:
+    """`--build-row` builds *one* title's row, so without a title there is nothing to build.
+
+    The bare form is the whole-table report, which a flag must not turn into a build of
+    nothing. The id-bearing form is the premise: the flag is a real option and parses.
+    """
+    parsed = parse_args(["similar", _SEED_ID, "--build-row"])
+    assert (parsed.title_id, parsed.build_row, parsed.rebuild) == (_SEED_ID, True, False)
+    assert parse_args(["similar", _SEED_ID]).build_row is False
+    assert parse_args(["similar"]).build_row is False
+
+    with pytest.raises(SystemExit) as refused:
+        parse_args(["similar", "--build-row"])
+
+    assert refused.value.code == 2
+    assert "--build-row needs a title id" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("flags", "named"),
+    [
+        (["--rebuild"], "--rebuild"),
+        (["--resume"], "--resume"),
+        (["--max-seeds", "5"], "--max-seeds"),
+        (["--limit", "3"], "--limit"),
+    ],
+)
+def test_build_row_refuses_the_rebuild_flags(
+    flags: list[str], named: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Each flag that means nothing to a one-row build is refused by name, not ignored.
+
+    A `--max-seeds 5` accepted beside `--build-row` is an operator who believes they
+    capped a walk that never started, and `--limit 3` one who believes they shortened a
+    row of up to 20 cards. Every message names `--build-row`, so the refusal is its own
+    rule and not the neighbouring "a title id, or --rebuild" sentence.
+    """
+    assert parse_args(["similar", _SEED_ID, "--build-row"]).build_row is True
+
+    with pytest.raises(SystemExit) as refused:
+        parse_args(["similar", _SEED_ID, "--build-row", *flags])
+
+    assert refused.value.code == 2
+    assert f"--build-row cannot be combined with {named}" in capsys.readouterr().err
+
+
+def test_a_limit_beside_a_title_id_is_the_read_forms_and_defaults_to_ten(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--limit` is unset in the parsed arguments, and the dispatch resolves it to 10.
+
+    The parser cannot carry the default itself: `--build-row` refuses a `--limit` only if
+    it can tell one was given. So the number a bare `usher similar <id>` lists is pinned
+    here, through the arm, beside the explicit value that must win over it.
+    """
+    configured(monkeypatch)
+    assert parse_args(["similar", _SEED_ID, "--limit", "3"]).limit == 3
+
+    bare = dispatched(monkeypatch, arm="_similar", argv=["similar", _SEED_ID])
+    explicit = dispatched(monkeypatch, arm="_similar", argv=["similar", _SEED_ID, "--limit", "3"])
+    whole_table = dispatched(monkeypatch, arm="_similar", argv=["similar"])
+
+    assert [call["limit"] for call in bare + explicit + whole_table] == [10, 3, 10]
+
+
+def test_build_row_reaches_similar_through_the_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The arm passes `build_row` on, bound against `_similar`'s real signature.
+
+    Dropping the keyword from the arm leaves the flag parsed and ignored, and the read
+    form runs where a build was asked for.
+    """
+    configured(monkeypatch)
+
+    built = dispatched(monkeypatch, arm="_similar", argv=["similar", _SEED_ID, "--build-row"])
+    read = dispatched(monkeypatch, arm="_similar", argv=["similar", _SEED_ID])
+
+    assert [call["build_row"] for call in built + read] == [True, False]
+    assert built[0]["title_id"] == uuid.UUID(_SEED_ID)
 
 
 def test_work_runs_forever_unless_asked_for_one_pass() -> None:
@@ -486,8 +572,8 @@ async def test_bare_usher_push_schedules_the_jobs_the_server_does(
     built: list[tuple[str, ...]] = []
     real = build_scheduler
 
-    def spy(settings: Settings, *, sessions: Any) -> Any:
-        scheduler = real(settings, sessions=sessions)
+    def spy(settings: Settings, *, sessions: Any, **held: Any) -> Any:
+        scheduler = real(settings, sessions=sessions, **held)
         built.append(tuple(job.name for job in scheduler.jobs))
         return scheduler
 

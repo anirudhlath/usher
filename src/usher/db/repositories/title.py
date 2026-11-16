@@ -45,6 +45,7 @@ from usher.ports.repository import (
     BrowseCursorPosition,
     BrowseFacets,
     BrowseSort,
+    NamedTitle,
     TitleGenres,
     TitleReference,
     TitleRepository,
@@ -66,6 +67,23 @@ FROM unnest(
     CAST(:tmdb_ids AS integer[]),
     CAST(:raw_ids AS uuid[])
 ) WITH ORDINALITY AS p(imdb_id, kind, tmdb_id, raw_id, ord)
+"""
+
+# One row per probe at most, picked by `DISTINCT ON`: the most votes, an unknown count
+# last, then the lower id. `lower(t.name)` is spelled on the column side so that
+# `ix_titles_name_lower_year` serves the join; `BETWEEN` over a NULL year is never true,
+# which keeps an undated title out of every answer.
+_RESOLVE_NAMES = """
+SELECT DISTINCT ON (p.ord) p.ord AS ord, t.id AS id
+FROM unnest(
+    CAST(:names AS text[]),
+    CAST(:years AS integer[])
+) WITH ORDINALITY AS p(name, year, ord)
+JOIN titles AS t
+  ON lower(t.name) = lower(p.name)
+ AND t.year BETWEEN p.year - 1 AND p.year + 1
+ AND t.enrichment_state <> 'skeleton'
+ORDER BY p.ord, t.tmdb_vote_count DESC NULLS LAST, t.id
 """
 
 
@@ -318,6 +336,26 @@ class PostgresTitleRepository(TitleRepository):
         # `usher.db.backup_identity.resolve_titles` is what turns that into a
         # named refusal a caller can count.
         return {unique[row.ord - 1]: row.id for row in rows if row.id is not None}
+
+    async def resolve_names(self, probes: Sequence[NamedTitle]) -> dict[NamedTitle, uuid.UUID]:
+        # No statement at all for an empty batch, `resolve_natural_keys`' guard for its
+        # reason.
+        if not probes:
+            return {}
+        # Deduplicated before the bind so the ordinal indexes `unique`, and the answer is
+        # keyed by each probe the caller built.
+        unique = list(dict.fromkeys(probes))
+        with self._session.no_autoflush:  # see get()'s comment
+            rows = (
+                await self._session.execute(
+                    text(_RESOLVE_NAMES),
+                    {
+                        "names": [one.name for one in unique],
+                        "years": [one.year for one in unique],
+                    },
+                )
+            ).all()
+        return {unique[row.ord - 1]: row.id for row in rows}
 
     async def credit_names_for(
         self, title_ids: Sequence[uuid.UUID]

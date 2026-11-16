@@ -268,6 +268,13 @@ MANIFEST: Final[MappingProxyType[str, BackupEntry]] = MappingProxyType(
             "appears, not that the screen comes back",
             "curate",
         ),
+        "seed_rows": _rebuildable(
+            "0 rows. One stored 'Because you watched' row per seed title. With "
+            "USHER_LLM_ENABLED=true, one `schedule --once` builds every due seed in the "
+            "household's 12 most recent titles, so it rebuilds that window and not the "
+            "table. Until a seed is rebuilt, its row comes from `title_neighbors`",
+            "schedule --once",
+        ),
         "user_taste": _rebuildable(
             "0 rows. A mean over embeddings, carrying its own fingerprint "
             "(`model_name` + `source_watermark`), so a missing row is indistinguishable "

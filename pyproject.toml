@@ -308,6 +308,7 @@ modules = [
     "usher.ports.repository.row_provider_settings",
     "usher.ports.repository.search",
     "usher.ports.repository.search_query",
+    "usher.ports.repository.seed_row",
     "usher.ports.repository.source",
     "usher.ports.repository.sync",
     "usher.ports.repository.taste",

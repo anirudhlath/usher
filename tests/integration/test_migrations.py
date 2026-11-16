@@ -542,6 +542,16 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         await asyncio.to_thread(run_alembic, url, "-1")
         # **Asserted against whatever the current head actually reverses**, so every
         # new migration breaks this block and has to re-point it.
+        at_m10h_indexes = await index_set(url)
+        assert "pk_seed_rows" not in at_m10h_indexes, "seed_rows should not exist below m10i"
+        # The premise, for the reason the `m10c` stop below records: an index set that had
+        # lost `title_neighbors` entirely satisfies the absence above for a reason that has
+        # nothing to do with `m10i.downgrade()`.
+        assert "pk_title_neighbors" in at_m10h_indexes, "the premise: the index scan sees tables"
+
+        # **A named stop at `m10g`, holding `m10h`'s.** `-1` alone lands on `m10h`'s
+        # applied state, where every artefact below is present and every `not in` is false.
+        await asyncio.to_thread(functools.partial(run_alembic, url, "m10g", direction="down"))
         at_m10g_unit_columns = await column_set(url, "sync_run_units")
         assert "checkpoint" not in at_m10g_unit_columns, "checkpoint should not exist below m10h"
         # The premise, for the reason the `m09a` stop below records: an empty

@@ -1,8 +1,9 @@
 # Command line
 
 Most operator work can also be driven from the `usher` command. Managing
-sources and row-provider settings, playback, and watch writes are API-only. In
-the compose stack, run it inside the container:
+sources and row-provider settings, playback, and watch writes are API-only,
+apart from storing a source's new password. In the compose stack, run it inside
+the container:
 
 ```sh
 docker compose exec usher usher <command>
@@ -36,7 +37,7 @@ on the host, publish a different host port.
 | Run background work | `work`, `schedule` |
 | Search and similarity | `search`, `suggest`, `index`, `similar`, `derive`, `genres` |
 | Home screen and curation | `home`, `curate` |
-| Backup and secrets | `backup`, `restore`, `rotate-secret` |
+| Backup and secrets | `backup`, `restore`, `rotate-secret`, `set-credentials` |
 | Measure quality | `eval` |
 
 **Errors are short.** When something you can fix goes wrong, a command exits 1
@@ -194,13 +195,40 @@ splitting the lanes across containers.
 usher search "the quiet vacuum"                        # full-text and semantic, fused
 usher search "vacuum" --mode full_text --kind movie --year-from 1990 --owned-only
 usher suggest "the quie" --limit 5                     # type-ahead, typo-tolerant
-usher similar <title_id>                               # precomputed neighbours
+usher similar <title_id>                               # precomputed neighbours, and a stored row
+usher similar <title_id> --build-row                   # build that title's Because You Watched row now
 ```
 
 `usher search` ends with a `semantic_coverage` line: the share of enriched
 titles that have an embedding. Without a model, a fused search quietly narrows
 to full-text and says `fused was served as full_text`. `semantic_coverage=0.000`
 means a model is configured but nothing has been embedded yet.
+
+`usher similar <title_id> --build-row` builds one title's Because You Watched
+row now, whether or not it is due, through the code the scheduler's
+`seed_rows.build` job runs. It needs `USHER_LLM_ENABLED=true`, spends one model
+call, records it in `llm_calls`, stores the row, and prints it. Abbreviated:
+
+```text
+seed: BlackBerry (2023) 0198c6b1-0000-7000-8000-000000000001
+outcome: built
+attempted_at: 2026-11-09T14:05:00+00:00
+built_at: 2026-11-09T14:05:00+00:00
+cards: 14
+ 1. The Social Network (2010) [close+named]
+ 2. Steve Jobs (2015) [close+named+recommended]
+ 3. Jobs (2013) [named]
+```
+
+Each card line is its position, name, year and the lists that found it:
+`named` (the model), `recommended` (the metadata provider) and `close`
+(embedding distance). With no metadata provider configured the output says the
+recommended list was not consulted. `outcome` is the latest attempt's: when it
+is `too_few` or `unusable`, the cards shown are the last good build's, and
+`built_at` says when that was (`never` when there was none). `--build-row`
+needs a title id and refuses `--rebuild`, `--resume`, `--max-seeds` and `--limit`. Bare
+`usher similar <title_id>` prints the same record, as `stored row:`, beneath the
+title's neighbours when it has one.
 
 Four commands keep derived data fresh. Each one only reports when run bare, and
 writes when given `--backfill` or `--rebuild`:
@@ -285,6 +313,27 @@ docker compose exec -e USHER_NEW_SECRET_KEY usher usher rotate-secret --new-key-
 
 Follow the [rotation runbook](../runbooks/rotation.md): changing `.env` first
 leaves credentials nothing can decrypt.
+
+`usher set-credentials --source NAME_OR_ID --username-env VAR --password-env VAR`
+stores a new username and password for one source, for example after the
+password was changed on the media server. Like `rotate-secret`, it takes the
+*names* of two exported variables, never the values, and prints neither.
+`--source` takes the source's id, as `GET /admin/sources` lists it, or its name
+exactly as registered. Two sources can share a name, and then the name is
+refused and the id is how you say which one you mean. The source keeps its id
+and its rows, and a disabled source can be updated too. In the compose stack,
+read both into your shell, export them (not into `.env`), and forward them with
+`-e`; `read -s` keeps the password off the screen and out of your history:
+
+```bash
+read -r SOURCE_USERNAME && export SOURCE_USERNAME
+read -rs SOURCE_PASSWORD && export SOURCE_PASSWORD
+docker compose exec -e SOURCE_USERNAME -e SOURCE_PASSWORD usher usher set-credentials --source "Living Room Emby" --username-env SOURCE_USERNAME --password-env SOURCE_PASSWORD
+docker compose restart usher
+```
+
+Restart Usher afterwards, as the last line does: running push lanes and the
+worker keep using the old password until they start again.
 
 ## Measuring quality
 

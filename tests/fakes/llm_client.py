@@ -26,6 +26,7 @@ class RecordedCall:
     prompt: str
     schema: dict[str, Any]
     purpose: LLMPurpose
+    temperature: float | None
 
 
 def usage(
@@ -81,8 +82,13 @@ class FakeLLMClient(LLMClient):
         schema: dict[str, Any],
         *,
         purpose: LLMPurpose,
+        temperature: float | None = None,
     ) -> tuple[dict[str, Any], LLMUsage]:
-        self.calls.append(RecordedCall(prompt=prompt, schema=dict(schema), purpose=purpose))
+        self.calls.append(
+            RecordedCall(
+                prompt=prompt, schema=dict(schema), purpose=purpose, temperature=temperature
+            )
+        )
         if not self.responses:
             body: dict[str, Any] | BaseException = {"ok": True}
         elif len(self.responses) == 1:

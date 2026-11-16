@@ -13,6 +13,7 @@ from usher.ports.repository import (
     BrowseCursorPosition,
     BrowseFacets,
     BrowseSort,
+    NamedTitle,
     TitleGenres,
     TitleReference,
     TitleRepository,
@@ -205,6 +206,31 @@ class FakeTitleRepository(TitleRepository):
             if resolved is not None:
                 found[reference] = resolved
         return found
+
+    async def resolve_names(self, probes: Sequence[NamedTitle]) -> dict[NamedTitle, uuid.UUID]:
+        answers: dict[NamedTitle, uuid.UUID] = {}
+        for probe in dict.fromkeys(probes):
+            qualifying = [
+                title
+                for title in self._titles.values()
+                if title.name.lower() == probe.name.lower()
+                and title.year is not None
+                and abs(title.year - probe.year) <= 1
+                and title.enrichment_state is not EnrichmentState.SKELETON
+            ]
+            if qualifying:
+                # `DESC NULLS LAST` then `id`: an unknown count sorts after a genuine zero,
+                # which `-(votes or 0)` would collapse.
+                best = min(
+                    qualifying,
+                    key=lambda title: (
+                        title.tmdb_vote_count is None,
+                        -(title.tmdb_vote_count or 0),
+                        title.id,
+                    ),
+                )
+                answers[probe] = best.id
+        return answers
 
     async def credit_names_for(
         self, title_ids: Sequence[uuid.UUID]

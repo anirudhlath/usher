@@ -17,6 +17,7 @@ from tests.fakes.image_repository import FakeImageRepository
 from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.person_repository import FakePersonRepository
 from tests.fakes.row_provider import FakeRow, FakeRowProvider
+from tests.fakes.seed_row_repository import FakeSeedRowRepository
 from tests.fakes.title_neighbor_repository import FakeTitleNeighborRepository
 from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
@@ -49,6 +50,7 @@ def _context(*, taste: Centroid | None = None) -> RowContext:
         credits=FakeCreditRepository(),
         collections=FakeCollectionRepository(),
         curated=FakeCuratedRowRepository(),
+        seed_rows=FakeSeedRowRepository(),
         affinities=_no_affinities,
         images=FakeImageRepository(),
     )

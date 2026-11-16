@@ -200,6 +200,38 @@ async def test_the_purpose_is_telemetry_and_does_not_reach_the_provider() -> Non
     assert "curation" not in json.dumps(seen[0])
 
 
+async def test_the_temperature_a_caller_passes_is_the_one_sent() -> None:
+    """Kills a client that keeps its constant and ignores the argument."""
+    seen: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        return httpx.Response(200, json=_completion(json.dumps({"ok": True})))
+
+    client = _client(handler)
+    try:
+        await client.complete_json(
+            "prompt", _SCHEMA, purpose=LLMPurpose.BECAUSE_YOU_WATCHED, temperature=0.3
+        )
+    finally:
+        await client.aclose()
+    assert len(seen) == 1
+    assert seen[0]["temperature"] == 0.3
+
+
+async def test_a_call_that_names_no_temperature_sends_the_default() -> None:
+    """Kills a default that moved, which would change what curation samples at."""
+    seen: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        return httpx.Response(200, json=_completion(json.dumps({"ok": True})))
+
+    await _complete(_client(handler))
+    assert len(seen) == 1
+    assert seen[0]["temperature"] == 0.8
+
+
 # --------------------------------------------------------------------------
 # Parsing the response
 

@@ -24,6 +24,9 @@ _ENDPOINT = "the LLM endpoint"
 
 _TOKENS_PER_PRICE_UNIT = Decimal(1_000_000)
 
+# What a call sends when its caller names no temperature.
+_DEFAULT_TEMPERATURE = 0.8
+
 _tracer = trace.get_tracer("usher.llm")
 
 
@@ -85,12 +88,13 @@ class OpenAICompatibleClient(LLMClient):
         schema: dict[str, Any],
         *,
         purpose: LLMPurpose,
+        temperature: float | None = None,
     ) -> tuple[dict[str, Any], LLMUsage]:
         payload: dict[str, Any] = {
             "model": self._model,
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": self._max_output_tokens,
-            "temperature": 0.8,
+            "temperature": _DEFAULT_TEMPERATURE if temperature is None else temperature,
             "response_format": {
                 "type": "json_schema",
                 # `strict` is what makes the schema a decoding constraint

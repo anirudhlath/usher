@@ -32,10 +32,12 @@ class LLMClient(ABC):
         schema: dict[str, Any],
         *,
         purpose: LLMPurpose,
+        temperature: float | None = None,
     ) -> tuple[dict[str, Any], LLMUsage]:
         """Return a JSON object conforming to `schema`, plus usage for cost accounting.
 
-        `purpose` is recorded against the call.
+        `purpose` is recorded against the call. `temperature` is the sampling
+        temperature for this call; `None` leaves it to the adapter's default.
         """
 
     @abstractmethod

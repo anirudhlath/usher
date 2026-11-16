@@ -44,6 +44,9 @@ def _request(args: argparse.Namespace) -> tuple[str, dict[str, str]]:
         return f"/tv/{args.id}", {"append_to_response": SERIES_APPEND_TO_RESPONSE}
     if args.kind == "season":
         return f"/tv/{args.id}/season/{args.season}", {}
+    if args.kind == "recommendations":
+        space = "tv" if args.title_kind == "series" else "movie"
+        return f"/{space}/{args.id}/recommendations", {"page": "1"}
     if args.kind == "search":
         params = {"query": args.query, "include_adult": "false"}
         if args.year is not None:
@@ -60,16 +63,26 @@ def _request(args: argparse.Namespace) -> tuple[str, dict[str, str]]:
 async def _main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--kind", choices=("movie", "series", "season", "search", "changes"), default="movie"
+        "--kind",
+        choices=("movie", "series", "season", "search", "changes", "recommendations"),
+        default="movie",
     )
     parser.add_argument("--id", help="a real TMDb id; no default -- see the module docstring")
+    parser.add_argument(
+        "--title-kind",
+        choices=("movie", "series"),
+        default=None,
+        help="with --kind recommendations: which id space --id is in; no default",
+    )
     parser.add_argument("--season", default="1")
     parser.add_argument("--query", help="a real title to search for; no default")
     parser.add_argument("--year", type=int, default=None)
     parser.add_argument("--base-url", default=os.environ.get("USHER_TMDB_BASE_URL", TMDB_BASE_URL))
     args = parser.parse_args()
-    if args.kind in ("movie", "series", "season") and not args.id:
+    if args.kind in ("movie", "series", "season", "recommendations") and not args.id:
         parser.error(f"--kind {args.kind} needs --id")
+    if args.kind == "recommendations" and args.title_kind is None:
+        parser.error("--kind recommendations needs --title-kind: movie and series ids overlap")
     if args.kind == "search" and not args.query:
         parser.error("--kind search needs --query")
 

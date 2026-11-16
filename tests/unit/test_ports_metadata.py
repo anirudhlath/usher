@@ -162,6 +162,22 @@ def test_search_can_be_scoped_to_one_kind() -> None:
     assert signature.parameters["kind"].default is None
 
 
+def test_recommendations_take_a_provider_ref_and_answer_candidates() -> None:
+    """`fetch`'s ref in, `search`'s candidates out, and asynchronous like both.
+
+    Asserted on the signature: a `kind` parameter beside the ref would let a caller
+    disagree with the ref it holds, and a `page` one would make "first page only" a
+    caller's choice rather than the port's. Annotations are compared to the classes, as
+    `test_fetch_takes_a_provider_ref_not_a_bare_integer` explains.
+    """
+    assert inspect.iscoroutinefunction(MetadataProvider.recommendations)
+    signature = inspect.signature(MetadataProvider.recommendations)
+    assert list(signature.parameters) == ["self", "ref"]
+    assert signature.parameters["ref"].annotation is ProviderRef
+    assert signature.return_annotation == list[MetadataCandidate]
+    assert "recommendations" in MetadataProvider.__abstractmethods__
+
+
 def test_a_search_candidate_still_speaks_the_canonical_vocabulary() -> None:
     """`MetadataCandidate` is unchanged, and deliberately so.
 

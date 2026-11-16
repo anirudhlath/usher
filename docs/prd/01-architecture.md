@@ -70,7 +70,7 @@ All ports are `abc.ABC` with `@abstractmethod`. The shared httpx pieces live in
 ### Outbound calls and their limiters
 
 **Ten modules** under `src/usher/adapters/` dial an upstream: **eight over
-httpx**, between them **sixteen call sites**, and two over `websockets` —
+httpx**, between them **seventeen call sites**, and two over `websockets` —
 `emby/push.py` and `homeassistant/players.py`. Three of the ten are paced;
 seven deliberately are not.
 
@@ -78,7 +78,7 @@ seven deliberately are not.
 |---|---|
 | the configured media source (`emby/session.py`) | the per-source minimum-interval gate, `USHER_SOURCE_REQUESTS_PER_SECOND` |
 | `api.themoviedb.org` (`tmdb/client.py`) | `_TokenBucket` at `USHER_TMDB_REQUESTS_PER_SECOND` |
-| `api.themoviedb.org` (`tmdb/provider.py`, six call sites) | the bucket above — this module holds no client of its own |
+| `api.themoviedb.org` (`tmdb/provider.py`, seven call sites) | the bucket above — this module holds no client of its own |
 | `/embywebsocket` (`emby/push.py`) | **none** — one socket held open; reconnects back off |
 | Home Assistant's `/api/websocket` (`homeassistant/players.py`) | **none** — one socket held open; registries read on connect and again after each registry change, at most one re-read pending; reconnects back off |
 | `image.tmdb.org` (`images/provider.py`) | **none** — each image is fetched once, then served from the cache |

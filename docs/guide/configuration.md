@@ -250,10 +250,13 @@ rewriting made retrieval worse on the one model it was measured against.
 
 ## The scheduler
 
-`USHER_SCHEDULER_ENABLED=true` runs two periodic jobs inside the server:
+`USHER_SCHEDULER_ENABLED=true` runs up to three periodic jobs inside the server:
 
 - pruning `search_queries` past `USHER_SEARCH_QUERY_RETENTION_DAYS` (90);
-- `usher similar --rebuild`, every `USHER_SIMILAR_REBUILD_PERIOD_HOURS` (24).
+- `usher similar --rebuild`, every `USHER_SIMILAR_REBUILD_PERIOD_HOURS` (24);
+- building the Because You Watched rows of the household's recent titles, every
+  15 minutes. It needs `USHER_LLM_ENABLED=true` and the worker lane on, and makes
+  one LLM call and one TMDb call per row it builds.
 
 It is off by default. Turn it on in exactly one process, or run
 `usher schedule --once` from cron instead.

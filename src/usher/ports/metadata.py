@@ -134,6 +134,21 @@ class MetadataProvider(ABC):
         """
 
     @abstractmethod
+    async def recommendations(self, ref: ProviderRef) -> list[MetadataCandidate]:
+        """The provider's first page of titles it recommends from one entity.
+
+        In the provider's own order, which is the only ranking a caller has:
+        nothing here is sorted, filtered or topped up from a later page. Every
+        candidate carries the kind of the space the provider answered from, so
+        a series seed yields series.
+
+        A ref this provider cannot serve, or one it no longer serves, is
+        `PortDataMalformed` for the reasons `fetch` documents. An entity the
+        provider holds with nothing to recommend is an empty list, which is not
+        that error.
+        """
+
+    @abstractmethod
     def to_result(self, payload: dict[str, Any], title_id: uuid.UUID) -> EnrichmentResult:
         """Normalise a raw payload into canonical state.
 

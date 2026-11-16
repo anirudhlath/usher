@@ -460,20 +460,29 @@ def test_an_llm_call_is_frozen_and_refuses_an_unknown_field() -> None:
 # --- LLMPurpose ------------------------------------------------------------
 
 
-def test_the_purpose_vocabulary_is_closed_at_the_two_that_have_call_sites() -> None:
+def test_the_purpose_vocabulary_is_closed_at_the_three_that_have_call_sites() -> None:
     """Kills adding a member without a call site.
 
-    PRD 10's DDL names two, `curation | query_expansion`, and an open vocabulary
-    in a telemetry dimension is a cardinality footgun: a free-form string here
-    makes every `GROUP BY purpose` panel grow a row per spelling. An exact set
-    rather than a membership check, so a third member cannot arrive without
-    this list moving and someone reading that rule.
+    PRD 10's DDL names three, `curation | query_expansion | because_you_watched`,
+    and an open vocabulary in a telemetry dimension is a cardinality footgun: a
+    free-form string here makes every `GROUP BY purpose` panel grow a row per
+    spelling. An exact set rather than a membership check, so a fourth member
+    cannot arrive without this list moving and someone reading that rule.
 
-    **Both members have a call site**: `CurationService` emits `CURATION` and
-    `QueryExpansionService` emits `QUERY_EXPANSION`.
+    **Every member has a call site**: `CurationService` emits `CURATION`,
+    `QueryExpansionService` emits `QUERY_EXPANSION` and the seed-row build emits
+    `BECAUSE_YOU_WATCHED`.
     """
-    assert set(LLMPurpose) == {LLMPurpose.CURATION, LLMPurpose.QUERY_EXPANSION}
-    assert {p.value for p in LLMPurpose} == {"curation", "query_expansion"}
+    assert set(LLMPurpose) == {
+        LLMPurpose.CURATION,
+        LLMPurpose.QUERY_EXPANSION,
+        LLMPurpose.BECAUSE_YOU_WATCHED,
+    }
+    assert {p.value for p in LLMPurpose} == {
+        "curation",
+        "query_expansion",
+        "because_you_watched",
+    }
 
 
 def test_the_purpose_a_port_caller_imports_is_the_one_a_domain_model_types() -> None:

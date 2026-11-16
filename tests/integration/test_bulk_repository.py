@@ -915,6 +915,8 @@ _NO_CALLER_SUPPLIED_VALUE = {
     # The search-surface pair.
     ("search_queries", "surface"): "enum-typed on the port DTO; longest member is 7 of 8",
     ("search_queries", "tier"): "enum-typed on the port DTO; longest member is 6 of 6",
+    # `SeedRow.attempt_outcome` is a `SeedRowOutcome`; `unusable` is the longest.
+    ("seed_rows", "attempt_outcome"): "enum-typed on the domain model; longest is 8 of 16",
 }
 
 

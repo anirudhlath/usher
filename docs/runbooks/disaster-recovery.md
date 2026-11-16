@@ -25,7 +25,7 @@ recorded in `docs/prd/08-operations.md`, `src/usher/db/backup_manifest.py` and
 | `people`, `credits`, `collections`, `images` | `watch_states` — **3,347 rows.** The load-bearing one |
 | `raw_payloads` (132,462), `tmdb_ids`, `id_crosswalk` | `llm_calls` — the spend ledger. No endpoint sells it back |
 | `genome_scores`, `genome_tags` | `row_provider_settings` — your enable/disable choices |
-| `curated_rows`, `user_taste`, `jobs`, `sync_runs`, `sync_run_units`, `import_runs` | `search_queries` — 89 rows: what was typed, and what was played |
+| `curated_rows`, `seed_rows`, `user_taste`, `jobs`, `sync_runs`, `sync_run_units`, `import_runs` | `search_queries` — 89 rows: what was typed, and what was played |
 | `media_items`, **except its two link columns** | `media_items.title_id` / `.episode_id` — 10,819 links |
 
 **14,259 rows, 443,902 bytes, 1.03 s to write.** ✅ 2026-08-25, counted
@@ -262,7 +262,7 @@ two restore lines as the sanctioned replacement for a step that no longer works.
 
 - [ ] The artifact **and** the `USHER_SECRET_KEY` it was taken under are both in
       hand. Without the key every source credential restores unreadable,
-      and you re-enter each one by hand.
+      and you re-enter each source's login with `usher set-credentials`.
 - [ ] `USHER_DATABASE_URL` is exported and names the **new** database. Do not
       rely on `.env`.
 - [ ] `alembic upgrade head`, then `SELECT version_num FROM alembic_version`

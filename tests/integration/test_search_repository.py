@@ -1,16 +1,24 @@
 """The embedding repository, the predicate pair, and the keyset cursor."""
 
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 
 import pytest
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from tests.contract.title_embedding_repository_contract import (
+    Plant,
+    TitleEmbeddingNearestKnownContract,
+    at,
+)
 from tests.fakes.embedding import FakeEmbedder
 from usher.db.models.search import EMBEDDING_DIMENSIONS
-from usher.db.repositories.search import _FINGERPRINT_SQL, PostgresTitleEmbeddingRepository
+from usher.db.repositories.search import (
+    _FINGERPRINT_SQL,
+    PostgresTitleEmbeddingRepository,
+)
 from usher.db.repositories.title import PostgresTitleRepository
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.ids import new_id
@@ -32,6 +40,7 @@ async def _no_commit() -> None:
 
 
 _MODEL = "fake:test-embedding"
+_SCAN_GUCS = ("enable_indexscan", "enable_bitmapscan", "max_parallel_workers_per_gather")
 _VECTOR = tuple([0.05] * EMBEDDING_DIMENSIONS)
 
 
@@ -680,3 +689,96 @@ async def test_an_indexed_title_with_credits_stops_matching_the_stale_predicate(
     # pass leaves it at 1 as well.
     await service.index(title.id)
     assert await embeddings.count_stale(FakeEmbedder().model_name) == 0
+
+
+@pytest.fixture
+def plant(session: AsyncSession) -> Plant:
+    """Seed a title and its vector through the repositories production writes with."""
+
+    async def _plant(
+        vector: Sequence[float] | None,
+        *,
+        votes: int | None,
+        state: EnrichmentState = EnrichmentState.ENRICHED,
+        title_id: uuid.UUID | None = None,
+    ) -> uuid.UUID:
+        title = Title(
+            id=title_id or new_id(),
+            kind=TitleKind.MOVIE,
+            name="A Planted Title",
+            sort_name="a planted title",
+            tmdb_vote_count=votes,
+            enrichment_state=state,
+        )
+        await PostgresTitleRepository(session).add(title)
+        await PostgresTitleEmbeddingRepository(session).upsert_many(
+            [
+                TitleEmbeddingUpsert(
+                    title_id=title.id,
+                    embedding=None if vector is None else tuple(vector),
+                    model_name=_MODEL,
+                    source_fingerprint="0" * 32,
+                )
+            ]
+        )
+        return title.id
+
+    return _plant
+
+
+class TestPostgresTitleEmbeddingNearestKnown(TitleEmbeddingNearestKnownContract):
+    """`nearest_known` against real Postgres, where the exact scan and the join live."""
+
+    @pytest.fixture
+    def repo(self, session: AsyncSession) -> PostgresTitleEmbeddingRepository:
+        return PostgresTitleEmbeddingRepository(session)
+
+
+async def test_nearest_known_runs_between_the_exact_scan_settings_and_restores_them(
+    session: AsyncSession, plant: Plant
+) -> None:
+    """The statement sequence is the assertion; a plan at fixture scale would pass anyway."""
+    seed = await plant(at(0.0), votes=500)
+    await plant(at(0.3), votes=500)
+    await session.flush()
+    before = {
+        guc: (await session.execute(text(f"SELECT current_setting('{guc}')"))).scalar_one()
+        for guc in _SCAN_GUCS
+    }
+
+    seen: list[str] = []
+    with _record_statements(session, seen):
+        await PostgresTitleEmbeddingRepository(session).nearest_known(seed, min_votes=500, limit=5)
+
+    candidate = next(index for index, sql in enumerate(seen) if "title_embeddings" in sql)
+    ahead, behind = " ".join(seen[:candidate]), " ".join(seen[candidate + 1 :])
+    for off in (
+        "enable_indexscan = off",
+        "enable_bitmapscan = off",
+        "max_parallel_workers_per_gather = 0",
+    ):
+        assert off in ahead, f"the scan ran without `{off}`: {seen}"
+    for restored in ("enable_indexscan = on", "enable_bitmapscan = on"):
+        assert restored in behind, f"`{restored}` never came back: {seen}"
+    after = {
+        guc: (await session.execute(text(f"SELECT current_setting('{guc}')"))).scalar_one()
+        for guc in _SCAN_GUCS
+    }
+    assert after == before, "the settings changed for the rest of the transaction"
+
+
+async def test_nearest_known_is_exact_when_the_planner_would_take_the_index(
+    session: AsyncSession, plant: Plant
+) -> None:
+    """Sequential scans off leave the index as the cheapest path, so only the settings stop it."""
+    seed = await plant(at(0.0), votes=500)
+    dead = [await plant(at(0.1 + 0.01 * number), votes=0) for number in range(60)]
+    live = [await plant(at(1.0 + 0.01 * number), votes=500) for number in range(10)]
+    assert len(dead) > 40, "the premise: more nearer titles than the index scan's candidate list"
+    await session.flush()
+    await session.execute(text("SET LOCAL enable_seqscan = off"))
+
+    found = await PostgresTitleEmbeddingRepository(session).nearest_known(
+        seed, min_votes=500, limit=10
+    )
+    assert found == live

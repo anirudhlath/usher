@@ -78,6 +78,11 @@ carries `usher.row.provider` (the `slug_prefix`), `usher.row.slug` and
 has a span reading `usher.row.proposed=0` rather than no span at all. **A
 cached screen produces none**, and **no metric goes with it**.
 
+`BecauseYouWatchedProvider`'s `propose` span carries two more,
+`usher.home.because_you_watched.stored` and `usher.home.because_you_watched.fallback`:
+how many of the rows it proposed came from a stored seed row and how many from
+`title_neighbors`. A household with no recent titles gets neither.
+
 **A cached row produces no `row.build` span** and records no histogram point.
 So the number of `row.build` children of a `home.compose` is the number of
 *misses on that composition* — but **not** the number of misses in the
@@ -106,7 +111,7 @@ control that does nothing.
 
 ### Metrics — OpenTelemetry → Prometheus
 
-**Every row is emitted today. 47 rows: 46 instruments Usher declares, plus one
+**Every row is emitted today. 48 rows: 47 instruments Usher declares, plus one
 `FastAPIInstrumentor` supplies.**
 
 | Metric | Type | Labels | Emitted |
@@ -140,6 +145,7 @@ control that does nothing.
 | `usher.source.push.connected` | gauge | source | ✅ M5 |
 | `usher.source.push.reconnects` | counter | source | ✅ M5 |
 | `usher.source.push.events` | counter | source, kind | ✅ M5 |
+| `usher.source.push.crashes` | counter | source | ✅ self-healing |
 | `usher.source.versions.fallbacks` | counter | — | ✅ every version playable |
 | `usher.provider.requests` | counter | provider, status | ✅ M4 |
 | `usher.metadata.request.duration` | histogram | status | ✅ M4 |
@@ -223,10 +229,10 @@ They are domain records, not telemetry exhaust — durable, queryable, exact.
 
 ```sql
 llm_calls(
-  id, at, model, purpose,           -- purpose: curation | query_expansion
+  id, at, model, purpose,           -- purpose: curation | query_expansion | because_you_watched
   tokens_in, tokens_out, cost_usd,
   latency_ms, ok, error,
-  generation_id                     -- NULL for a purpose that produces no rows
+  generation_id                     -- curation's only; NULL for every other purpose
 )
 
 search_queries(

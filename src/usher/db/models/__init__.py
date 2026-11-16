@@ -13,6 +13,7 @@ from usher.db.models.jobs import JobRow
 from usher.db.models.people import CreditRow, PersonRow
 from usher.db.models.rows import RowProviderSettingRow
 from usher.db.models.search import TitleEmbeddingRow, TitleNeighborRow, TitleSearchNameRow
+from usher.db.models.seed_row import SeedRowRow
 from usher.db.models.source import MediaItemRow, SourceCredentialRow, SourceRow
 from usher.db.models.sync import RawPayloadRow, SyncRunRow, SyncRunUnitRow
 from usher.db.models.taste import GenomeScoreRow, GenomeTagRow
@@ -37,6 +38,7 @@ __all__ = [
     "RowProviderSettingRow",
     "SearchQueryRow",
     "SeasonRow",
+    "SeedRowRow",
     "SourceCredentialRow",
     "SourceRow",
     "SyncRunRow",

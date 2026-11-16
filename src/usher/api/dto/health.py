@@ -44,9 +44,8 @@ class LaneReport(BaseModel):
     push: list[str]
     worker: bool
 
-    # The lanes whose task has *finished*, which is not a state a healthy lane reaches
-    # -- `PushSupervisor.run` returns only after the failure ceiling and `_guard`
-    # catches everything else.
+    # The push lanes that crashed and have not yet been restarted. A lane that ended
+    # because its source has no push channel did not crash and is not named.
     crashed_sources: list[str]
 
     # How many abandoned claims **this process** has taken back since it started -- the

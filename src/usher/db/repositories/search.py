@@ -126,6 +126,26 @@ CROSS JOIN LATERAL (
 WHERE seed.title_id = ANY(:seed_ids) AND seed.embedding IS NOT NULL
 """
 
+# The seed is a CTE, so a seed with no vector yields no rows rather than an ordering by
+# NULL. The floor is a `WHERE` on the scan that orders and limits, so `limit` rows come
+# back whenever that many qualify; filtering `nearest_for`'s pool afterwards cannot.
+_NEAREST_KNOWN = """
+WITH seed AS (
+    SELECT embedding FROM title_embeddings
+    WHERE title_id = CAST(:seed_id AS uuid) AND embedding IS NOT NULL
+)
+SELECT e.title_id AS title_id
+FROM seed
+CROSS JOIN title_embeddings AS e
+JOIN titles AS t ON t.id = e.title_id
+WHERE e.embedding IS NOT NULL
+  AND e.title_id <> CAST(:seed_id AS uuid)
+  AND t.enrichment_state <> 'skeleton'
+  AND coalesce(t.tmdb_vote_count, 0) >= CAST(:min_votes AS integer)
+ORDER BY e.embedding <=> seed.embedding, e.title_id
+LIMIT CAST(:limit AS integer)
+"""
+
 _TAGS_FOR = "SELECT id, genres, keywords FROM titles WHERE id = ANY(:title_ids)"
 
 # The genome cosine, per **pair**, and it is a separate statement for exactly the reason
@@ -146,6 +166,11 @@ JOIN genome_scores AS gc ON gc.title_id = p.neighbor_id
 # later read of the row it wrote.
 _EXACT_SCAN_OFF = ("SET LOCAL enable_indexscan = off", "SET LOCAL enable_bitmapscan = off")
 _EXACT_SCAN_ON = ("SET LOCAL enable_indexscan = on", "SET LOCAL enable_bitmapscan = on")
+
+# `nearest_known` joins `titles`, and a Parallel Hash over 1024-lane vectors exhausts a
+# container's default shared memory. `DEFAULT` restores the session's own setting.
+_NO_PARALLEL_WORKERS = "SET LOCAL max_parallel_workers_per_gather = 0"
+_PARALLEL_WORKERS_DEFAULT = "SET LOCAL max_parallel_workers_per_gather = DEFAULT"
 
 _COUNT_WITHOUT_EMBEDDING = "SELECT count(*) FROM title_embeddings WHERE embedding IS NULL"
 
@@ -444,6 +469,25 @@ class PostgresTitleEmbeddingRepository(TitleEmbeddingRepository):
                 )
             )
         return answer
+
+    async def nearest_known(
+        self, seed_id: uuid.UUID, *, min_votes: int, limit: int
+    ) -> list[uuid.UUID]:
+        with self._session.no_autoflush:
+            for statement in (*_EXACT_SCAN_OFF, _NO_PARALLEL_WORKERS):
+                await self._session.execute(text(statement))
+            try:
+                result = await self._session.execute(
+                    text(_NEAREST_KNOWN),
+                    {"seed_id": seed_id, "min_votes": min_votes, "limit": limit},
+                )
+                found = [row.title_id for row in result.all()]
+            finally:
+                # Restored in a `finally` for `nearest_for`'s reason: this transaction
+                # goes on to write.
+                for statement in (*_EXACT_SCAN_ON, _PARALLEL_WORKERS_DEFAULT):
+                    await self._session.execute(text(statement))
+        return found
 
     async def _genome_pairs(
         self, pairs: Sequence[tuple[uuid.UUID, uuid.UUID]]
