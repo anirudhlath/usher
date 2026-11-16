@@ -49,7 +49,8 @@ One list of cards, picked in this order:
    stored order, up to 20. This is the same record the home screen reads, so a title
    shows the same cards in the same order in both places.
 2. **Otherwise the old list**: the title's `title_neighbors`, in stored rank order,
-   as today.
+   up to 20. Today the route stops at 10; 20 is what the home screen's own fallback
+   reads for the same title, so the two places still agree.
 
 Every card, from either list, carries what a home card carries: poster, watched mark,
 owned mark. Watched titles stay in the list with the green bar, as on the home screen.
@@ -89,8 +90,14 @@ keeps failing. The handler:
    attempt, exactly as the home screen's job does;
 4. tells clients the title changed (`title.updated` for that title id).
 
-A model or provider outage raises out of `build` with nothing stored. The queue's
-retry rules handle that; no event is sent, and the section keeps what it had.
+**An outage defers the build; it never parks it.** A model or provider outage raises
+out of `build` with nothing stored, so the record stays due. Left to the queue's
+ordinary failure path, the job would park after five attempts (a few minutes), a
+parked job is never re-queued by asking again, and that title could never build. So
+the handler turns any `UsherPortError` that `build` lets out into `JobDeferred` with
+a five-minute wait, the way the sync handler waits out a busy source: no attempt is
+spent, the job tries again every five minutes, and it builds when the model is back.
+No event is sent until a build stores something; the section keeps what it had.
 
 The home screen's `seed_rows.build` job is untouched. It and this job write the same
 records under the same rules. If both reach one title at the same moment, both build
@@ -102,14 +109,24 @@ The console already listens for `title.updated` on the open title and re-reads t
 section. Nothing new is needed on that path: the handler's event makes the section
 re-read, and the re-read finds the stored row.
 
-The response says whether a build is under way, so the page can say so:
+The response says whether a build is waiting or running, so the page can say so.
+`building` is true exactly when a build job for this title is in the queue after
+this read: the record is due, the deployment has a model, and the title is enriched.
+It is true on the read that queued the job and on every later read until the job
+stores something. It is false for an unenriched title, which shows the old list with
+no marker until enrichment finishes and the section is re-read.
 
-- `building: true` when this read found the record due and the deployment can build.
-- While `building` is true the section shows a small "updating" marker beside its
-  heading, in the slot and style the "stale" marker uses today.
+**The page does not depend on the event.** The console's rule is that it must be
+correct if no event ever arrives (`web/CONVENTIONS.md`), and the event can go
+missing: the stream drops, or the worker runs in another process. So while a read
+says `building`, the page also re-reads the section every 5 seconds, for at most 60
+seconds from the first such read. A re-read that says `building: false` ends it. At
+60 seconds the re-reads stop and the marker goes, whatever the last answer was; the
+page keeps the list it has, and the next visit starts again.
 
-If the event never arrives (the stream dropped, or the worker runs in another
-process), nothing breaks: the next visit reads the stored row.
+While `building` is true and the 60 seconds are not up, the section shows a small
+"updating" marker beside its heading, in the slot and style the "stale" marker uses
+today.
 
 ### The response
 
@@ -120,7 +137,7 @@ becomes:
 |---|---|
 | `cards` | The list above. Each card is the home screen's card shape (`RowCardResponse`). |
 | `source` | `row` when the cards come from the stored row, `neighbors` when they come from the old list. |
-| `building` | Whether a build was due and queued by this read. |
+| `building` | Whether a build for this title is waiting or running, as defined above. |
 
 `neighbors`, `score`, `computed_at` and `stale` go. The console is the only client of
 this route; it shows none of the scores, and the two staleness notes described the old
@@ -128,14 +145,18 @@ table.
 
 An empty `cards` is `200`, as an empty `neighbors` is today.
 
+The route now needs the household's user id for watched marks; it takes it the way
+the home route does (`DefaultUserIdDep`).
+
 ### The console
 
 `SimilarSection` renders `cards` through `PosterCard` with the card's artwork and
 watched mark, the same way a home row does. Its states become:
 
-- cards: the row, with the "updating" marker when `building`;
-- no cards and `building`: a quiet "finding similar titles" line;
-- no cards and not building: one plain line saying there is nothing similar to show;
+- cards: the row, with the "updating" marker while a build is being waited on;
+- no cards, and a build is being waited on: a quiet "finding similar titles" line;
+- no cards otherwise (including after the 60 seconds): one plain line saying there
+  is nothing similar to show;
 - the read failed: today's error block, unchanged.
 
 The "stale" marker and the "Fixed at ten" and "never computed" notes are removed.
@@ -175,6 +196,11 @@ On prod, after the deploy, with the model up:
 6. **The owner reads** two or three details pages of their choosing and says whether
    the section is right.
 
+An outage is not staged on prod. The deferral, the 60-second stop and the
+no-event path are proven by tests: a build whose model raises leaves the job pending
+with no attempt spent; a page that receives no event still swaps on a re-read; a page
+whose build never finishes drops the marker at 60 seconds and stops asking.
+
 ## Not in this slice
 
 - Any change to the home screen rows or to how seeds are chosen.
@@ -213,5 +239,11 @@ On prod, after the deploy, with the model up:
 - The route keeps its path and changes its body; the old fields are removed rather
   than kept alongside.
 - A small "updating" marker shows while a build is under way.
-- The swap rides the existing `title.updated` event, with no polling.
+- The swap rides the existing `title.updated` event, backed by a re-read every 5
+  seconds for at most 60 seconds, because the console's own rule is that no screen
+  may depend on an event arriving.
+- A build that hits a model or provider outage waits and retries every five minutes
+  until it succeeds, instead of parking.
+- An unenriched title shows no "updating" marker until its build is actually queued.
+- The old list, where it is shown, is up to 20 long, as on the home screen.
 - With no model configured, nothing is queued and the old list stays.
