@@ -143,6 +143,23 @@ class HomeAssistantPlayers(Players):
             "config/device_registry/update", device_id=device_id, area_id=area_id
         )
 
+    async def wake(self, entity_id: str) -> None:
+        await self._live().command(
+            "call_service",
+            domain="media_player",
+            service="turn_on",
+            target={"entity_id": entity_id},
+        )
+
+    async def play_url(self, entity_id: str, url: str) -> None:
+        await self._live().command(
+            "call_service",
+            domain="media_player",
+            service="play_media",
+            service_data={"media_content_type": "url", "media_content_id": url},
+            target={"entity_id": entity_id},
+        )
+
     async def wait_until(
         self, predicate: Callable[[HouseSnapshot], bool], *, timeout: float
     ) -> HouseSnapshot:

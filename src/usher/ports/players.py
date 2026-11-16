@@ -7,13 +7,14 @@ from usher.domain.house import DeviceRole, HouseSnapshot
 
 
 class Players(ABC):
-    """A live reading of the house's registry, and the two writes Usher makes to it.
+    """A live reading of the house's registry, the two writes Usher makes to it, and two acts.
 
     The registry owns every area, device and player. An implementation writes
     only a player's role and a device's area, so the house never has two
-    owners. With no connection a write raises as `snapshot` does; a write the
-    registry refuses raises `PortAuthFailed` for the credential and
-    `PortDataMalformed` for any other refusal.
+    owners; beyond those it only wakes a player and hands it a URL. With no
+    connection a write or an act raises as `snapshot` does; one the registry
+    refuses raises `PortAuthFailed` for the credential and `PortDataMalformed`
+    for any other refusal.
     """
 
     @abstractmethod
@@ -32,6 +33,23 @@ class Players(ABC):
     @abstractmethod
     async def set_device_area(self, device_id: str, area_id: str) -> None:
         """Place a device in an area."""
+
+    @abstractmethod
+    async def wake(self, entity_id: str) -> None:
+        """Ask a player to wake; done when the registry has taken the request.
+
+        That is not when the player is awake.
+        """
+
+    @abstractmethod
+    async def play_url(self, entity_id: str, url: str) -> None:
+        """Hand a player a URL to open.
+
+        `PortDataMalformed` when the registry refuses, which is what a sleeping
+        player looks like; `PortUnavailable` with no connection or no answer in
+        time; `PortAuthFailed` for the credential. The URL is a credential and
+        appears in no error.
+        """
 
     @abstractmethod
     async def wait_until(

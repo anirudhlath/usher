@@ -45,7 +45,9 @@ uv run python scripts/capture_ha_shape.py --listen 30 \
 
 - **Usher writes three things: its two labels into HA's label registry when
   missing (`Usher` and `Usher ignore`, ids `usher` and `usher_ignore`), one of
-  them on an entity, and `area_id` on a device.** No service call until slice 2.
+  them on an entity, and `area_id` on a device.** Beyond those it makes two service calls:
+  `Players.wake` (`media_player.turn_on`) and `Players.play_url` (`play_media`,
+  type `url`).
 - **`config/entity_registry/update`'s `labels` replaces the whole list.** Read
   the entry, change only Usher's two, write the rest back. An entry that comes
   back with no label list is refused before the entry is written; creating a
@@ -90,6 +92,8 @@ uv run python scripts/capture_ha_shape.py --listen 30 \
   when the reader ends is failed at once, not at its timeout.
 - **An error names HA's code, never HA's message**, and the token travels only
   in the `auth` frame.
+- **A handover's URL is a credential**: `play_url` logs nothing and no error it
+  raises carries the URL, only HA's code.
 
 ## At the TV
 

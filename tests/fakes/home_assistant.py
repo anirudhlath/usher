@@ -155,6 +155,8 @@ class FakeHomeAssistant:
         self.commands: list[dict[str, Any]] = []
         self.unanswered: set[str] = set()
         self.refused: dict[str, str] = {}
+        #: Codes for `call_service`, each answering the next one only.
+        self.refuse_services: list[str] = []
         self.echo_registry_events = True
         self.greeting: dict[str, Any] | str | None = {
             "type": "auth_required",
@@ -176,6 +178,9 @@ class FakeHomeAssistant:
             return
         if kind in self.refused:
             connection.deliver(_refusal(ident, self.refused[kind]))
+            return
+        if kind == "call_service" and self.refuse_services:
+            connection.deliver(_refusal(ident, self.refuse_services.pop(0)))
             return
         handler = self._handlers().get(kind)
         try:
@@ -213,6 +218,7 @@ class FakeHomeAssistant:
             "config/entity_registry/update": self._update_entity,
             "config/label_registry/create": self._create_label,
             "config/device_registry/update": self._update_device,
+            "call_service": lambda _c, _f: None,
         }
 
     def _subscribe(self, connection: FakeHomeAssistantConnection, frame: dict[str, Any]) -> None:
@@ -240,6 +246,15 @@ class FakeHomeAssistant:
         if "area_id" in frame:
             self.move_device(row["id"], frame["area_id"], emit=self.echo_registry_events)
         return deepcopy(row)
+
+    @property
+    def service_calls(self) -> list[dict[str, Any]]:
+        """Every `call_service` frame received, in order, without its `id`."""
+        return [
+            {key: value for key, value in frame.items() if key != "id"}
+            for frame in self.commands
+            if frame.get("type") == "call_service"
+        ]
 
     # -- what a test does to the house ------------------------------------
 

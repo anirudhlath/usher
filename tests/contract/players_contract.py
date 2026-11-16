@@ -8,8 +8,11 @@ import pytest
 
 from tests.fakes.house import APPLE_TV, BEDROOM, SHIELD, SHIELD_DEVICE, this_house
 from usher.domain.house import DeviceRole, HouseSnapshot, HouseState
-from usher.ports.errors import PortDataMalformed, PortUnavailable
+from usher.ports.errors import PortDataMalformed, PortUnavailable, UsherPortError
 from usher.ports.players import Players
+
+PLAYER = APPLE_TV
+URL = "infuse://x-callback-url/play?url=https%3A%2F%2Fusher.test%2Fstream%2FTICKET%2FName"
 
 
 class PlayersHarness(ABC):
@@ -20,6 +23,18 @@ class PlayersHarness(ABC):
     @abstractmethod
     async def change_state(self, state: HouseState) -> None:
         """Change a player's reading at the registry, the way the household would."""
+
+    @abstractmethod
+    def service_calls(self) -> list[tuple[str, str]]:
+        """Each act the registry saw, as `("wake" | "play_url", entity_id)`, refused ones too."""
+
+    @abstractmethod
+    def refuse_next_handover(self) -> None:
+        """The registry refuses the next `play_url`, once."""
+
+    @abstractmethod
+    async def lose_the_house(self) -> None:
+        """Leave the port with no house, as a lost connection does."""
 
     @abstractmethod
     async def aclose(self) -> None: ...
@@ -139,3 +154,28 @@ class PlayersContract:
     ) -> None:
         with pytest.raises(PortDataMalformed):
             await harness.players.set_device_area("d-nothing-here", BEDROOM)
+
+    async def test_a_wake_reaches_the_registry(self, harness: PlayersHarness) -> None:
+        await harness.players.wake(PLAYER)
+        assert harness.service_calls() == [("wake", PLAYER)]
+
+    async def test_a_handover_reaches_the_registry(self, harness: PlayersHarness) -> None:
+        await harness.players.play_url(PLAYER, URL)
+        assert harness.service_calls() == [("play_url", PLAYER)]
+
+    async def test_a_refused_handover_is_malformed_and_a_later_one_lands(
+        self, harness: PlayersHarness
+    ) -> None:
+        harness.refuse_next_handover()
+        with pytest.raises(UsherPortError) as caught:
+            await harness.players.play_url(PLAYER, URL)
+        assert isinstance(caught.value, PortDataMalformed)
+        await harness.players.play_url(PLAYER, URL)
+        assert harness.service_calls() == [("play_url", PLAYER), ("play_url", PLAYER)]
+
+    async def test_with_no_house_neither_act_is_made(self, harness: PlayersHarness) -> None:
+        await harness.lose_the_house()
+        for act in (harness.players.wake(PLAYER), harness.players.play_url(PLAYER, URL)):
+            with pytest.raises(PortUnavailable):
+                await act
+        assert harness.service_calls() == []

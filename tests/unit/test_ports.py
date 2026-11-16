@@ -254,16 +254,16 @@ def test_suggest_index_has_no_write_method() -> None:
     assert SuggestIndex.__abstractmethods__ == frozenset({"suggest"})
 
 
-def test_players_declares_exactly_these_four_methods() -> None:
-    """A reading, a wait, and the only two writes Usher makes to the house.
+def test_players_declares_exactly_these_six_methods() -> None:
+    """A reading, a wait, the only two writes Usher makes to the house, and two acts.
 
-    The missing `call_service` is the plan's departure 2: slice 2 adds it with the
-    dispatcher that uses it. Adding it, or any other write, is that decision made
-    visibly; doing it without editing this case is a failing test.
+    The acts are a wake and a handed-over URL, named for what they do and never for
+    the registry's service that does it. Adding another, or any other write, is a
+    decision made visibly; doing it without editing this case is a failing test.
     """
-    four = frozenset({"snapshot", "set_role", "set_device_area", "wait_until"})
-    assert Players.__abstractmethods__ == four
-    assert {name for name in dir(Players) if not name.startswith("_")} == four
+    six = frozenset({"snapshot", "set_role", "set_device_area", "wait_until", "wake", "play_url"})
+    assert Players.__abstractmethods__ == six
+    assert {name for name in dir(Players) if not name.startswith("_")} == six
 
 
 def test_a_scheduled_job_declares_exactly_these_four_members() -> None:
