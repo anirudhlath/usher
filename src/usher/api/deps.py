@@ -88,6 +88,7 @@ from usher.services.rows import enabled_row_providers, row_provider_settings
 from usher.services.rows.cache import RefreshQueue, RowCache
 from usher.services.screens import ScreensService
 from usher.services.search import SearchQueryBuffer, SearchService
+from usher.services.send import SendDispatcher, SendService
 from usher.services.similar import SimilarityService
 from usher.services.sources import SourceService
 from usher.services.taste import TasteService
@@ -829,15 +830,8 @@ def get_ticket_cipher(settings: SettingsDep) -> Fernet:
 TicketCipherDep = Annotated[Fernet, Depends(get_ticket_cipher)]
 
 
-def get_playback_service(
-    request: Request,
-    cipher: TicketCipherDep,
-    media_items: MediaItemRepositoryDep,
-    sources: Annotated[SourceRepository, Depends(get_source_repository)],
-    credentials: Annotated[CredentialStore, Depends(get_credential_store)],
-    adapters: Annotated[SourceAdapterFactory, Depends(get_source_adapter_factory)],
-) -> PlaybackService:
-    """`PlaybackService`, with the mint closure this request's URL implies."""
+def get_ticket_minter(request: Request, cipher: TicketCipherDep) -> Callable[[str, str], str]:
+    """The closure that turns a source URL and an item's name into a ticket URL for this request."""
 
     def mint_ticket_url(url: str, name: str) -> str:
         ticket = mint(cipher, url, minted_at=datetime.now(UTC))
@@ -849,7 +843,21 @@ def get_playback_service(
             )
         )
 
-    return PlaybackService(media_items, sources, credentials, adapters, mint_ticket_url)
+    return mint_ticket_url
+
+
+TicketMinterDep = Annotated[Callable[[str, str], str], Depends(get_ticket_minter)]
+
+
+def get_playback_service(
+    minter: TicketMinterDep,
+    media_items: MediaItemRepositoryDep,
+    sources: Annotated[SourceRepository, Depends(get_source_repository)],
+    credentials: Annotated[CredentialStore, Depends(get_credential_store)],
+    adapters: Annotated[SourceAdapterFactory, Depends(get_source_adapter_factory)],
+) -> PlaybackService:
+    """`PlaybackService`, with the mint closure this request's URL implies."""
+    return PlaybackService(media_items, sources, credentials, adapters, minter)
 
 
 PlaybackServiceDep = Annotated[PlaybackService, Depends(get_playback_service)]
@@ -891,6 +899,36 @@ def get_ways_service(players: PlayersDep, media_items: MediaItemRepositoryDep) -
 
 
 WaysServiceDep = Annotated[WaysService, Depends(get_ways_service)]
+
+
+def get_send_dispatcher(request: Request) -> SendDispatcher | None:
+    """The process's `SendDispatcher`, or `None` while `USHER_PLAYERS_ENABLED` is off."""
+    dispatcher = getattr(request.app.state, "sends", _UNSET)
+    if dispatcher is _UNSET:
+        raise RuntimeError(
+            "app.state.sends is not set -- create_app's lifespan has not run. "
+            "If this is a test using a bare ASGI transport, wrap the app in "
+            "asgi_lifespan.LifespanManager first."
+        )
+    return cast(SendDispatcher | None, dispatcher)
+
+
+SendDispatcherDep = Annotated[SendDispatcher | None, Depends(get_send_dispatcher)]
+
+
+def get_send_service(
+    players: PlayersDep,
+    dispatcher: SendDispatcherDep,
+    media_items: MediaItemRepositoryDep,
+    playback: PlaybackServiceDep,
+    watch_states: Annotated[WatchStateRepository, Depends(get_watch_state_repository)],
+    minter: TicketMinterDep,
+) -> SendService:
+    """`SendService` over the process's players and dispatcher and this request's copies."""
+    return SendService(players, dispatcher, media_items, playback, watch_states, minter)
+
+
+SendServiceDep = Annotated[SendService, Depends(get_send_service)]
 
 
 # ---------------------------------------------------------------------------

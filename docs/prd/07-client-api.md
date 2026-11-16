@@ -149,6 +149,8 @@ position, not the play count.
 | `GET /screens` | Every screen and its devices with Home Assistant's live reading, plus the players waiting to be confirmed, placed or ignored ([Players](#players)) |
 | `POST /screens/devices/{entity_id}/confirm` | Writes the player's label, and its device's area when given, to Home Assistant, and answers as `GET /screens` once HA reports it |
 | `GET /titles/{id}/ways?screen=` · `GET /episodes/{id}/ways?screen=` | Every way the copies could play, grouped by screen and ranked, each screen's best marked |
+| `POST /titles/{id}/send` · `POST /episodes/{id}/send` | Body `{way, take_over?}`. Plays that way on its screen through Home Assistant and answers `202` with the send at `waking`; `404 not_found` (no such title or episode) · `422 validation_failed` (the body, or `no way has this id`) · `409 way_not_playable` · `409 screen_busy` · `503 players_unavailable` (with `Retry-After` when asking again may succeed) · `503 source_unavailable` |
+| `GET /sends/{id}` | The send and every stage it has entered; `404 not_found` for a send that is unknown, dropped from the last 32 finished, or made before a restart; `503 players_unavailable` while players are off |
 
 ### Admin
 
@@ -308,7 +310,7 @@ answer.
 
 #### The vocabulary
 
-**Eight members, closed.**
+**Ten members, closed.**
 
 | code | status | when |
 |---|---|---|
@@ -320,6 +322,8 @@ answer.
 | `not_playable` | 409 | every source holding a copy answered and none offers a way to play it |
 | `ticket_invalid` | 404 | a playback ticket that is expired or forged — one answer for both, deliberately |
 | `players_unavailable` | 503 | players are off, or Home Assistant cannot be read, refused a write, or did not report it in time — with `Retry-After` when asking again may succeed, and without it while players are off or the token is refused |
+| `screen_busy` | 409 | the player is playing something and the send did not ask to take over; `detail` says what |
+| `way_not_playable` | 409 | the way cannot play this copy, or its recipe is not proven |
 
 **404 is generic and there is no per-resource variant** — `instance` already
 carries the path. A title the household owns with no playable copy is separated
@@ -610,8 +614,49 @@ by default ([08](08-operations.md)).
   screen alone, ways or none; one that is not a screen is `422
   validation_failed`.
 - **`/ways` mints no ticket and calls no source**, unlike `/play`.
-- **With players off or HA unreachable**, `/screens` and confirm answer `503
-  players_unavailable`, and `/ways` answers `200` with
+- **A send plays one way on its screen through Home Assistant**, in four
+  stages: `waking` (the player is woken, and the link is handed over until the
+  player takes it), `opening` (the recipe's app comes to the front), `starting`
+  (the player is playing, with a duration within 2% of the copy's runtime when
+  both are known) and `playing`. Each stage has a window of its own, set by the
+  recipe. `POST /titles/{id}/send` and `POST /episodes/{id}/send` answer `202`
+  at once with the send at `waking`; its progress follows as `send.stage` on
+  `/events` and at `GET /sends/{id}`, which lists every stage entered with its
+  time and the send's `failed_stage` and `detail`. A `SendResponse` carries no
+  URL of any kind.
+- **A send is refused before anything is written to the player or any ticket is
+  minted**, in this order: players off or the house unreadable (`503
+  players_unavailable`); a `way` that is no way of this item's copies (`422
+  validation_failed`); a way that cannot play the copy (`409 way_not_playable`,
+  `detail` `CAN'T · <the way's refusal>`); a recipe that is not proven (`409
+  way_not_playable`, `detail` `CAN'T SEND · <RECIPE> IS NOT PROVEN`); a screen
+  playing something else (`409 screen_busy`, `detail` the app and title
+  playing); then the source holding the copy, which is asked last (`503
+  source_unavailable`). **A busy screen is refused before the source is
+  asked.** **The screen is read again just before the send starts**, so a
+  screen that turned busy in the meantime is still refused unless `take_over`.
+  Only a proven recipe is sent through.
+- **`take_over: true` plays over what the screen is playing**; without it a
+  playing screen is `409 screen_busy`.
+- **One send runs per screen.** A second send to a screen ends the first at
+  `superseded`, announced as its own `send.stage`, and the first's remaining
+  stages are neither run nor announced.
+- **A send that does not take ends at `didnt_take`**, with `failed_stage` the
+  stage it was in and `detail` one printed line saying what the player showed,
+  such as `DIDN'T TAKE · OPENING · INFUSE MAY NOT BE INSTALLED`. A player that
+  stays asleep through the waking window, or a Home Assistant that stops
+  answering, ends it the same way. Once Home Assistant accepts a handover the
+  link is never handed over again, and no stage is retried.
+- **A send is kept in memory only.** The last 32 finished sends are kept, and
+  a restart forgets every send. Finished and running sends read alike at
+  `GET /sends/{id}`.
+- **The send resumes at the default user's place in the item** when that user
+  has one and has not played it; otherwise it starts from the beginning.
+- **The ticket is minted each time the link is handed over**, never when the
+  request is answered.
+- **With players off or HA unreachable**, `/screens`, confirm and both send
+  routes answer `503 players_unavailable`, `GET /sends/{id}` does while
+  players are off, and `/ways` answers `200` with
   `screens_available: false` and no screens. Nothing else changes, and
   `/health/ready` never consults HA.
 

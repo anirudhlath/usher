@@ -34,6 +34,7 @@ from usher.api.routers import (
     rows,
     screens,
     search,
+    sends,
     series,
     sources,
     titles,
@@ -59,6 +60,7 @@ from usher.db.base import build_engine, build_session_factory
 from usher.ports.errors import PortAuthFailed, PortRateLimited
 from usher.services.events import InMemoryEventBus
 from usher.services.rows.cache import RefreshQueue, RowCache
+from usher.services.send import SendDispatcher
 from usher.telemetry import configure_telemetry, register_push_gauges, register_sse_gauge
 
 
@@ -150,6 +152,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # connection is a task of its own, so Home Assistant never gates startup.
         players, close_players = await house_players(settings)
         app.state.players = players
+        # One dispatcher per process, over the real players and the bus `/events` reads.
+        dispatcher = None if players is None else SendDispatcher(players, bus)
+        app.state.sends = dispatcher
         # The `try:` opens here and not at the engine, so a raise from
         # `metadata_provider`, `embedder`, `llm_client`, `lanes.start()` or
         # `house_players` leaks whatever was already built.
@@ -166,6 +171,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await search_queries.aclose()
             with suppress(asyncio.CancelledError):
                 await draining
+            if dispatcher is not None:
+                await dispatcher.aclose()
             await close_players()
             await close_provider()
             await close_model()
@@ -240,6 +247,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(rows.router)
     app.include_router(screens.router)
     app.include_router(search.router)
+    app.include_router(sends.router)
     app.include_router(series.router)
     app.include_router(sources.router)
     app.include_router(titles.router)

@@ -27,6 +27,8 @@ class ProblemCode(StrEnum):
     NOT_PLAYABLE = "not_playable"
     TICKET_INVALID = "ticket_invalid"
     PLAYERS_UNAVAILABLE = "players_unavailable"
+    SCREEN_BUSY = "screen_busy"
+    WAY_NOT_PLAYABLE = "way_not_playable"
 
 
 def problem_type(code: ProblemCode) -> str:

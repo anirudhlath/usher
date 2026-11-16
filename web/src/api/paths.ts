@@ -34,6 +34,7 @@ export const USHER_API_ROOTS = [
   'screens',
   'search',
   'seasons',
+  'sends',
   'series',
   'stream',
   'titles',

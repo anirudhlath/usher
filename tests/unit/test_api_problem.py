@@ -415,15 +415,15 @@ def test_type_is_derived_from_code_for_every_member() -> None:
         assert "_" not in problem_type(code).removeprefix("https://usher.dev/errors/")
 
 
-def test_the_vocabulary_is_the_members_the_shipped_routes_emit() -> None:
-    """A literal pin on the eight members, kept beside the derived one.
+def test_the_vocabulary_is_ten_and_each_new_code_has_one_status() -> None:
+    """A literal pin on the ten members, kept beside the derived one.
 
     The vocabulary is generic rather than per-resource: one `not_found`, no
     `title_not_found` and no `episode_not_found`. A literal list is what fails
     when the enum grows a member nobody meant, and `assert {..} == {..}` names
     that member directly. `POST /admin/sources/{id}/sync` answering `409
     not_playable` for a disabled source is a second emitter of an existing
-    member, not a ninth one.
+    member, not a new one.
     """
     assert {code.value for code in ProblemCode} == {
         "not_found",
@@ -434,7 +434,10 @@ def test_the_vocabulary_is_the_members_the_shipped_routes_emit() -> None:
         "not_playable",
         "ticket_invalid",
         "players_unavailable",
+        "screen_busy",
+        "way_not_playable",
     }
+    assert len(ProblemCode) == 10
 
 
 async def test_health_and_readiness_keep_their_own_shapes(client: httpx.AsyncClient) -> None:
