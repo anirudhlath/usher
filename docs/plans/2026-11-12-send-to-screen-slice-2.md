@@ -716,14 +716,16 @@ No console surface sends anything in this slice: the home panel is the first cli
 **Files:**
 - Modify: `src/usher/domain/recipes.py` only if a window proved too short; `tests/fakes/home_assistant.py` only to pin the refusal code HA really sends; `docs/plans/progress.md` and `docs/prd/README.md` (Task 8's row)
 
-- [ ] **Step 1: Run the branch beside production**, never on it: from this worktree, `python -m usher` on port 8101 against the dev catalog, with `USHER_PLAYERS_ENABLED=true` and the Home Assistant settings from `~/.config/usher/ha-live.env`, `USHER_PUSH_ENABLED=false`, `USHER_WORKER_ENABLED=false`. Drive it from a throwaway script under `/var/tmp/sts-slice-2/`, which prints no ticket, token or host.
-- [ ] **Step 2: Ten sends to the Living Room**, reading each back from `GET /sends/{id}` until it finishes:
-  - three from off (the TV off, the Apple TV asleep);
+- [ ] **Step 1: Run the branch beside production**, never on it: from this worktree, `python -m usher` on port 8101 against the dev catalog, with `USHER_PLAYERS_ENABLED=true` and the Home Assistant settings from `~/.config/usher/ha-live.env`, `USHER_PUSH_ENABLED=false`, `USHER_WORKER_ENABLED=false`. Drive it from a throwaway script under `/var/tmp/sts-slice-2/`, which prints no ticket, token or host. The script posts to an address the Apple TV resolves, never `127.0.0.1` or `localhost`, because the link's host is the POST's host.
+- [ ] **Step 2: Twelve sends to the Living Room**, reading each back from `GET /sends/{id}` until it finishes:
+  - three from off (the TV off, the Apple TV asleep), noting for each whether Home Assistant answers `turn_on` or `play_media` after more than 10 s, which ends the send at `waking` while the film may still open;
   - three from the Apple TV's home screen;
   - one while another app plays, with no `take_over`: expect `409 screen_busy` naming the app and what plays;
   - the same again with `take_over`;
   - two sends two seconds apart: expect the first `superseded` and one film playing;
-  - one episode with a resume point: expect it to start there.
+  - one episode with a resume point: expect it to start there;
+  - one that plays past five minutes and then seeks: the ticket expires after 300 s;
+  - one posted while the screen's player is `unavailable`.
 - [ ] **Step 3: Record**, per send: every stage's time, the final stage and detail, and what the owner saw. From the log, the code HA answers a handover to a sleeping Apple TV with; make `FakeHomeAssistant`'s scripted refusal in Task 2's cases that code.
 - [ ] **Step 4: Bars.** Every send from off and from the home screen ends `playing` with nobody touching a remote; no send reports `playing` while something else is on the screen; no send reports `didnt_take` while the film plays. A bar that fails is a finding to fix before the merge, not a note.
 - [ ] **Step 5: Post the table of results on the pull request**, the numbers themselves, and flip Task 8's status cells.
@@ -735,5 +737,5 @@ No console surface sends anything in this slice: the home panel is the first cli
 - AirPlay and Cast are ranked and never sent; slice 3 proves and sends them, and reads the windows off `usher.send.stage.duration`.
 - No console surface sends. The home panel's Watch screen is the first client.
 - Copies whose facts are identical are still indistinguishable in `/ways`.
-- A film sent again while Infuse already plays that same film reads `playing` at the first new reading, since nothing in HA's reading tells the old playback from the new.
+- Any item already playing in the recipe's app with a runtime within 2% of the sent copy's reads `playing` at the first new reading, since nothing in HA's reading tells the old playback from the new. That is the same film sent again, and also most consecutive episodes of a series sent under `take_over`.
 - Home Assistant's own `usher.play` and Alfred's tool are slice 4.

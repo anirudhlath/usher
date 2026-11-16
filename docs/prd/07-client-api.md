@@ -416,7 +416,7 @@ buffer overflowed, a `Last-Event-ID` older than the replay ring, and one minted
 by a previous process. An event id is `<epoch>-<n>`; the replay ring is
 in-memory, so ids restart with the process under a new epoch.
 
-**A stream's failure vocabulary is not the RFC 9457 envelope.** The five event
+**A stream's failure vocabulary is not the RFC 9457 envelope.** The six event
 names plus `resync_required` are one closed enum, versioned independently, and
 every member is emitted.
 
@@ -623,10 +623,13 @@ by default ([08](08-operations.md)).
   at once with the send at `waking`; its progress follows as `send.stage` on
   `/events` and at `GET /sends/{id}`, which lists every stage entered with its
   time and the send's `failed_stage` and `detail`. A `SendResponse` carries no
-  URL of any kind.
+  URL of any kind. A `send.stage` frame for a send can arrive before the `202`
+  that names it.
+- **The link handed to the player points at the host the send was posted to**,
+  so the player must be able to reach that host.
 - **A send is refused before anything is written to the player or any ticket is
-  minted**, in this order: players off or the house unreadable (`503
-  players_unavailable`); a `way` that is no way of this item's copies (`422
+  minted**, in this order: an unknown title or episode (`404 not_found`);
+  players off or the house unreadable (`503 players_unavailable`); a `way` that is no way of this item's copies (`422
   validation_failed`); a way that cannot play the copy (`409 way_not_playable`,
   `detail` `CAN'T · <the way's refusal>`); a recipe that is not proven (`409
   way_not_playable`, `detail` `CAN'T SEND · <RECIPE> IS NOT PROVEN`); a screen
@@ -643,7 +646,10 @@ by default ([08](08-operations.md)).
   stages are neither run nor announced.
 - **A send that does not take ends at `didnt_take`**, with `failed_stage` the
   stage it was in and `detail` one printed line saying what the player showed,
-  such as `DIDN'T TAKE · OPENING · INFUSE MAY NOT BE INSTALLED`. A player that
+  such as `DIDN'T TAKE · OPENING · INFUSE MAY NOT BE INSTALLED`. At `opening`
+  the line is `<DEVICE> TURNED OFF` when the player's reading is gone, or has
+  turned off, standby or unavailable since the handover, and `<APP> MAY NOT BE
+  INSTALLED` otherwise. A player that
   stays asleep through the waking window, or a Home Assistant that stops
   answering, ends it the same way. Once Home Assistant accepts a handover the
   link is never handed over again, and no stage is retried.

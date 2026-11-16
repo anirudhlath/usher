@@ -26,7 +26,7 @@ from tests.fakes.send_rig import (
     settle_parked,
     two_screen_house,
 )
-from usher.domain.house import HouseState
+from usher.domain.house import HouseSnapshot, HouseState
 from usher.domain.recipes import RECIPES, Recipe, Windows
 from usher.domain.screens import project
 from usher.domain.sends import SendStage
@@ -34,6 +34,7 @@ from usher.domain.source import MediaItem
 from usher.domain.ways import Way, rank
 from usher.ports.errors import PortDataMalformed, PortUnavailable
 from usher.ports.events import ClientEvent, ClientEventKind
+from usher.ports.source import wrap_deep_link
 from usher.services.send import SendDispatcher, SendOrder
 
 INFUSE_APP = "com.firecore.infuse"
@@ -324,6 +325,31 @@ async def test_a_player_that_vanishes_reads_as_turned_off(
     assert send.detail == "DIDN'T TAKE · STARTING · LIVING ROOM APPLE TV TURNED OFF"
 
 
+@pytest.mark.parametrize(
+    "gone",
+    [
+        lambda house: house.without_state(PLAYER),
+        lambda house: house.with_state(_reading(PLAYER, "unavailable")),
+        lambda house: house.with_state(_reading(PLAYER, "off")),
+    ],
+    ids=["vanished", "unavailable", "off"],
+)
+async def test_a_player_that_turns_off_while_opening_reads_as_turned_off(
+    gone: Callable[[HouseSnapshot], HouseSnapshot],
+    players: ParkingPlayers,
+    dispatcher: SendDispatcher,
+    short_order: SendOrder,
+    finished: Finished,
+) -> None:
+    players.on_wait = lambda n: players.publish(gone(players.snapshot())) if n == 1 else None
+    started = dispatcher.start(short_order)
+    await finished(started.id)
+    assert players.waits == 1, "the premise: the player went while the app was opening"
+    send = _send_of(dispatcher, started.id)
+    assert send.failed_stage is SendStage.OPENING
+    assert send.detail == "DIDN'T TAKE · OPENING · LIVING ROOM APPLE TV TURNED OFF"
+
+
 async def test_the_old_item_still_playing_is_not_the_send_playing(
     dispatcher: SendDispatcher,
     order: SendOrder,
@@ -366,7 +392,7 @@ async def test_a_second_send_to_the_screen_supersedes_the_first(
     assert firsts == ["waking", "opening", "superseded"]
     seconds = [e.data["stage"] for e in published if e.data["send_id"] == str(second.id)]
     assert seconds == ["waking", "opening"]
-    assert players.parked == 1, "the superseded send is still waiting on the house"
+    assert players.parked == 1, "the second send is not the one waiting on the house"
 
 
 async def test_sends_started_back_to_back_announce_each_send_they_supersede_once(
@@ -513,7 +539,7 @@ async def test_a_crashed_send_does_not_block_the_next_send_to_its_screen(
 @pytest.fixture
 def sink() -> Iterator[list[str]]:
     captured: list[str] = []
-    handle = logger.add(captured.append, level="DEBUG", diagnose=False)
+    handle = logger.add(captured.append, level="DEBUG", diagnose=False, backtrace=False)
     yield captured
     logger.remove(handle)
 
@@ -541,6 +567,82 @@ async def test_the_link_reaches_the_player_and_nothing_else(
     assert any(str(crashed.id) in line and "RuntimeError" in line for line in sink)
     assert all(LINK not in line and "TICKET" not in line for line in sink)
     assert players.calls.count(("play_url", PLAYER, LINK)) == 2
+
+
+TICKET_URL = "https://usher.test/stream/tk99secret/Name"
+SOURCE_URL = "https://source.test/videos/copy/original.mkv?api_key=src99key"
+SECRET_LINK = wrap_deep_link(TICKET_URL)
+SECRETS = (SECRET_LINK, TICKET_URL, "tk99secret", SOURCE_URL, "src99key")
+HA_CODE = "home_assistant_error"
+
+
+def _logged_once(sink: list[str], send_id: uuid.UUID, level: str, error: str) -> None:
+    """The send's one log line names it, its level and the error; no line carries a secret."""
+    lines = [line for line in sink if str(send_id) in line]
+    assert len(lines) == 1, lines
+    assert f"| {level}" in lines[0]
+    assert error in lines[0]
+    assert HA_CODE in lines[0]
+    assert [line for line in sink if any(secret in line for secret in SECRETS)] == []
+
+
+async def test_a_send_home_assistant_ends_logs_why_at_warning(
+    players: ParkingPlayers,
+    dispatcher: SendDispatcher,
+    order: SendOrder,
+    finished: Finished,
+    sink: list[str],
+) -> None:
+    players.refuse_plays = [PortUnavailable(HA_CODE)]
+    send = dispatcher.start(replace(order, link=lambda: SECRET_LINK))
+    await finished(send.id)
+    assert ("play_url", PLAYER, SECRET_LINK) in players.calls, "the premise: the link went out"
+    assert _send_of(dispatcher, send.id).detail == (
+        "DIDN'T TAKE · WAKING · HOME ASSISTANT IS NOT ANSWERING"
+    )
+    _logged_once(sink, send.id, "WARNING", "PortUnavailable")
+
+
+async def test_a_refused_wake_logs_why_and_the_send_goes_on(
+    players: ParkingPlayers,
+    dispatcher: SendDispatcher,
+    order: SendOrder,
+    settle: Settle,
+    sink: list[str],
+) -> None:
+    players.on_wake = _raises(PortDataMalformed(HA_CODE))
+    send = dispatcher.start(replace(order, link=lambda: SECRET_LINK))
+    await settle()
+    assert players.calls == [("wake", PLAYER, ""), ("play_url", PLAYER, SECRET_LINK)]
+    assert _send_of(dispatcher, send.id).stage is SendStage.OPENING
+    _logged_once(sink, send.id, "INFO", "PortDataMalformed")
+
+
+async def test_a_refused_handover_logs_why_before_the_retry(
+    players: ParkingPlayers,
+    dispatcher: SendDispatcher,
+    order: SendOrder,
+    settle: Settle,
+    sink: list[str],
+) -> None:
+    players.refuse_plays = [PortDataMalformed(HA_CODE)]
+    send = dispatcher.start(replace(order, link=lambda: SECRET_LINK))
+    await settle()
+    assert [call[0] for call in players.calls] == ["wake", "play_url", "play_url"]
+    assert _send_of(dispatcher, send.id).stage is SendStage.OPENING
+    _logged_once(sink, send.id, "INFO", "PortDataMalformed")
+
+
+async def test_a_finished_send_leaves_no_task_for_close_to_await(
+    players: ParkingPlayers, dispatcher: SendDispatcher, order: SendOrder
+) -> None:
+    players.refuse_plays = [PortUnavailable(HA_CODE)]
+    send = dispatcher.start(order)
+    (task,) = [one for one in asyncio.all_tasks() if one.get_name() == f"send-{send.id}"]
+    await task
+    assert _send_of(dispatcher, send.id).finished
+    # Private: nothing public shows it, and `gather` over a done task never yields.
+    assert send.id not in dispatcher._tasks
 
 
 async def test_finished_sends_are_kept_to_the_bound_and_a_running_one_is_never_dropped(

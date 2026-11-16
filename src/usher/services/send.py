@@ -1,7 +1,6 @@
 """Sends to a screen: one task per screen runs a send's stages and publishes each."""
 
 import asyncio
-import contextlib
 import time
 import uuid
 from collections import deque
@@ -249,7 +248,13 @@ class SendDispatcher:
             await self._announce(order.way.screen.area_id)
             await self._publish(self._sends[send_id])
             await self._stages(send_id, order)
-        except UsherPortError:
+        except UsherPortError as exc:
+            logger.warning(
+                "send {} ended on a port error: {}: {}",
+                send_id,
+                type(exc).__name__,
+                str(exc),
+            )
             await self._end(send_id, NOT_ANSWERING, _Outcome.UNAVAILABLE)
         except Exception:
             logger.exception("send {} failed", send_id)
@@ -258,7 +263,7 @@ class SendDispatcher:
     async def _stages(self, send_id: uuid.UUID, order: SendOrder) -> None:
         way = order.way
         entity_id, recipe = way.device.entity_id, way.recipe
-        handed = await self._hand_over(order)
+        handed = await self._hand_over(send_id, order)
         if handed is None:
             asleep = STAYED_ASLEEP.format(device=way.device.name.upper())
             await self._end(send_id, asleep, _Outcome.TIMED_OUT)
@@ -270,7 +275,13 @@ class SendDispatcher:
                 house.state(entity_id), at_handover=handed.at_handover, app_id=recipe.app_id
             )
 
-        def not_installed(_: HouseSnapshot) -> str:
+        def not_installed(house: HouseSnapshot) -> str:
+            """Turned off if the reading went off since the handover; `showing` decides off."""
+            now = house.state(entity_id)
+            shown = showing(now, device_name=way.device.name, recipe=recipe)
+            turned_off = showing(None, device_name=way.device.name, recipe=recipe)
+            if now != handed.at_handover and shown == turned_off:
+                return shown
             return MAY_NOT_BE_INSTALLED.format(app=recipe.name.upper())
 
         if not await self._wait(send_id, is_open, recipe.windows.opening_seconds, not_installed):
@@ -292,21 +303,26 @@ class SendDispatcher:
             return
         await self._advance(send_id, SendStage.PLAYING, _Outcome.CONFIRMED)
 
-    async def _hand_over(self, order: SendOrder) -> _Handed | None:
+    async def _hand_over(self, send_id: uuid.UUID, order: SendOrder) -> _Handed | None:
         """Wake the player and hand it the link until it takes it; `None` when it stays asleep.
 
         A refusal is a player not awake yet; the last handover is the last that
         fits inside the waking window.
         """
         entity_id, windows = order.way.device.entity_id, order.way.recipe.windows
-        with contextlib.suppress(PortDataMalformed):
+        try:
             await self._players.wake(entity_id)
+        except PortDataMalformed as exc:
+            logger.info("send {} wake refused: {}: {}", send_id, type(exc).__name__, str(exc))
         began = self._monotonic()
         while True:
             at_handover = self._players.snapshot().state(entity_id)
             try:
                 await self._players.play_url(entity_id, order.link())
-            except PortDataMalformed:
+            except PortDataMalformed as exc:
+                logger.info(
+                    "send {} handover refused: {}: {}", send_id, type(exc).__name__, str(exc)
+                )
                 if self._monotonic() - began + windows.retry_seconds > windows.waking_seconds:
                     return None
             else:
@@ -459,10 +475,10 @@ class SendService:
         dispatcher, house = self._read()
         way = _allowed(house, copies, way_id, take_over=take_over)
 
+        mint, handover = self._mint, way.recipe.handover
+
         def link() -> str:
-            return build_link(
-                way.recipe.handover, self._mint(source_url, name), position_seconds=position
-            )
+            return build_link(handover, mint(source_url, name), position_seconds=position)
 
         return dispatcher.start(SendOrder(title_id, episode_id, way, link))
 
