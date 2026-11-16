@@ -197,6 +197,20 @@ heading false. `tests/unit/test_docs_currency.py` reads it into the same union.
 spec and is not a milestone, so a row under any heading above would make that
 heading false. `tests/unit/test_docs_currency.py` reads it into the same union.
 
+## Self-healing sync, slice 1 (from docs/specs/2026-11-05-self-healing-sync-design.md)
+| Task | What it delivers | Plan file | Status |
+|---|---|---|---|
+| 1 | A lane keeps trying past the failure ceiling: it marks the source, logs one ERROR, and its wait stays at the maximum | docs/plans/2026-11-07-self-healing-lane.md | ✅ landed, acceptance pending |
+| 2 | `usher set-credentials` stores a source's new password, from the names of two environment variables | docs/plans/2026-11-07-self-healing-lane.md | ✅ landed, acceptance pending |
+| 3 | A rejected login marks the source and waits a day, without ending the lane | docs/plans/2026-11-07-self-healing-lane.md | ✅ landed, acceptance pending |
+| 4 | A crashed lane starts again on a new adapter past the spacing, and `usher.source.push.crashes` counts it | docs/plans/2026-11-07-self-healing-lane.md | ✅ landed, acceptance pending |
+| 5 | Status rows and the PR | docs/plans/2026-11-07-self-healing-lane.md | ✅ landed, acceptance pending |
+| 6 | Live acceptance at the next natural outage: the series reads 0 and returns to 1 with no deploy between — owner-gated | docs/plans/2026-11-07-self-healing-lane.md | 📋 planned |
+
+**A twelfth table, for the eleventh's reason.** Self-healing sync has its own
+spec and is not a milestone, so a row under any heading above would make that
+heading false. `tests/unit/test_docs_currency.py` reads it into the same union.
+
 ## M1 task groups → plan line ranges
 Plan file: `docs/plans/2026-07-28-m1-foundation.md` (2470 lines)
 

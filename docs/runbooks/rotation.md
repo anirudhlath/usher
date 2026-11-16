@@ -187,8 +187,9 @@ exactly as it was (measured byte-identical), because writing onto it would
 destroy the one copy a recovered old key could still have read.
 
 If it is refused because *every* row is, see §0 — you have the wrong old key. If
-it is genuinely just this row, re-register that source with
-`POST /admin/sources` once the new key is in place.
+it is genuinely just this row, store that source's credentials again with
+`usher set-credentials` once the new key is in place — it encrypts under
+whatever `USHER_SECRET_KEY` holds when it runs.
 
 ---
 

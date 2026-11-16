@@ -130,9 +130,10 @@ the plaintext exists only in memory in the adapter that needs it.
 - **And neither does a rejected *setting*.** An operator learns which setting
   was wrong and never sees the value, with or without `--traceback`.
 - ⚠️ **Changing `USHER_SECRET_KEY` without `usher rotate-secret` makes every
-  stored credential unreadable** until an operator re-enters it.
-  `GET /admin/sources/{id}/status` reports such a source as unreachable and
-  unauthenticated, with a fixed re-enter-your-credentials detail.
+  stored credential unreadable** until an operator re-enters it with
+  `usher set-credentials`. `GET /admin/sources/{id}/status` reports such a
+  source as unreachable and unauthenticated, with a fixed
+  re-enter-your-credentials detail.
 - **No credential ever reaches a client, with one documented exception**: a
   `direct` playback target's URL carries the source's session token. It does
   not carry Usher's own `DeviceId`. The playback ticket keeps the token out of
@@ -167,9 +168,11 @@ cursors are not signed with this key.
 
 **The new key is read from the environment, never from an argument.**
 `--new-key-env` takes the *name* of an exported variable. `--new-key` is
-refused, and no refusal prints the key back. A well-formed variable name that is
-unset is echoed, so an operator who forgot the `export` sees which variable was
-looked for.
+refused, and no refusal prints the key back, wherever on the command line it
+was typed: a refusal from the argument parser on a line naming `rotate-secret`
+repeats no value, before the subcommand or after it. A well-formed variable
+name that is unset is echoed, so an operator who forgot the `export` sees which
+variable was looked for.
 
 ⚠️ **Export it; do not add it to `.env`.** An exported `USHER_NEW_SECRET_KEY`
 is invisible to `Settings`; the same name written into `.env` makes every entry
@@ -186,13 +189,52 @@ that is recoverable:
 - **Re-running is the recovery.** A second run finishes a half-rotated table,
   and a run over a fully-rotated one is a no-op.
 - **A row that opens under neither key is refused, named and counted**, the run
-  exits non-zero, and the row is left exactly as it was.
+  exits non-zero, and the row is left exactly as it was. The report says to
+  store each refused source's credentials with `usher set-credentials` once the
+  new key is in place.
 - 🔴 **A run that refused *every* row is a different diagnosis and says so.** An
   operator who changes `.env` before running the command makes both ciphers the
   same, so every row refuses. That report names `USHER_SECRET_KEY`, says
-  nothing was lost, and does not mention re-registration;
+  nothing was lost, and does not tell the operator to re-enter anything;
   [`docs/runbooks/rotation.md`](../runbooks/rotation.md) is the operator-facing
   form.
+
+### Changing a stored password — `usher set-credentials`
+
+```bash
+read -r SOURCE_USERNAME && export SOURCE_USERNAME
+read -rs SOURCE_PASSWORD && export SOURCE_PASSWORD   # not echoed, not in history
+uv run usher set-credentials --source "Living Room Emby" \
+  --username-env SOURCE_USERNAME --password-env SOURCE_PASSWORD
+# then restart Usher
+```
+
+**The login is read from the environment, never from an argument.**
+`--username-env` and `--password-env` take the *names* of two exported
+variables. `--username` and `--password` are refused, and no refusal repeats
+any argument — not a value, not a variable's name and not what `--source` was
+given — wherever on the command line it was typed, before the subcommand or
+after it. A variable that is unset or empty is refused before the database is
+read.
+
+**It overwrites the source's stored login**, under the current
+`USHER_SECRET_KEY` and without reading the login it replaces, so a login stored
+under a key the deployment no longer holds is replaced too. The source keeps
+its id and every row that refers to it.
+
+**`--source` takes a source's id, as `GET /admin/sources` lists it, or its exact
+name.** A value that parses as a UUID is matched as an id, and anything else as
+a name. Either finds a disabled source too. A value matching no source is
+refused, and so is a name more than one source has, with the advice to pass the
+id instead; a refusal writes nothing.
+
+**It prints neither value.** On success it names the source and says to
+restart. It attempts no login, so a wrong password shows up at the source's
+next login rather than here.
+
+⚠️ **Usher must be restarted afterwards.** Running push lanes and the worker's
+cached adapters hold the old password, and a lane waiting out its day after a
+rejected login does not notice the new one by itself.
 
 ## Failure and degradation
 
@@ -204,8 +246,9 @@ local state can answer.**
 | Source unreachable | Catalog fully browsable. Playback → 503 `source_unavailable`. Availability goes stale, not wrong. A walk in progress waits out about eight minutes of it on the page it hit before failing, or, at the defaults, about 20 when the source accepts connections and then stalls ([03](03-sources-and-sync.md)) |
 | A refused availability sweep | The sweep retracts **nothing** and the run records `FAILED` with the two numbers and the ceiling; the catalog is unaffected. `usher sync` **exits non-zero** on it and names `usher sync --allow-full-retraction`, which is the operator's action *if the removal was intended*. `usher.sync.retraction.fraction{outcome="refused"}` is recorded on every finished full walk, so a flat zero means "nothing was shed". ⚠️ On a *view* of somebody else's library a refusal can be the steady state, tripped first by Usher's own partial coverage rather than the owner's deletions — check that the last full walk **completed** before reaching for the flag |
 | A source cannot confirm a removal | A full walk's sweep retracts **nothing** and stamps nothing, and the run records `FAILED` with the error. It is not the ceiling's `availability_ceiling`, so the next full walk resumes the run, walks no unit again, and only sweeps. The catalog is unaffected. A push removal the source cannot confirm fails its event like any failed read in the lane and changes nothing; the gap-closing delta after the reconnect never retracts, so the removal waits for the next full walk's sweep |
-| Source credentials rejected | `GET /admin/sources/{id}/status` reports `authenticated: false`; re-authentication is retried after a cooldown rather than on every call. Catalog unaffected |
-| Push socket drops | Backoff reconnect; delta reconcile on reconnect, **only when a completed walk gives that delta a cursor** (`USHER_PUSH_GAP_CLOSE`). The same refusal covers a push event deferred to a delta. After `USHER_PUSH_MAX_CONSECUTIVE_FAILURES` (default 5) mark `supports_push = false` and lean on the full walk. **The failure counter resets on delivery, not on connection**, and any message is delivery — a `Sessions` frame that maps to no event included — so the ceiling counts consecutive connections that delivered nothing. When the ceiling is reached the lane stops, the socket is closed, and the status route answers `push_available: null`. The lane is **not** restarted |
+| Source credentials rejected | `GET /admin/sources/{id}/status` reports `authenticated: false`; re-authentication is retried after a cooldown rather than on every call. A push lane marks `supports_push = false` and waits a day before its next try; its gauge reads 0, and its ERROR says to store the new password with `usher set-credentials` and restart Usher. Catalog unaffected |
+| Push socket drops | Backoff reconnect; delta reconcile on reconnect, **only when a completed walk gives that delta a cursor** (`USHER_PUSH_GAP_CLOSE`). The same refusal covers a push event deferred to a delta. After `USHER_PUSH_MAX_CONSECUTIVE_FAILURES` (default 5) mark `supports_push = false`, log one ERROR, and keep trying: the wait doubles up to `USHER_PUSH_MAX_BACKOFF_SECONDS` and stays there. **The failure counter resets on delivery, not on connection**, and any message is delivery — a `Sessions` frame that maps to no event included — so the ceiling counts consecutive connections that delivered nothing. The adapter stays open, so the gauge reads 0 until a connection delivers. Until then the status route answers `push_available: false` when its own check authenticates, and `null` when it reports `authenticated: false`, as it does while the source is unreachable or refuses the login. The column returns to `true` at the first event that maps to something |
+| A push lane crashes | `/health/ready` names the source in `lanes.crashed_sources` and its gauge reads 0 until a refresh at least `USHER_PUSH_MAX_BACKOFF_SECONDS` after the crash, or after a restart that could not open an adapter, starts a new lane on a new adapter. `usher.source.push.crashes` counts them. A source with no push channel is not a crash: its lane ends, its adapter is released, and the status route answers `push_available: null` |
 | Home Assistant unreachable, or players off | `/screens` and confirm → 503 `players_unavailable`, its `detail` saying why the last connection ended, with `Retry-After` unless players are off; `/ways` answers with `screens_available: false`. Catalog, search and playback unaffected, and readiness never consults it. The connection retries with jittered backoff (`USHER_PLAYERS_BACKOFF_SECONDS` doubling to `USHER_PLAYERS_MAX_BACKOFF_SECONDS`) and re-reads every registry when it returns |
 | Home Assistant refuses `USHER_HA_TOKEN` | As unreachable, with no `Retry-After`, and `detail` says the token was refused. The connection is **not** retried: one ERROR line names `USHER_HA_TOKEN`, never its value, and Usher connects again only after a restart |
 | Gap-closing delta larger than `USHER_PUSH_GAP_MAX_ITEMS` | The item walk stops at the ceiling (default **20,000 items**; `0` is unlimited) and the run records **`FAILED`**, never `COMPLETED`. **Nothing the walk saw is lost**; the cursor does not advance. One WARNING names the source, how far it got, the setting and `usher sync --kind full`. `usher sync --kind delta` and `POST /admin/sources/{id}/sync` are unbounded. **The item lane only** |

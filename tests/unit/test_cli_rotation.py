@@ -1,15 +1,12 @@
 """`usher rotate-secret` -- its argument surface, its dispatch arm, its report."""
 
-import argparse
-import contextlib
-import io
 import os
 import re
 
 import pytest
 from pydantic import SecretStr
 
-from tests.unit.commands import configured, dispatched
+from tests.unit.commands import configured, dispatched, merged
 from usher.cli import _new_secret_key, _print_rotation_report, build_parser, main, parse_args
 from usher.config import Settings
 from usher.services.rotation import RotationReport
@@ -48,25 +45,6 @@ HEX_KEY_THAT_IS_A_LEGAL_NAME = "f72e4ec32beea584456a" + "a" * 44
 BASE64_KEY = "aB3/xY+9zQ7wE1rT2uI5oP8kL0jH6gF4dS2aZ1xC3v=="
 
 
-def _merged(argv: list[str]) -> tuple[object, str]:
-    """Run `main` and return its exit code beside **everything an operator sees**.
-
-    Stdout, stderr and the `SystemExit` string, concatenated: argparse writes its
-    refusals to stderr and this command writes its own to `SystemExit`, so a case
-    reading only one of them can watch a key go past on the other.
-    """
-    out, err = io.StringIO(), io.StringIO()
-    code: object = 0
-    message = ""
-    try:
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            main(argv)
-    except SystemExit as exc:
-        code = exc.code
-        message = "" if isinstance(exc.code, int) or exc.code is None else str(exc.code)
-    return code, out.getvalue() + err.getvalue() + message
-
-
 def test_rotate_secret_takes_a_variable_name_and_never_a_key() -> None:
     """The acceptance criterion, run through the real parser.
 
@@ -97,7 +75,7 @@ def test_a_key_passed_as_new_key_is_refused_and_never_appears_anywhere(
     argv = ["rotate-secret", "--new-key", NEW_KEY]
     assert NEW_KEY in argv, "the premise: the key really is in this invocation"
 
-    code, seen = _merged(argv)
+    code, seen = merged(argv)
 
     assert code == 2
     assert NEW_KEY not in seen
@@ -129,7 +107,7 @@ def test_an_abbreviation_cannot_bind_a_value_into_the_variable_name(
         ["rotate-secret", "--newkey", NEW_KEY, "--new-key-env", VAR],
     ):
         assert NEW_KEY in argv
-        code, seen = _merged(argv)
+        code, seen = merged(argv)
         assert code == 2, argv
         assert NEW_KEY not in seen, argv
 
@@ -154,7 +132,7 @@ def test_a_key_given_to_the_variable_flag_itself_is_refused_without_being_echoed
     ).secret_key
     assert accepted.get_secret_value() == HEX_KEY_THAT_IS_A_LEGAL_NAME
 
-    code, seen = _merged(["rotate-secret", "--new-key-env", HEX_KEY_THAT_IS_A_LEGAL_NAME])
+    code, seen = merged(["rotate-secret", "--new-key-env", HEX_KEY_THAT_IS_A_LEGAL_NAME])
 
     assert code != 0
     assert HEX_KEY_THAT_IS_A_LEGAL_NAME not in seen
@@ -173,68 +151,87 @@ def test_a_name_that_is_not_an_environment_variable_name_is_refused_without_bein
     configured(monkeypatch)
     assert not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", BASE64_KEY), "the premise"
 
-    code, seen = _merged(["rotate-secret", "--new-key-env", BASE64_KEY])
+    code, seen = merged(["rotate-secret", "--new-key-env", BASE64_KEY])
 
     assert code != 0
     assert BASE64_KEY not in seen
     assert "environment variable" in seen
 
 
-def test_an_unrecognised_argument_names_its_value_on_every_command_except_this_one(
+def test_an_unrecognised_argument_is_named_unless_the_line_names_a_secret_command(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The scrub is scoped, and the control is what says so.
+    """The scrub is scoped to a line naming a secret command, and the control says so.
 
-    argparse's *"unrecognized arguments: %s"* is how an operator fixes a typo,
-    so it is kept verbatim everywhere else. It is suppressed on
-    `rotate-secret` alone, where an unrecognised value is most likely a key.
+    argparse's *"unrecognized arguments: %s"* is how an operator fixes a typo, so it
+    is kept verbatim on a line naming neither `rotate-secret` nor `set-credentials`.
+    Each of those counts its own unknowns instead, since an unknown there is most
+    likely a key or a password, and the control's refusal is scrubbed once its line
+    names one of them too.
     """
     configured(monkeypatch)
 
-    _, elsewhere = _merged(["backup", "--nonsense", NEW_KEY])
+    _, elsewhere = merged(["backup", "--nonsense", NEW_KEY])
     assert "unrecognized arguments" in elsewhere
-    assert NEW_KEY in elsewhere, "the control: other commands still name what they refused"
+    assert NEW_KEY in elsewhere, "the control: a line naming no secret command names the value"
 
-    _, here = _merged(["rotate-secret", "--nonsense", NEW_KEY, "--new-key-env", VAR])
-    assert "unrecognized arguments for rotate-secret" in here
-    assert NEW_KEY not in here
+    _, naming = merged(["backup", "set-credentials", "--nonsense", NEW_KEY])
+    assert "an argument was refused and is not shown" in naming
+    assert NEW_KEY not in naming, "one name anywhere on the line scrubs the whole refusal"
+
+    _, rotation = merged(["rotate-secret", "--nonsense", NEW_KEY, "--new-key-env", VAR])
+    assert "unrecognized arguments for rotate-secret" in rotation
+    assert NEW_KEY not in rotation
+
+    rest = ["--source", "a source", "--username-env", "U", "--password-env", "P"]
+    _, credentials = merged(["set-credentials", "--nonsense", NEW_KEY, *rest])
+    assert "unrecognized arguments for set-credentials" in credentials
+    assert NEW_KEY not in credentials
 
 
-def test_prefix_matching_is_off_for_this_command_and_on_for_every_other(
+#: The two subcommands whose arguments are secrets, or names standing in for them.
+SECRET_COMMANDS = {"rotate-secret", "set-credentials"}
+
+
+def test_prefix_matching_is_off_for_both_secret_commands_and_on_for_every_other(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The blast radius of `allow_abbrev=False`, pinned rather than left to a comment.
+    """The blast radius of `allow_abbrev=False`, pinned for every subcommand there is.
 
-    It is set on this subparser only -- a subparser does **not** inherit it from the
-    parser that created it -- so exactly three option strings lose prefix matching and
-    nineteen other commands keep it.
+    It is set per subparser -- a subparser does **not** inherit it from the parser that
+    created it. `--hel` is the probe because every subparser has `--help`: with prefix
+    matching on it *is* `--help` and prints that command's help, and with it off it is
+    an unknown flag and the command refuses. The list is read off `usher --help`, so a
+    subcommand added later is covered without anybody remembering to add it here.
     """
     configured(monkeypatch)
+    commands = _every_subcommand()
+    assert set(commands) > SECRET_COMMANDS, "the premise: both exist, and are not all there is"
 
-    # Off here: an abbreviation of the one real flag no longer parses.
-    with pytest.raises(SystemExit):
-        parse_args(["rotate-secret", "--new-key-e", VAR])
+    for command in commands:
+        code, seen = merged([command, "--hel"])
+        # The help string of `-h` itself, which a refusal's usage line does not carry.
+        helped = "show this help message and exit" in seen
+        if command in SECRET_COMMANDS:
+            assert (code, helped) == (2, False), command
+        else:
+            assert (code, helped) == (0, True), command
 
-    # On everywhere else: `usher backup --out` still means `--output`.
-    assert parse_args(["backup", "--out", "usher-backup.jsonl.gz"]).output.name == (
-        "usher-backup.jsonl.gz"
-    )
+
+def _every_subcommand() -> list[str]:
+    """Every subcommand, read off the `{serve,bootstrap,...}` group `usher --help` prints."""
+    code, seen = merged(["--help"])
+    assert code == 0
+    group = re.search(r"\{([a-z,-]+)\}", seen)
+    assert group is not None, seen
+    return group.group(1).split(",")
 
 
 def _rotate_secret_help() -> str:
-    """The `rotate-secret` subparser's own help.
-
-    Not `build_parser().format_help()`, which lists subcommand *names* and no
-    option of any of them -- so an assertion about `--new-key` against it
-    passes whatever the subparser declares.
-    """
-    subparsers = next(
-        action
-        for action in build_parser()._actions
-        if isinstance(action, argparse._SubParsersAction)
-    )
-    parser = subparsers.choices["rotate-secret"]
-    return str(parser.format_help())
+    """`usher rotate-secret --help`, read the way an operator reads it."""
+    code, seen = merged(["rotate-secret", "--help"])
+    assert code == 0, seen
+    return seen
 
 
 def test_the_key_itself_is_absent_from_argv_and_from_the_parsed_namespace(
@@ -530,9 +527,10 @@ def test_a_run_that_refused_every_row_blames_the_old_key_and_not_the_credentials
     assert "re-entered" not in message
     assert "re-register" not in message
     assert "POST /admin/sources" not in message
+    assert "set-credentials" not in message
 
 
-def test_a_run_that_refused_only_some_rows_still_says_to_re_register_those(
+def test_a_run_that_refused_only_some_rows_still_says_to_re_enter_those(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The control, and what keeps the case above about the *saturated* count.
@@ -555,7 +553,9 @@ def test_a_run_that_refused_only_some_rows_still_says_to_re_register_those(
     message = str(exit_info.value)
     assert exit_info.value.code != 0
     assert "re-entered" in message
-    assert "POST /admin/sources" in message
+    assert "usher set-credentials" in message
+    # Not the old advice beside it: registering again mints a second source.
+    assert "POST /admin/sources" not in message
     # And it does not claim nothing was written, because two rows were.
     assert "nothing was written" not in message.lower()
 
