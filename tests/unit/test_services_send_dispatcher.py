@@ -12,13 +12,13 @@ import pytest
 from loguru import logger
 from opentelemetry import metrics
 from opentelemetry.sdk.metrics import MeterProvider
-from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+from opentelemetry.sdk.metrics.export import HistogramDataPoint, InMemoryMetricReader
 
 from tests.contract.players_contract import URL as LINK
 from tests.fakes.house import area, device, entity, snapshot, state
 from tests.fakes.players import FakePlayers
 from usher.domain.house import DeviceRole, HouseSnapshot, HouseState
-from usher.domain.recipes import RECIPES, Windows
+from usher.domain.recipes import RECIPES, Recipe, Windows
 from usher.domain.screens import project
 from usher.domain.sends import SendStage
 from usher.domain.source import MediaItem
@@ -32,11 +32,16 @@ BEDROOM_PLAYER = "media_player.bedroom_bedroom_apple_tv"
 INFUSE_APP = "com.firecore.infuse"
 TITLE = uuid.UUID("01900000-0000-7000-8000-000000000001")
 SOURCE = uuid.UUID("01900000-0000-7000-8000-000000000002")
+# Long windows: a case that parks a send ends the wait itself, and never races the clock.
 RECIPE = replace(
     next(one for one in RECIPES if one.key == "apple_tv.infuse"),
     windows=Windows(
-        waking_seconds=6.0, retry_seconds=2.0, opening_seconds=0.05, starting_seconds=0.05
+        waking_seconds=6.0, retry_seconds=2.0, opening_seconds=30.0, starting_seconds=30.0
     ),
+)
+# For the cases whose window has to run out, arranged before the wait so nothing races it.
+SHORT = replace(
+    RECIPE, windows=replace(RECIPE.windows, opening_seconds=0.05, starting_seconds=0.05)
 )
 COPY = MediaItem(
     source_id=SOURCE, title_id=TITLE, external_id="copy", container="mkv", runtime_seconds=7_200
@@ -47,6 +52,7 @@ DEADLINE_SECONDS = 2.0
 Settle = Callable[..., Awaitable[None]]
 Finished = Callable[..., Awaitable[None]]
 Publish = Callable[..., None]
+Reaches = Callable[[uuid.UUID, SendStage], Awaitable[None]]
 
 
 def _reading(entity_id: str, value: str, **fields: Any) -> HouseState:
@@ -86,8 +92,8 @@ def _house() -> HouseSnapshot:
     )
 
 
-def _way(area_id: str) -> Way:
-    ways = rank(project(_house(), (RECIPE,)).screens, [COPY])
+def _way(area_id: str, recipe: Recipe = RECIPE) -> Way:
+    ways = rank(project(_house(), (recipe,)).screens, [COPY])
     return next(way for way in ways if way.screen.area_id == area_id)
 
 
@@ -99,15 +105,30 @@ def _raises(error: Exception) -> Callable[..., NoReturn]:
 
 
 class ParkingPlayers(FakePlayers):
-    """`FakePlayers` that counts the waits a send is parked in."""
+    """`FakePlayers` that counts the waits a send is parked in, with a hook before each.
+
+    `on_wait` gets the wait's ordinal, so a case changes the house as a stage
+    begins rather than racing that stage's window.
+    """
 
     def __init__(self, house: HouseSnapshot) -> None:
         super().__init__(house)
         self.parked = 0
+        self.waits = 0
+        self.on_wait: Callable[[int], None] | None = None
+        self.on_wake: Callable[[], None] | None = None
+
+    async def wake(self, entity_id: str) -> None:
+        await super().wake(entity_id)
+        if self.on_wake is not None:
+            self.on_wake()
 
     async def wait_until(
         self, predicate: Callable[[HouseSnapshot], bool], *, timeout: float
     ) -> HouseSnapshot:
+        self.waits += 1
+        if self.on_wait is not None:
+            self.on_wait(self.waits)
         self.parked += 1
         try:
             return await super().wait_until(predicate, timeout=timeout)
@@ -206,6 +227,11 @@ def order(rig: Rig) -> SendOrder:
 
 
 @pytest.fixture
+def short_order(order: SendOrder) -> SendOrder:
+    return replace(order, way=_way("living_room", SHORT))
+
+
+@pytest.fixture
 def settle(players: ParkingPlayers) -> Settle:
     """Until `parked` sends wait on the house; a send that never parks fails the case."""
 
@@ -231,6 +257,17 @@ def finished(dispatcher: SendDispatcher) -> Finished:
             if found.finished:
                 return
             assert time.monotonic() < deadline, f"the send is still {found.stage}"
+            await asyncio.sleep(0.001)
+
+    return run
+
+
+@pytest.fixture
+def reaches(dispatcher: SendDispatcher) -> Reaches:
+    async def run(send_id: uuid.UUID, stage: SendStage) -> None:
+        deadline = time.monotonic() + DEADLINE_SECONDS
+        while (found := _send_of(dispatcher, send_id)).stage is not stage:
+            assert time.monotonic() < deadline, f"the send is still {found.stage}, not {stage}"
             await asyncio.sleep(0.001)
 
     return run
@@ -312,9 +349,9 @@ async def test_a_player_that_stays_asleep_ends_the_send_at_the_last_handover_ins
 
 
 async def test_an_app_that_never_opens_is_not_handed_the_link_again(
-    players: ParkingPlayers, dispatcher: SendDispatcher, order: SendOrder, finished: Finished
+    players: ParkingPlayers, dispatcher: SendDispatcher, short_order: SendOrder, finished: Finished
 ) -> None:
-    started = dispatcher.start(order)
+    started = dispatcher.start(short_order)
     await finished(started.id)
     send = _send_of(dispatcher, started.id)
     assert send.detail == "DIDN'T TAKE · OPENING · INFUSE MAY NOT BE INSTALLED"
@@ -335,35 +372,35 @@ async def test_a_start_that_never_comes_names_what_the_player_shows(
     cause: str,
     players: ParkingPlayers,
     dispatcher: SendDispatcher,
-    order: SendOrder,
-    settle: Settle,
+    short_order: SendOrder,
     finished: Finished,
     infuse: Publish,
 ) -> None:
     players.on_play = lambda *_: infuse(state="idle")
-    started = dispatcher.start(order)
-    await settle()
-    assert _send_of(dispatcher, started.id).stage is SendStage.STARTING
-    players.publish(players.snapshot().with_state(reading))
+    players.on_wait = lambda n: (
+        players.publish(players.snapshot().with_state(reading)) if n == 2 else None
+    )
+    started = dispatcher.start(short_order)
     await finished(started.id)
     send = _send_of(dispatcher, started.id)
+    assert players.waits == 2, "the premise: opened by an Infuse reading, then waiting to start"
     assert send.detail == f"DIDN'T TAKE · STARTING · {cause}"
 
 
 async def test_a_player_that_vanishes_reads_as_turned_off(
     players: ParkingPlayers,
     dispatcher: SendDispatcher,
-    order: SendOrder,
-    settle: Settle,
+    short_order: SendOrder,
     finished: Finished,
     infuse: Publish,
 ) -> None:
     players.on_play = lambda *_: infuse(state="idle")
-    started = dispatcher.start(order)
-    await settle()
-    assert _send_of(dispatcher, started.id).stage is SendStage.STARTING
-    players.publish(players.snapshot().without_state(PLAYER))
+    players.on_wait = lambda n: (
+        players.publish(players.snapshot().without_state(PLAYER)) if n == 2 else None
+    )
+    started = dispatcher.start(short_order)
     await finished(started.id)
+    assert players.waits == 2, "the premise: opened, then waiting to start"
     send = _send_of(dispatcher, started.id)
     assert send.detail == "DIDN'T TAKE · STARTING · LIVING ROOM APPLE TV TURNED OFF"
 
@@ -372,6 +409,7 @@ async def test_the_old_item_still_playing_is_not_the_send_playing(
     dispatcher: SendDispatcher,
     order: SendOrder,
     settle: Settle,
+    reaches: Reaches,
     finished: Finished,
     infuse: Publish,
 ) -> None:
@@ -380,6 +418,7 @@ async def test_the_old_item_still_playing_is_not_the_send_playing(
     await settle()
     assert _send_of(dispatcher, send.id).stage is SendStage.OPENING
     infuse(state="playing", media_duration_seconds=1_000.0, media_position_seconds=61.0)
+    await reaches(send.id, SendStage.STARTING)
     await settle()
     assert _send_of(dispatcher, send.id).stage is SendStage.STARTING
     infuse(state="playing", media_duration_seconds=7_150.0)
@@ -409,6 +448,21 @@ async def test_a_second_send_to_the_screen_supersedes_the_first(
     seconds = [e.data["stage"] for e in published if e.data["send_id"] == str(second.id)]
     assert seconds == ["waking", "opening"]
     assert players.parked == 1, "the superseded send is still waiting on the house"
+
+
+async def test_sends_started_back_to_back_announce_each_send_they_supersede_once(
+    dispatcher: SendDispatcher, published: list[ClientEvent], order: SendOrder, settle: Settle
+) -> None:
+    a = dispatcher.start(order)
+    b = dispatcher.start(order)
+    c = dispatcher.start(order)
+    await settle()
+    assert [(e.data["send_id"], e.data["stage"]) for e in published] == [
+        (str(a.id), "superseded"),
+        (str(b.id), "superseded"),
+        (str(c.id), "waking"),
+        (str(c.id), "opening"),
+    ]
 
 
 class Holding(Recording):
@@ -463,17 +517,12 @@ async def test_a_send_to_another_screen_supersedes_nothing(
 
 
 async def test_home_assistant_dropping_mid_send_says_so(
-    players: ParkingPlayers,
-    dispatcher: SendDispatcher,
-    order: SendOrder,
-    settle: Settle,
-    finished: Finished,
+    players: ParkingPlayers, dispatcher: SendDispatcher, short_order: SendOrder, finished: Finished
 ) -> None:
-    started = dispatcher.start(order)
-    await settle()
-    assert _send_of(dispatcher, started.id).stage is SendStage.OPENING
-    players.drop()
+    players.on_wait = lambda n: players.drop() if n == 1 else None
+    started = dispatcher.start(short_order)
     await finished(started.id)
+    assert players.waits == 1, "the premise: the house dropped while the app was opening"
     send = _send_of(dispatcher, started.id)
     assert send.detail == "DIDN'T TAKE · OPENING · HOME ASSISTANT IS NOT ANSWERING"
 
@@ -494,7 +543,41 @@ async def test_a_handover_home_assistant_cannot_take_ends_the_send_at_waking(
     assert slept == []
 
 
-async def test_a_crash_ends_the_send_and_frees_the_screen(
+async def test_a_wake_home_assistant_cannot_take_ends_the_send_at_waking(
+    rig: Rig,
+    players: ParkingPlayers,
+    dispatcher: SendDispatcher,
+    order: SendOrder,
+    slept: list[float],
+    finished: Finished,
+) -> None:
+    players.refuse = PortUnavailable("Home Assistant is not answering")
+    started = dispatcher.start(order)
+    await finished(started.id)
+    send = _send_of(dispatcher, started.id)
+    assert players.calls == []
+    assert send.detail == "DIDN'T TAKE · WAKING · HOME ASSISTANT IS NOT ANSWERING"
+    assert (slept, rig.links.minted) == ([], 0)
+
+
+async def test_a_house_lost_after_the_wake_ends_the_send_at_waking(
+    rig: Rig,
+    players: ParkingPlayers,
+    dispatcher: SendDispatcher,
+    order: SendOrder,
+    slept: list[float],
+    finished: Finished,
+) -> None:
+    players.on_wake = players.drop
+    started = dispatcher.start(order)
+    await finished(started.id)
+    send = _send_of(dispatcher, started.id)
+    assert players.calls == [("wake", PLAYER, "")], "the premise: the wake was taken"
+    assert send.detail == "DIDN'T TAKE · WAKING · HOME ASSISTANT IS NOT ANSWERING"
+    assert (slept, rig.links.minted) == ([], 0)
+
+
+async def test_a_crashed_send_does_not_block_the_next_send_to_its_screen(
     dispatcher: SendDispatcher, order: SendOrder, settle: Settle, finished: Finished
 ) -> None:
     crashing = replace(order, link=_raises(RuntimeError("boom")))
@@ -570,8 +653,8 @@ async def test_closing_cancels_a_running_send_and_publishes_nothing_more(
     before = list(published)
     assert [e.data["stage"] for e in before] == ["waking", "opening"]
     await dispatcher.aclose()
-    assert players.parked == 0
-    await asyncio.sleep(RECIPE.windows.opening_seconds * 2)
+    assert players.parked == 0, "the send is still waiting on the house"
+    await asyncio.sleep(0.01)
     assert published == before
     assert _send_of(dispatcher, send.id).stage is SendStage.OPENING
 
@@ -581,6 +664,31 @@ def meter_reader() -> InMemoryMetricReader:
     reader = InMemoryMetricReader()
     metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
     return reader
+
+
+def _recorded(reader: InMemoryMetricReader) -> list[HistogramDataPoint]:
+    data = reader.get_metrics_data()
+    return [
+        point
+        for resource in (data.resource_metrics if data else ())
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+        if metric.name == "usher.send.stage.duration"
+        for point in metric.data.data_points
+        if isinstance(point, HistogramDataPoint)
+    ]
+
+
+def _triples(points: list[HistogramDataPoint]) -> set[tuple[object, object, object]]:
+    return {
+        (
+            point.attributes["usher.send.recipe"],
+            point.attributes["usher.send.stage"],
+            point.attributes["usher.send.outcome"],
+        )
+        for point in points
+        if point.attributes is not None
+    }
 
 
 async def test_each_stage_a_send_leaves_records_its_duration(
@@ -595,28 +703,75 @@ async def test_each_stage_a_send_leaves_records_its_duration(
     send = dispatcher.start(order)
     await finished(send.id)
     assert _send_of(dispatcher, send.id).stage is SendStage.PLAYING
-    data = meter_reader.get_metrics_data()
-    assert data is not None
-    recorded = [
-        point
-        for resource in data.resource_metrics
-        for scope in resource.scope_metrics
-        for metric in scope.metrics
-        if metric.name == "usher.send.stage.duration"
-        for point in metric.data.data_points
-    ]
-    points = {
-        (
-            point.attributes["usher.send.recipe"],
-            point.attributes["usher.send.stage"],
-            point.attributes["usher.send.outcome"],
-        )
-        for point in recorded
-        if point.attributes is not None
-    }
+    recorded = _recorded(meter_reader)
+    points = _triples(recorded)
     assert points == {
         ("apple_tv.infuse", "waking", "confirmed"),
         ("apple_tv.infuse", "opening", "confirmed"),
         ("apple_tv.infuse", "starting", "confirmed"),
     }
-    assert sum(getattr(point, "count", 0) for point in recorded) == 3
+    assert sum(point.count for point in recorded) == 3
+    (bounds,) = {tuple(point.explicit_bounds) for point in recorded}
+    assert bounds == (0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 12.0, 20.0, 30.0, 45.0, 60.0), (
+        "the stage buckets must resolve a second and reach past the longest window"
+    )
+
+
+async def test_a_stage_that_runs_out_its_window_records_timed_out(
+    meter_reader: InMemoryMetricReader,
+    dispatcher: SendDispatcher,
+    short_order: SendOrder,
+    finished: Finished,
+) -> None:
+    send = dispatcher.start(short_order)
+    await finished(send.id)
+    assert _send_of(dispatcher, send.id).failed_stage is SendStage.OPENING
+    assert _triples(_recorded(meter_reader)) == {
+        ("apple_tv.infuse", "waking", "confirmed"),
+        ("apple_tv.infuse", "opening", "timed_out"),
+    }
+
+
+async def test_a_house_gone_at_the_deadline_records_unavailable(
+    meter_reader: InMemoryMetricReader,
+    players: ParkingPlayers,
+    dispatcher: SendDispatcher,
+    short_order: SendOrder,
+    finished: Finished,
+) -> None:
+    players.on_wait = lambda n: players.drop() if n == 1 else None
+    send = dispatcher.start(short_order)
+    await finished(send.id)
+    assert _send_of(dispatcher, send.id).failed_stage is SendStage.OPENING
+    assert _triples(_recorded(meter_reader)) == {
+        ("apple_tv.infuse", "waking", "confirmed"),
+        ("apple_tv.infuse", "opening", "unavailable"),
+    }
+
+
+async def test_a_superseded_send_records_its_stage_when_the_next_one_starts(
+    meter_reader: InMemoryMetricReader,
+    dispatcher: SendDispatcher,
+    order: SendOrder,
+    settle: Settle,
+) -> None:
+    dispatcher.start(order)
+    await settle()
+    assert _triples(_recorded(meter_reader)) == {("apple_tv.infuse", "waking", "confirmed")}
+    dispatcher.start(order)
+    assert _triples(_recorded(meter_reader)) == {
+        ("apple_tv.infuse", "waking", "confirmed"),
+        ("apple_tv.infuse", "opening", "superseded"),
+    }
+
+
+async def test_a_crash_records_failed(
+    meter_reader: InMemoryMetricReader,
+    dispatcher: SendDispatcher,
+    order: SendOrder,
+    finished: Finished,
+) -> None:
+    send = dispatcher.start(replace(order, link=_raises(RuntimeError("boom"))))
+    await finished(send.id)
+    assert _send_of(dispatcher, send.id).detail == "DIDN'T TAKE · WAKING · USHER FAILED"
+    assert _triples(_recorded(meter_reader)) == {("apple_tv.infuse", "waking", "failed")}

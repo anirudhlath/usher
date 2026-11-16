@@ -35,9 +35,14 @@ from usher.ports.players import Players
 
 _meter = metrics.get_meter("usher.send")
 
+# Sub-second resolution up to past the longest window, the wake's 45 s.
+_STAGE_BUCKETS = (0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 12.0, 20.0, 30.0, 45.0, 60.0)
 # PRD 10's name, byte for byte.
 _stage_duration = _meter.create_histogram(
-    "usher.send.stage.duration", unit="s", description="Seconds a send spent in one stage"
+    "usher.send.stage.duration",
+    unit="s",
+    description="Seconds a send spent in one stage",
+    explicit_bucket_boundaries_advisory=list(_STAGE_BUCKETS),
 )
 
 
@@ -73,7 +78,8 @@ class SendDispatcher:
 
     A second send to a screen supersedes the first in `start`. Every transition
     is a no-op on a send the record shows finished, so a superseded task can
-    neither move its send nor publish for it.
+    neither move its send nor publish for it. A superseded send's frame waits in
+    its screen's queue until a later send's task publishes it.
     """
 
     def __init__(
@@ -97,18 +103,20 @@ class SendDispatcher:
         self._kept: deque[uuid.UUID] = deque()
         self._screens: dict[str, uuid.UUID] = {}
         self._tasks: dict[uuid.UUID, asyncio.Task[None]] = {}
+        self._unannounced: dict[str, deque[Send]] = {}
 
     def start(self, order: SendOrder) -> Send:
         """Record a send at WAKING and start its task; the screen's running send is superseded."""
         way = order.way
         area_id = way.screen.area_id
-        superseded: Send | None = None
         holder = self._screens.get(area_id)
         if holder is not None:
             superseded = self._move(holder, SendStage.SUPERSEDED, _Outcome.SUPERSEDED)
             running = self._tasks.get(holder)
-            if superseded is not None and running is not None:
-                running.cancel()
+            if superseded is not None:
+                self._unannounced.setdefault(area_id, deque()).append(superseded)
+                if running is not None:
+                    running.cancel()
         send = Send(
             id=new_id(),
             title_id=order.title_id,
@@ -124,7 +132,7 @@ class SendDispatcher:
         self._sends[send.id] = send
         self._entered[send.id] = self._monotonic()
         self._screens[area_id] = send.id
-        task = asyncio.create_task(self._run(send.id, order, superseded), name=f"send-{send.id}")
+        task = asyncio.create_task(self._run(send.id, order), name=f"send-{send.id}")
         self._tasks[send.id] = task
         task.add_done_callback(lambda _: self._release(send.id, area_id))
         return send
@@ -215,11 +223,18 @@ class SendDispatcher:
             )
         )
 
-    async def _run(self, send_id: uuid.UUID, order: SendOrder, superseded: Send | None) -> None:
+    async def _announce(self, area_id: str) -> None:
+        """Publish the screen's superseded frames in order, each dropped once it is out."""
+        pending = self._unannounced.get(area_id)
+        while pending:
+            await self._publish(pending[0])
+            pending.popleft()
+        self._unannounced.pop(area_id, None)
+
+    async def _run(self, send_id: uuid.UUID, order: SendOrder) -> None:
         """A cancelled run ends nothing and publishes nothing: `start` or `aclose` cancelled it."""
         try:
-            if superseded is not None:
-                await self._publish(superseded)
+            await self._announce(order.way.screen.area_id)
             await self._publish(self._sends[send_id])
             await self._stages(send_id, order)
         except UsherPortError:
