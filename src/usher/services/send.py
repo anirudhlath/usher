@@ -18,7 +18,7 @@ from usher.domain.episode import Episode
 from usher.domain.house import HouseSnapshot, HouseState
 from usher.domain.ids import new_id
 from usher.domain.recipes import Handover
-from usher.domain.screens import Screen, project
+from usher.domain.screens import project
 from usher.domain.sends import (
     MAY_NOT_BE_INSTALLED,
     NOT_ANSWERING,
@@ -43,7 +43,7 @@ from usher.ports.players import Players
 from usher.ports.repository import MediaItemRepository, WatchStateRepository
 from usher.ports.source import wrap_deep_link
 from usher.services.playback import PlaybackService, episode_name, title_name
-from usher.services.screens import PLAYERS_OFF, PlayersUnavailable, unavailable
+from usher.services.screens import PLAYERS_OFF, PlayersUnavailable, read_house
 
 _meter = metrics.get_meter("usher.send")
 
@@ -406,12 +406,15 @@ class SendService:
     async def send_title(
         self, title: Title, *, way_id: uuid.UUID, take_over: bool, user_id: uuid.UUID
     ) -> Send:
-        dispatcher, screens = self._ready()
-        copies = await self._media_items.list_for_title(title.id)
-        way = _allowed(screens, copies, way_id, take_over=take_over)
-        url = await self._source_url(way)
-        watch = await self._watch_states.get_for_title(user_id, title.id)
-        return self._start(dispatcher, way, title.id, None, title_name(title), url, watch)
+        return await self._send(
+            lambda: self._media_items.list_for_title(title.id),
+            lambda: self._watch_states.get_for_title(user_id, title.id),
+            way_id=way_id,
+            take_over=take_over,
+            title_id=title.id,
+            episode_id=None,
+            name=title_name(title),
+        )
 
     async def send_episode(
         self,
@@ -422,41 +425,39 @@ class SendService:
         take_over: bool,
         user_id: uuid.UUID,
     ) -> Send:
-        dispatcher, screens = self._ready()
-        copies = await self._media_items.list_for_episode(episode.id)
-        way = _allowed(screens, copies, way_id, take_over=take_over)
-        url = await self._source_url(way)
-        watch = await self._watch_states.get_for_episode(user_id, episode.id)
-        name = episode_name(series, episode)
-        return self._start(dispatcher, way, episode.title_id, episode.id, name, url, watch)
+        return await self._send(
+            lambda: self._media_items.list_for_episode(episode.id),
+            lambda: self._watch_states.get_for_episode(user_id, episode.id),
+            way_id=way_id,
+            take_over=take_over,
+            title_id=episode.title_id,
+            episode_id=episode.id,
+            name=episode_name(series, episode),
+        )
 
-    def _ready(self) -> tuple[SendDispatcher, tuple[Screen, ...]]:
-        """The dispatcher and the screens as the house reads now, or why there are none."""
-        if self._players is None or self._dispatcher is None:
-            raise PlayersUnavailable(PLAYERS_OFF, retryable=False)
-        try:
-            return self._dispatcher, project(self._players.snapshot()).screens
-        except UsherPortError as error:
-            raise unavailable(error) from error
-
-    async def _source_url(self, way: Way) -> str:
-        url = await self._playback.direct_url(way.file)
-        if url is None:
-            raise SourceUnavailable(_SOURCE_UNAVAILABLE)
-        return url
-
-    def _start(
+    async def _send(
         self,
-        dispatcher: SendDispatcher,
-        way: Way,
+        copies_of: Callable[[], Awaitable[list[MediaItem]]],
+        watch_of: Callable[[], Awaitable[WatchState | None]],
+        *,
+        way_id: uuid.UUID,
+        take_over: bool,
         title_id: uuid.UUID,
         episode_id: uuid.UUID | None,
         name: str,
-        source_url: str,
-        watch: WatchState | None,
     ) -> Send:
-        """Start the send; the ticket is minted when the dispatcher asks for the link."""
-        position = _resume_point(watch)
+        """Checks 1-5, the source and the watch state, then checks 2-5 again on a fresh reading.
+
+        The second pass ranks the order's way, so a screen that turned busy
+        during the awaits is refused, and nothing awaits between it and `start`.
+        """
+        dispatcher, house = self._read()
+        copies = await copies_of()
+        way = _allowed(house, copies, way_id, take_over=take_over)
+        source_url = await self._source_url(way)
+        position = _resume_point(await watch_of())
+        dispatcher, house = self._read()
+        way = _allowed(house, copies, way_id, take_over=take_over)
 
         def link() -> str:
             return build_link(
@@ -465,12 +466,25 @@ class SendService:
 
         return dispatcher.start(SendOrder(title_id, episode_id, way, link))
 
+    def _read(self) -> tuple[SendDispatcher, HouseSnapshot]:
+        """The dispatcher and the house as it reads now, or why there are none."""
+        if self._dispatcher is None:
+            raise PlayersUnavailable(PLAYERS_OFF, retryable=False)
+        _, house = read_house(self._players)
+        return self._dispatcher, house
+
+    async def _source_url(self, way: Way) -> str:
+        url = await self._playback.direct_url(way.file)
+        if url is None:
+            raise SourceUnavailable(_SOURCE_UNAVAILABLE)
+        return url
+
 
 def _allowed(
-    screens: tuple[Screen, ...], copies: list[MediaItem], way_id: uuid.UUID, *, take_over: bool
+    house: HouseSnapshot, copies: list[MediaItem], way_id: uuid.UUID, *, take_over: bool
 ) -> Way:
     """The way, once it is known, playable, proven and its screen free or taken over."""
-    way = next((one for one in rank(screens, copies) if one.id == way_id), None)
+    way = next((one for one in rank(project(house).screens, copies) if one.id == way_id), None)
     if way is None:
         raise UnknownWay
     if way.refusal is not None:

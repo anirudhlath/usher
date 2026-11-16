@@ -76,19 +76,24 @@ class ScreensService:
                 timeout=self._confirm_timeout,
             )
         except UsherPortError as error:
-            raise unavailable(error) from error
+            raise _unavailable(error) from error
         return project(landed)
 
     def _reading(self) -> tuple[Players, HouseSnapshot]:
-        if self._players is None:
-            raise PlayersUnavailable(PLAYERS_OFF, retryable=False)
-        try:
-            return self._players, self._players.snapshot()
-        except UsherPortError as error:
-            raise unavailable(error) from error
+        return read_house(self._players)
 
 
-def unavailable(error: UsherPortError) -> PlayersUnavailable:
+def read_house(players: Players | None) -> tuple[Players, HouseSnapshot]:
+    """The latest reading with the players that gave it; `PlayersUnavailable` when there is none."""
+    if players is None:
+        raise PlayersUnavailable(PLAYERS_OFF, retryable=False)
+    try:
+        return players, players.snapshot()
+    except UsherPortError as error:
+        raise _unavailable(error) from error
+
+
+def _unavailable(error: UsherPortError) -> PlayersUnavailable:
     """In the port's words; a refused credential is refused again however often it is asked."""
     return PlayersUnavailable(str(error), retryable=not isinstance(error, PortAuthFailed))
 

@@ -25,7 +25,7 @@ from usher.domain.house import HouseSnapshot
 from usher.domain.ids import new_id
 from usher.domain.recipes import RECIPES, Handover
 from usher.domain.screens import project
-from usher.domain.sends import Send, SendStage
+from usher.domain.sends import Send, SendStage, busy_with
 from usher.domain.source import MediaItem
 from usher.domain.title import Title
 from usher.domain.watch import WatchState
@@ -87,9 +87,12 @@ class RecordingPlayback(PlaybackService):
     def __init__(self, url: str | None) -> None:
         self.url = url
         self.asked: list[MediaItem] = []
+        self.on_ask: Callable[[], None] | None = None
 
     async def direct_url(self, copy: MediaItem) -> str | None:
         self.asked.append(copy)
+        if self.on_ask is not None:
+            self.on_ask()
         return self.url
 
 
@@ -187,9 +190,10 @@ class Harness:
         ways = rank(project(self.players.snapshot()).screens, copies)
         return next(one for one in ways if one.recipe.key == recipe and one.screen.area_id == area)
 
-    def assert_nothing_started(self) -> None:
+    def assert_nothing_started(self, players: ParkingPlayers | None = None) -> None:
+        """No order, no call on the players the service used (default: the harness's), no ticket."""
         assert self.dispatcher.orders == []
-        assert self.players.calls == []
+        assert (players or self.players).calls == []
         assert self.minted == []
 
 
@@ -317,7 +321,8 @@ async def test_a_refused_credential_is_not_retryable(harness: Harness) -> None:
         await service.send_episode(SERIES, EPISODE, way_id=new_id(), take_over=False, user_id=USER)
     assert caught.value.detail == "auth_invalid"
     assert caught.value.retryable is False
-    harness.assert_nothing_started()
+    assert harness.playback.asked == []
+    harness.assert_nothing_started(refused)
 
 
 # -- check 2: the way --------------------------------------------------
@@ -419,6 +424,48 @@ async def test_a_busy_screen_is_reported_before_the_source_is_asked(harness: Har
     with pytest.raises(ScreenBusy):
         await harness.service.send_title(MOVIE, way_id=way.id, take_over=False, user_id=USER)
     assert harness.playback.asked == []
+    harness.assert_nothing_started()
+
+
+# -- the house changes while the source is asked ------------------------
+
+
+async def test_a_screen_that_turns_busy_while_the_source_is_asked_is_not_taken(
+    harness: Harness,
+) -> None:
+    await harness.add_copy()
+    way = await harness.way()
+    assert busy_with(way.device.state) is None  # the premise: free when the request arrived
+    harness.playback.on_ask = lambda: netflix_playing(harness)
+    with pytest.raises(ScreenBusy) as caught:
+        await harness.service.send_title(MOVIE, way_id=way.id, take_over=False, user_id=USER)
+    assert caught.value.detail == "NETFLIX · EXAMPLE EPISODE"
+    assert harness.playback.asked == [way.file]  # the premise: the source was asked
+    harness.assert_nothing_started()
+
+
+async def test_a_screen_that_turns_busy_is_taken_over_when_asked_and_ordered_as_read_last(
+    harness: Harness, settle: Settle
+) -> None:
+    await harness.add_copy()
+    way = await harness.way()
+    harness.playback.on_ask = lambda: netflix_playing(harness)
+    send = await harness.service.send_title(MOVIE, way_id=way.id, take_over=True, user_id=USER)
+    assert send.stage is SendStage.WAKING
+    (order,) = harness.dispatcher.orders
+    assert order.way.device.state is not None
+    assert order.way.device.state.app_name == "Netflix"  # ranked from the last reading
+    await settle()
+
+
+async def test_a_house_lost_while_the_source_is_asked_is_unavailable(harness: Harness) -> None:
+    await harness.add_copy()
+    way = await harness.way()
+    harness.playback.on_ask = harness.players.drop
+    with pytest.raises(PlayersUnavailable) as caught:
+        await harness.service.send_title(MOVIE, way_id=way.id, take_over=True, user_id=USER)
+    assert caught.value.retryable is True
+    assert harness.playback.asked == [way.file]  # the premise: the source was asked
     harness.assert_nothing_started()
 
 
