@@ -171,7 +171,10 @@ async def test_a_title_s_ways_are_the_ranking_grouped_by_screen(
     assert [way["gives_up"] for way in screen["ways"]] == [list(way.gives_up) for way in expected]
     assert [way["refusal"] for way in screen["ways"]] == [way.refusal for way in expected]
     assert [way["playable"] for way in screen["ways"]] == [way.playable for way in expected]
-    assert {way["recipe"]["proven"] for way in screen["ways"]} == {False}
+    assert {way["recipe"]["key"]: way["recipe"]["proven"] for way in screen["ways"]} == {
+        "apple_tv.infuse": True,
+        "apple_tv.airplay": False,
+    }
     best, item = expected[0], expected[0].file
     facts = (item.container, item.video_codec, item.hdr_format, item.audio_codec)
     numbers = (item.audio_channels, item.runtime_seconds)

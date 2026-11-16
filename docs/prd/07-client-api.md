@@ -595,10 +595,11 @@ by default ([08](08-operations.md)).
   multichannel, stereo, then the codec and its channels within a tier, unknown
   channels counting as stereo — then container), then ways that need a press at the
   TV, then ways that cannot play, each with its `refusal`. On an equal score a
-  `proven` recipe ranks first; every recipe is `proven: false` until a send
-  has shown it. The first playable way of each screen is `best`, and every
-  other playable way says what it `gives_up` against it, naming only the
-  shortfalls its copy's facts show; `facts_known: false` marks a way whose
+  `proven` recipe ranks first. Infuse on the Apple TV 4K is proven; every
+  other recipe is `proven: false` until a send has shown it. The first
+  playable way of each screen is `best`, and every other playable way says
+  what it `gives_up` against it, naming only the shortfalls its copy's facts
+  show; `facts_known: false` marks a way whose
   copy lacks a fact its recipe checks. A way's
   `id` is stable over screen, player, recipe and copy. Every screen is listed,
   in reading order, its `ways` empty when no copy can be ranked, so "nothing

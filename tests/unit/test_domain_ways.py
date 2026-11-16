@@ -470,8 +470,8 @@ def test_with_infuse_needing_no_press_the_best_copy_is_the_living_room_s_best() 
     ways = rank((_living_room(),), (DV_MKV, HDR10_MP4))
     assert [(way.recipe.key, way.file.external_id, way.playable, way.best) for way in ways] == [
         ("apple_tv.infuse", "dv-mkv", True, True),
-        ("apple_tv.airplay", "hdr10-mp4", True, False),
         ("apple_tv.infuse", "hdr10-mp4", True, False),
+        ("apple_tv.airplay", "hdr10-mp4", True, False),
         ("apple_tv.airplay", "dv-mkv", False, False),
     ]
     assert [way for way in ways if "NEEDS A PRESS" in way.gives_up] == []
@@ -690,6 +690,17 @@ def test_equal_scores_put_a_proven_recipe_first() -> None:
     assert [way.recipe.key for way in ways] == ["b.proven", "a.assumed"]
 
 
+def test_the_proven_recipe_is_best_where_two_score_alike() -> None:
+    """An MP4 both Apple TV recipes play, at an equal score."""
+    infuse, airplay = RECIPE["apple_tv.infuse"], RECIPE["apple_tv.airplay"]
+    assert airplay.key < infuse.key, "the premise: the key tie-break alone puts AirPlay first"
+    assert (infuse.proven, airplay.proven) == (True, False), "the premise: only Infuse is proven"
+    ways = rank((_living_room(),), (HDR10_MP4,))
+    assert ways[0].quality.score == ways[1].quality.score, "the premise: the two score alike"
+    assert [way.recipe.key for way in ways[:2]] == ["apple_tv.infuse", "apple_tv.airplay"]
+    assert ways[0].best
+
+
 @pytest.mark.parametrize("reverse", [False, True], ids=["in_id_order", "against_id_order"])
 def test_equal_ways_fall_to_the_copy_id_whatever_order_the_copies_come_in(reverse: bool) -> None:
     first = HDR10_MP4.evolve(id=uuid.UUID(int=1), external_id="first")
@@ -753,7 +764,7 @@ def test_players_on_one_screen_tie_as_a_person_reads_and_the_first_is_the_best()
 def test_a_screen_whose_every_way_is_refused_has_no_best() -> None:
     avi = _copy("avi", container="avi", video_codec="mpeg4")
     ways = rank((_living_room(),), (avi,))
-    assert [way.refusal for way in ways] == ["AVI OVER AIRPLAY", "AVI OVER INFUSE"]
+    assert [way.refusal for way in ways] == ["AVI OVER INFUSE", "AVI OVER AIRPLAY"]
     assert not any(way.best for way in ways)
 
 
