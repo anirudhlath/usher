@@ -6,8 +6,10 @@ paths:
   - "src/usher/domain/house.py"
   - "src/usher/domain/recipes.py"
   - "src/usher/domain/screens.py"
+  - "src/usher/domain/sends.py"
   - "src/usher/domain/ways.py"
   - "src/usher/services/screens.py"
+  - "src/usher/services/send.py"
   - "src/usher/services/ways.py"
   - "scripts/capture_ha_shape.py"
   - "tests/fakes/house.py"
@@ -30,10 +32,10 @@ behaviour is PRD 07's `## Players`; the design is
 ```bash
 # Every test file touching these paths, by name: a `-k` word selects rows and search too.
 # test_push_loopback.py needs no Docker: `connect_websocket` over a real socket, `proxy=True` too.
-uv run pytest tests/unit/test_{domain_{house,recipes,screens,ways},services_{screens,ways}}.py \
+uv run pytest tests/unit/test_{domain_{house,recipes,screens,sends,ways},services_{screens,send{,_dispatcher},ways}}.py \
   tests/unit/test_adapters_{homeassistant_{mapping,session,players},websocket,emby_push}.py \
   tests/unit/test_{players_contract,fixtures_homeassistant,{config,composition}_players}.py \
-  tests/unit/test_{api_{screens,ways,problem},ports,outbound_call_sites}.py \
+  tests/unit/test_{api_{screens,send,ways,problem},ports,outbound_call_sites}.py \
   tests/integration/test_push_loopback.py
 # Read-only: key paths and type names, never a value. Capture while a player plays.
 set -a; . ./.env; set +a
