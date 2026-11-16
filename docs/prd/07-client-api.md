@@ -381,6 +381,9 @@ holds no `queue_unavailable`, no `database_unavailable` and no
 | `row.invalidated` | Row slug | Refetch that row |
 | `sync.progress` | Source, kind, counts; a whole-library walk's stage, units and expected items | Admin UI only |
 | `bootstrap.progress` | Phase, dataset, rows seen, rows written, cursor position | Admin UI only |
+| `send.stage` | Send id, screen, stage, failed stage, time, printed detail | Show the send's progress |
+
+A `send.stage` is scoped to the title sent, an episode's to its series.
 
 - Subscriptions are scoped by query (`?titles=id1,id2`).
 - Reconnect sends `Last-Event-ID`; the server replays from a bounded buffer.

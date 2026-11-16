@@ -111,7 +111,7 @@ control that does nothing.
 
 ### Metrics — OpenTelemetry → Prometheus
 
-**Every row is emitted today. 47 rows: 46 instruments Usher declares, plus one
+**Every row is emitted today. 48 rows: 47 instruments Usher declares, plus one
 `FastAPIInstrumentor` supplies.**
 
 | Metric | Type | Labels | Emitted |
@@ -163,6 +163,7 @@ control that does nothing.
 | `usher.scheduler.job.duration` | histogram | job | ✅ M10 |
 | `usher.scheduler.job.failures` | counter | job | ✅ M10 |
 | `usher.scheduler.job.due` | gauge | job | ✅ M10 |
+| `usher.send.stage.duration` | histogram | recipe, stage, outcome | ✅ send to a screen |
 
 **`usher.source.listing.concurrency` is written after every listing page**, by
 the adapter that sent it, so an adapter that never lists leaves no reading. A
@@ -187,6 +188,13 @@ INFO line naming the source and the sizes it moved between.
 from the moment a walker claims the unit to the unit's last commit, recorded
 once for each unit that completes; a unit that fails records nothing. `stage` is
 `seed`, `titles` or `episodes`.
+
+**`usher.send.stage.duration` is seconds a send spent in one stage**, emitted
+by the dispatcher when a send leaves a stage, and is what a recipe's windows
+are read from. Its attributes are `usher.send.recipe` (the recipe key),
+`usher.send.stage` (`waking`, `opening` or `starting`) and `usher.send.outcome`
+(`confirmed`, `timed_out`, `unavailable`, `superseded` or `failed`). A send
+cancelled at shutdown records nothing for the stage it was in.
 
 **The three scheduler rows.** `job` is the scheduled job's name, which is
 stable.

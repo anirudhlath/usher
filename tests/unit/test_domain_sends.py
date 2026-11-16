@@ -230,6 +230,16 @@ def test_another_app_with_no_name_falls_through_to_did_not_start() -> None:
     )
 
 
+def test_a_recipe_with_no_app_never_says_someone_opened_another() -> None:
+    airplay = next(one for one in RECIPES if one.key == "apple_tv.airplay")
+    assert airplay.app_id is None
+    reading = _state(state="idle", app_id=NETFLIX, app_name="Netflix")
+    assert (
+        showing(reading, device_name="Living Room Apple TV", recipe=airplay)
+        == "AIRPLAY DID NOT START PLAYING"
+    )
+
+
 def test_a_didnt_take_line_names_the_stage_and_the_cause() -> None:
     assert didnt_take(SendStage.WAKING, "X") == "DIDN'T TAKE · WAKING · X"
     assert didnt_take(SendStage.STARTING, "Y") == "DIDN'T TAKE · STARTING · Y"

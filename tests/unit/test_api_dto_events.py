@@ -86,6 +86,7 @@ def test_the_wire_vocabulary_is_its_own_enum() -> None:
         "sync.progress",
         "bootstrap.progress",
         "resync_required",
+        "send.stage",
     }
 
 
