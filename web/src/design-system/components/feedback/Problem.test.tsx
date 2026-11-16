@@ -123,6 +123,27 @@ describe('Problem — the closed vocabulary drives recovery', () => {
     expect(screen.getByRole('button', { name: 'Try again in 5 s' })).toBeDisabled()
   })
 
+  it('gives screen_busy an inline strip showing the detail it was sent, and no retry', () => {
+    const { container } = renderComponent(
+      <Problem
+        problem={{ code: 'screen_busy', status: 409, detail: 'The Living Room is playing something else.' }}
+        onRetry={vi.fn<() => void>()}
+      />,
+    )
+    expect(container.querySelector('.u-problem--inline')).not.toBeNull()
+    expect(screen.getByText('The Living Room is playing something else.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /try again/i })).not.toBeInTheDocument()
+  })
+
+  it('gives way_not_playable an inline strip, its own sentence when no title or detail is sent, and no retry', () => {
+    const { container } = renderComponent(
+      <Problem problem={{ code: 'way_not_playable', status: 409 }} onRetry={vi.fn<() => void>()} />,
+    )
+    expect(container.querySelector('.u-problem--inline')).not.toBeNull()
+    expect(screen.getByText("That way can't play this.")).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /try again/i })).not.toBeInTheDocument()
+  })
+
   it('renders nothing at all for invalid_cursor — the list restarts silently', () => {
     const { container } = renderComponent(
       <Problem problem={{ code: 'invalid_cursor', status: 400, detail: 'cursor is not decodable.' }} />,

@@ -42,6 +42,8 @@ const ALL_CODES: ProblemCode[] = [
   'not_playable',
   'ticket_invalid',
   'players_unavailable',
+  'screen_busy',
+  'way_not_playable',
 ]
 
 describe('API_BASE', () => {
@@ -104,7 +106,7 @@ describe('problem parsing', () => {
     expect(error.retryAfter).toBeNull()
   })
 
-  it('keeps a code outside the eight readable while refusing to narrow it', async () => {
+  it('keeps a code outside the ten readable while refusing to narrow it', async () => {
     server.use(
       http.get('/home', () =>
         HttpResponse.json(

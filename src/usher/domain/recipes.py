@@ -58,9 +58,10 @@ _WINDOWS: Final = Windows(
 class Recipe:
     """One way to play on one family of device.
 
-    `proven` is false until a send at the TV confirms the profile, the handover
-    and the hands-free claim; a proven recipe ranks above an assumed one of
-    equal quality. `name` is the app as a screen names it.
+    A send goes only through a `proven` recipe, one a send at the TV confirmed
+    (the profile, the handover and the hands-free claim); Infuse on the Apple TV
+    is the proven one. A proven recipe ranks above an assumed one of equal
+    quality. `name` is the app as a screen names it.
     """
 
     key: str

@@ -6,7 +6,7 @@ import { Button } from '../actions'
  * The one error component, at four scales: `inline` (a field hint), `panel` (a failed section),
  * `page` (a failed route), `toast` (a background failure).
  *
- * The API's error set is closed — eight codes — and each has exactly one correct recovery:
+ * The API's error set is closed — ten codes — and each has exactly one correct recovery:
  * · not_found (404)           → back / search. No retry.
  * · validation_failed (422)   → field errors from errors[].loc/.msg.
  * · method_not_allowed (405)  → generic. Developer error.
@@ -16,6 +16,8 @@ import { Button } from '../actions'
  * · ticket_invalid (404)      → one tap re-requests and plays.
  * · players_unavailable (503) → retryable, honour Retry-After. The server sends none while
  *                               players are off or the token is refused.
+ * · screen_busy (409)         → inline, no retry. `detail` names what is playing.
+ * · way_not_playable (409)    → inline, no retry. There is no way to play this copy on that screen.
  *
  * `detail` is prose that may be reworded at any release: never parse it, always show it — it is
  * often the only thing that tells an operator what happened.
@@ -24,7 +26,7 @@ import { Button } from '../actions'
 /**
  * The vocabulary is declared here rather than imported from `src/api/` on purpose: the
  * design-system boundary forbids that import, and a component that knew the transport would not be
- * reusable. `src/api/problem.ts` declares the same eight members; they are checked against each
+ * reusable. `src/api/problem.ts` declares the same ten members; they are checked against each
  * other by the feature layer that maps one onto the other.
  */
 export type ProblemCode =
@@ -36,6 +38,8 @@ export type ProblemCode =
   | 'not_playable'
   | 'ticket_invalid'
   | 'players_unavailable'
+  | 'screen_busy'
+  | 'way_not_playable'
 
 export type ProblemScale = 'inline' | 'panel' | 'page' | 'toast'
 
@@ -160,6 +164,20 @@ const TREATMENT = {
     retry: true,
     rendered: true,
     message: "Screens aren't available right now.",
+    retryLabel: 'Try again',
+  },
+  screen_busy: {
+    scale: 'inline',
+    retry: false,
+    rendered: true,
+    message: 'That screen is busy.',
+    retryLabel: 'Try again',
+  },
+  way_not_playable: {
+    scale: 'inline',
+    retry: false,
+    rendered: true,
+    message: "That way can't play this.",
     retryLabel: 'Try again',
   },
 } as const satisfies Record<ProblemCode, ProblemTreatment>

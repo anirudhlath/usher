@@ -1,5 +1,5 @@
 /**
- * RFC 9457 problem documents, one factory per member of the closed eight.
+ * RFC 9457 problem documents, one factory per member of the closed ten.
  *
  * Any test can make any route fail correctly:
  *
@@ -66,7 +66,7 @@ function build(
   return overrides.errors ? { ...doc, errors: overrides.errors } : doc
 }
 
-/* --------------------------------------------------- the eight, in §3 order */
+/* --------------------------------------------------- the ten, in §3 order */
 
 /** 404 · page scale · back + search, and **no retry**: the row does not exist. */
 export function notFound(
@@ -200,9 +200,26 @@ export function playersUnavailable(instance = '/screens', overrides: ProblemOver
   )
 }
 
+/** 409 · inline strip · nothing to retry: the player is playing something and the send did not take over. */
+export function screenBusy(instance = '/titles/send', overrides: ProblemOverrides = {}): ProblemDocument {
+  return build(
+    'screen_busy',
+    409,
+    'Conflict',
+    'The Living Room is playing something else.',
+    instance,
+    overrides,
+  )
+}
+
+/** 409 · inline strip · **no retry button**. Offer "See other copies". */
+export function wayNotPlayable(instance = '/titles/send', overrides: ProblemOverrides = {}): ProblemDocument {
+  return build('way_not_playable', 409, 'Conflict', 'This way cannot play this copy.', instance, overrides)
+}
+
 /**
- * All eight, keyed by code, for a test that wants to sweep the vocabulary
- * rather than name one member. Typed as a total map so a ninth code added to
+ * All ten, keyed by code, for a test that wants to sweep the vocabulary
+ * rather than name one member. Typed as a total map so an eleventh code added to
  * the API breaks this file rather than being silently untested.
  */
 export const PROBLEMS: { readonly [C in ProblemCode]: () => ProblemDocument } = {
@@ -214,6 +231,8 @@ export const PROBLEMS: { readonly [C in ProblemCode]: () => ProblemDocument } = 
   not_playable: () => notPlayable(),
   ticket_invalid: () => ticketInvalid(),
   players_unavailable: () => playersUnavailable(),
+  screen_busy: () => screenBusy(),
+  way_not_playable: () => wayNotPlayable(),
 }
 
 /* --------------------------------------------------------------- handlers */

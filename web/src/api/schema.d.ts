@@ -567,6 +567,68 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/titles/{title_id}/send": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Play a title on a screen, the way chosen
+         * @description Start a send and answer at once; its stages follow on `/events` and at `GET /sends/{id}`.
+         *
+         *     Every refusal comes before anything is written to the player or minted.
+         */
+        post: operations["send_title_titles__title_id__send_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/episodes/{episode_id}/send": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Play an episode on a screen, the way chosen
+         * @description The same for one episode, resuming at the default user's place in it.
+         */
+        post: operations["send_episode_episodes__episode_id__send_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sends/{send_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Where a send stands, and every stage it has entered
+         * @description A running send, or one of the last 32 finished; a restart forgets them all.
+         */
+        get: operations["read_send_sends__send_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/series/{title_id}/seasons": {
         parameters: {
             query?: never;
@@ -1687,7 +1749,7 @@ export interface components {
          * @description The machine-readable `code`, and the vocabulary is closed.
          * @enum {string}
          */
-        ProblemCode: "not_found" | "validation_failed" | "method_not_allowed" | "invalid_cursor" | "source_unavailable" | "not_playable" | "ticket_invalid" | "players_unavailable";
+        ProblemCode: "not_found" | "validation_failed" | "method_not_allowed" | "invalid_cursor" | "source_unavailable" | "not_playable" | "ticket_invalid" | "players_unavailable" | "screen_busy" | "way_not_playable";
         /**
          * ProblemResponse
          * @description RFC 9457's five members, plus PRD 07's `code`.
@@ -1746,7 +1808,7 @@ export interface components {
         };
         /**
          * RecipeResponse
-         * @description One way a player can be handed a title. `proven` is false until a send shows it.
+         * @description One way a player can be handed a title. A send goes only through a `proven` one.
          */
         RecipeResponse: {
             /** Key */
@@ -2037,6 +2099,81 @@ export interface components {
         SeasonsResponse: {
             /** Seasons */
             seasons: components["schemas"]["SeasonResponse"][];
+        };
+        /**
+         * SendRequest
+         * @description The way to play, and whether to play over what a screen is already playing.
+         */
+        SendRequest: {
+            /**
+             * Way
+             * Format: uuid
+             */
+            way: string;
+            /**
+             * Take Over
+             * @default false
+             */
+            take_over: boolean;
+        };
+        /**
+         * SendResponse
+         * @description A send and every stage it has entered, in order.
+         *
+         *     `failed_stage` is set exactly when `stage` is `didnt_take`, and `detail`
+         *     then says what the player showed. No field carries a URL.
+         */
+        SendResponse: {
+            /**
+             * Send Id
+             * Format: uuid
+             */
+            send_id: string;
+            /**
+             * Title Id
+             * Format: uuid
+             */
+            title_id: string;
+            /** Episode Id */
+            episode_id: string | null;
+            /**
+             * Way Id
+             * Format: uuid
+             */
+            way_id: string;
+            /** Screen */
+            screen: string;
+            /** Screen Name */
+            screen_name: string;
+            /** Entity Id */
+            entity_id: string;
+            /** Recipe */
+            recipe: string;
+            stage: components["schemas"]["SendStage"];
+            failed_stage: components["schemas"]["SendStage"] | null;
+            /** Detail */
+            detail: string | null;
+            /** Stages */
+            stages: components["schemas"]["SendStageResponse"][];
+        };
+        /**
+         * SendStage
+         * @enum {string}
+         */
+        SendStage: "waking" | "opening" | "starting" | "playing" | "didnt_take" | "superseded";
+        /**
+         * SendStageResponse
+         * @description One stage a send entered, and when.
+         */
+        SendStageResponse: {
+            stage: components["schemas"]["SendStage"];
+            /**
+             * At
+             * Format: date-time
+             */
+            at: string;
+            /** Detail */
+            detail: string | null;
         };
         /**
          * SimilarResponse
@@ -3324,6 +3461,179 @@ export interface operations {
             };
             /** @description The request was rejected. */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    send_title_titles__title_id__send_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                title_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SendRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SendResponse"];
+                };
+            };
+            /** @description No such title or episode. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description `way_not_playable`: the way cannot play this copy, or its recipe is not proven. `screen_busy`: the player is playing something and the send did not ask to take over; `detail` says what. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description The request was rejected, or `way` names no way of this item. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description `players_unavailable`: players are off, or Home Assistant cannot be read; `Retry-After` is present when asking again may succeed. `source_unavailable`: the source holding the copy could not be reached. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    send_episode_episodes__episode_id__send_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                episode_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SendRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SendResponse"];
+                };
+            };
+            /** @description No such title or episode. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description `way_not_playable`: the way cannot play this copy, or its recipe is not proven. `screen_busy`: the player is playing something and the send did not ask to take over; `detail` says what. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description The request was rejected, or `way` names no way of this item. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description `players_unavailable`: players are off, or Home Assistant cannot be read; `Retry-After` is present when asking again may succeed. `source_unavailable`: the source holding the copy could not be reached. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    read_send_sends__send_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                send_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SendResponse"];
+                };
+            };
+            /** @description No such send: unknown, dropped from the last 32 finished, or sent before a restart. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description The request was rejected. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Players are off. */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

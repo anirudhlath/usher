@@ -1,9 +1,9 @@
 /**
- * The eight-code vocabulary, and the table recovery is looked up in.
+ * The ten-code vocabulary, and the table recovery is looked up in.
  *
  * The point of these is not that a lookup returns what it was written to
  * return. It is that the *closure* holds: the table is total over the schema's
- * enum, a ninth code cannot be silently untested, and the one distinction a
+ * enum, an eleventh code cannot be silently untested, and the one distinction a
  * component would otherwise get wrong — two codes share status 404 and only one
  * of them may offer a retry — is asserted rather than assumed.
  */
@@ -30,14 +30,16 @@ const ALL_CODES: ProblemCode[] = [
   'not_playable',
   'ticket_invalid',
   'players_unavailable',
+  'screen_busy',
+  'way_not_playable',
 ]
 
 describe('the closed vocabulary', () => {
-  it('has exactly eight members and the table covers all of them', () => {
+  it('has exactly ten members and the table covers all of them', () => {
     // Spelled out rather than derived from `RECOVERY`, or this asserts only
     // that an object has the keys it was written with.
     expect(Object.keys(RECOVERY).sort()).toEqual([...ALL_CODES].sort())
-    expect(ALL_CODES).toHaveLength(8)
+    expect(ALL_CODES).toHaveLength(10)
   })
 
   it('rejects anything outside it', () => {
@@ -119,6 +121,24 @@ describe('patterns.md §3, one case per row of the table', () => {
     expect(entry.scale).toBe('panel')
     expect(entry.retryable).toBe(true)
     expect(entry.recovery).toEqual({ kind: 'retry', honourRetryAfter: true })
+  })
+
+  it('screen_busy is an inline strip with nothing to retry and nothing to offer', () => {
+    const entry = RECOVERY.screen_busy
+    expect(entry.status).toBe(409)
+    expect(entry.scale).toBe('inline')
+    expect(entry.rendered).toBe(true)
+    expect(entry.retryable).toBe(false)
+    expect(entry.recovery).toEqual({ kind: 'none' })
+  })
+
+  it('way_not_playable offers other copies and must not offer a retry', () => {
+    const entry = RECOVERY.way_not_playable
+    expect(entry.status).toBe(409)
+    expect(entry.scale).toBe('inline')
+    expect(entry.rendered).toBe(true)
+    expect(entry.retryable).toBe(false)
+    expect(entry.recovery).toEqual({ kind: 'other-copies', label: 'See other copies' })
   })
 
   it('separates the two 404s, which status alone cannot', () => {

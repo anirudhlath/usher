@@ -1,22 +1,22 @@
 /**
  * Usher's error model, as something a component can switch on.
  *
- * The API's failure set is **closed at eight codes**, and that is
+ * The API's failure set is **closed at ten codes**, and that is
  * the fact the whole `Problem` component rests on: recovery is a *lookup*, not
  * a judgement, and never an inference from `detail`. `detail` is prose the
  * server may reword at any release — patterns.md §3 requires it shown verbatim
  * and forbids parsing it — so everything a UI decides is decided from `code`.
  *
  * Nothing in this file imports the transport. `client.ts` depends on it, not
- * the other way round, so the eight-way table is reachable from a component
+ * the other way round, so the ten-way table is reachable from a component
  * test that never opens a socket.
  */
 
 import type { components } from './schema'
 
 /**
- * Usher's `code` vocabulary. Closed at eight members, and read off
- * the generated schema rather than restated — a ninth member added to the API
+ * Usher's `code` vocabulary. Closed at ten members, and read off
+ * the generated schema rather than restated — an eleventh member added to the API
  * becomes a compile error in `RECOVERY` below instead of an unhandled case at
  * runtime.
  */
@@ -139,12 +139,26 @@ export const RECOVERY: { readonly [C in ProblemCode]: RecoveryEntry } = {
     retryable: true,
     recovery: { kind: 'retry', honourRetryAfter: true },
   },
+  screen_busy: {
+    status: 409,
+    scale: 'inline',
+    rendered: true,
+    retryable: false,
+    recovery: { kind: 'none' },
+  },
+  way_not_playable: {
+    status: 409,
+    scale: 'inline',
+    rendered: true,
+    retryable: false,
+    recovery: { kind: 'other-copies', label: 'See other copies' },
+  },
 }
 
 const PROBLEM_CODES = Object.keys(RECOVERY)
 
 /**
- * Whether a wire value is one of the eight.
+ * Whether a wire value is one of the ten.
  *
  * The wire is allowed to carry something else — a proxy's own error page, a
  * future member of a vocabulary this build predates — and that has to be
