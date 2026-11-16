@@ -6,12 +6,15 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
+from urllib.parse import parse_qs, quote, urlsplit
 
 import httpx
 import pytest
 from asgi_lifespan import LifespanManager
 from fastapi import FastAPI
+from starlette.requests import Request
 
 from tests.fakes.episode_repository import FakeEpisodeRepository
 from tests.fakes.house import state
@@ -55,7 +58,7 @@ from usher.domain.ways import Way, rank
 from usher.ports.events import ClientEventKind
 from usher.ports.ingest import MediaItemUpsert
 from usher.ports.source import wrap_deep_link
-from usher.services.playback import PlaybackService
+from usher.services.playback import PlaybackService, title_name
 from usher.services.send import SendDispatcher, SendOrder
 
 SOURCE = uuid.UUID("01900000-0000-7000-8000-000000000002")
@@ -97,6 +100,18 @@ _BODY_KEYS = {
     "detail",
     "stages",
 }
+
+
+def _app() -> FastAPI:
+    """The shipped app with its lanes off; players are off too, by the shipped default."""
+    return create_app(
+        Settings(
+            database_url="postgresql+asyncpg://usher:usher@127.0.0.1:1/usher",
+            secret_key="0123456789abcdef0123456789abcdef",
+            push_enabled=False,
+            worker_enabled=False,
+        )
+    )
 
 
 class _Playback(PlaybackService):
@@ -203,14 +218,7 @@ async def rig() -> AsyncIterator[Rig]:
     await titles.add(SERIES)
     await episodes.upsert_seasons([SEASON])
     await episodes.upsert_episodes([EPISODE])
-    app = create_app(
-        Settings(
-            database_url="postgresql+asyncpg://usher:usher@127.0.0.1:1/usher",
-            secret_key="0123456789abcdef0123456789abcdef",
-            push_enabled=False,
-            worker_enabled=False,
-        )
-    )
+    app = _app()
     made = Rig(
         app=app,
         players=players,
@@ -528,6 +536,54 @@ async def test_a_send_that_did_not_take_carries_its_failed_stage_and_detail() ->
     ]
 
 
+async def test_the_real_minter_works_when_the_dispatcher_calls_it_after_the_answer(
+    rig: Rig,
+) -> None:
+    """No `get_ticket_minter` override: `link` runs in the send's task, after the `202`."""
+    del rig.app.dependency_overrides[get_ticket_minter]
+    await rig.add_copy()
+    way = await rig.way()
+    answer = await rig.send_title(way.id)
+    assert answer.status_code == 202, answer.text
+    await settle_parked(rig.players)
+    [handed] = [call[2] for call in rig.players.calls if call[0] == "play_url"]
+    parts = urlsplit(handed)
+    assert (parts.scheme, parts.netloc, parts.path) == ("infuse", "x-callback-url", "/play")
+    [inner] = parse_qs(parts.query)["url"]
+    name = quote(title_name(MOVIE), safe="")
+    routed = urlsplit(inner)
+    shaped = (
+        routed.scheme == "http"
+        and routed.netloc == "test"
+        and routed.path.startswith("/stream/")
+        and routed.path.endswith(f"/{name}")
+        and inner != SOURCE_URL
+    )
+    assert shaped, "the handed link does not wrap a ticket URL on the app's redeem route"
+    redeemed = await rig.client.get(inner)
+    assert redeemed.status_code == 302, "the handed ticket does not redeem"
+    assert redeemed.headers["location"] == SOURCE_URL
+    assert redeemed.headers["cache-control"] == "no-store"
+
+
+def test_the_send_dispatcher_dependency_refuses_an_app_whose_lifespan_never_ran() -> None:
+    request = Request({"type": "http", "app": SimpleNamespace(state=SimpleNamespace())})
+    with pytest.raises(RuntimeError, match=r"app\.state\.sends is not set"):
+        get_send_dispatcher(request)
+
+
+async def test_a_send_read_with_players_off_is_503_through_the_real_dependency() -> None:
+    app = _app()
+    async with LifespanManager(app) as manager:
+        transport = httpx.ASGITransport(app=manager.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            read = await client.get(f"/sends/{new_id()}")
+    assert read.status_code == 503, read.text
+    assert read.headers["content-type"] == PROBLEM_MEDIA_TYPE
+    assert read.json()["code"] == "players_unavailable"
+    assert "retry-after" not in read.headers
+
+
 # -- the lifespan --------------------------------------------------------
 
 
@@ -547,26 +603,12 @@ def _app_with_players(monkeypatch: pytest.MonkeyPatch, closed: list[str]) -> tup
 
     monkeypatch.setattr("usher.api.app.house_players", house_players)
     monkeypatch.setattr("usher.api.app.SendDispatcher", Recorded)
-    app = create_app(
-        Settings(
-            database_url="postgresql+asyncpg://usher:usher@127.0.0.1:1/usher",
-            secret_key="0123456789abcdef0123456789abcdef",
-            push_enabled=False,
-            worker_enabled=False,
-        )
-    )
+    app = _app()
     return app, players
 
 
 async def test_the_lifespan_builds_no_dispatcher_while_players_are_off() -> None:
-    app = create_app(
-        Settings(
-            database_url="postgresql+asyncpg://usher:usher@127.0.0.1:1/usher",
-            secret_key="0123456789abcdef0123456789abcdef",
-            push_enabled=False,
-            worker_enabled=False,
-        )
-    )
+    app = _app()
     async with LifespanManager(app):
         assert app.state.players is None
         assert app.state.sends is None
