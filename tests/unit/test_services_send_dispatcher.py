@@ -15,20 +15,27 @@ from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import HistogramDataPoint, InMemoryMetricReader
 
 from tests.contract.players_contract import URL as LINK
-from tests.fakes.house import area, device, entity, snapshot, state
-from tests.fakes.players import FakePlayers
-from usher.domain.house import DeviceRole, HouseSnapshot, HouseState
+from tests.fakes.house import state
+from tests.fakes.send_rig import (
+    BEDROOM_PLAYER,
+    DEADLINE_SECONDS,
+    PLAYER,
+    FakeTime,
+    ParkingPlayers,
+    Recording,
+    settle_parked,
+    two_screen_house,
+)
+from usher.domain.house import HouseState
 from usher.domain.recipes import RECIPES, Recipe, Windows
 from usher.domain.screens import project
 from usher.domain.sends import SendStage
 from usher.domain.source import MediaItem
 from usher.domain.ways import Way, rank
 from usher.ports.errors import PortDataMalformed, PortUnavailable
-from usher.ports.events import ClientEvent, ClientEventKind, EventPublisher
+from usher.ports.events import ClientEvent, ClientEventKind
 from usher.services.send import SendDispatcher, SendOrder
 
-PLAYER = "media_player.living_room_living_room_apple_tv"
-BEDROOM_PLAYER = "media_player.bedroom_bedroom_apple_tv"
 INFUSE_APP = "com.firecore.infuse"
 TITLE = uuid.UUID("01900000-0000-7000-8000-000000000001")
 SOURCE = uuid.UUID("01900000-0000-7000-8000-000000000002")
@@ -46,8 +53,6 @@ SHORT = replace(
 COPY = MediaItem(
     source_id=SOURCE, title_id=TITLE, external_id="copy", container="mkv", runtime_seconds=7_200
 )
-# Long enough for any arrangement here, short enough that a hang fails fast.
-DEADLINE_SECONDS = 2.0
 
 Settle = Callable[..., Awaitable[None]]
 Finished = Callable[..., Awaitable[None]]
@@ -64,36 +69,8 @@ STANDBY = _reading(PLAYER, "standby")
 INFUSE_PAUSED = _reading(PLAYER, "paused", app_id=INFUSE_APP, app_name="Infuse")
 
 
-def _house() -> HouseSnapshot:
-    def player(entity_id: str, device_id: str, name: str, area_id: str) -> tuple[Any, ...]:
-        return (
-            device(
-                device_id,
-                name=name,
-                model="Apple TV 4K (gen 3)",
-                manufacturer="Apple",
-                area_id=area_id,
-            ),
-            entity(entity_id, integration="apple_tv", device_id=device_id, role=DeviceRole.USE),
-            state(entity_id, "standby", friendly_name=name),
-        )
-
-    living = player(
-        PLAYER, "d1000000000000000000000000000001", "Living Room Apple TV", "living_room"
-    )
-    bedroom = player(
-        BEDROOM_PLAYER, "d1000000000000000000000000000002", "Bedroom Apple TV", "bedroom"
-    )
-    return snapshot(
-        areas=(area("living_room", "Living Room"), area("bedroom", "Bedroom")),
-        devices=(living[0], bedroom[0]),
-        entities=(living[1], bedroom[1]),
-        states=(living[2], bedroom[2]),
-    )
-
-
 def _way(area_id: str, recipe: Recipe = RECIPE) -> Way:
-    ways = rank(project(_house(), (recipe,)).screens, [COPY])
+    ways = rank(project(two_screen_house(), (recipe,)).screens, [COPY])
     return next(way for way in ways if way.screen.area_id == area_id)
 
 
@@ -102,46 +79,6 @@ def _raises(error: Exception) -> Callable[..., NoReturn]:
         raise error
 
     return act
-
-
-class ParkingPlayers(FakePlayers):
-    """`FakePlayers` that counts the waits a send is parked in, with a hook before each.
-
-    `on_wait` gets the wait's ordinal, so a case changes the house as a stage
-    begins rather than racing that stage's window.
-    """
-
-    def __init__(self, house: HouseSnapshot) -> None:
-        super().__init__(house)
-        self.parked = 0
-        self.waits = 0
-        self.on_wait: Callable[[int], None] | None = None
-        self.on_wake: Callable[[], None] | None = None
-
-    async def wake(self, entity_id: str) -> None:
-        await super().wake(entity_id)
-        if self.on_wake is not None:
-            self.on_wake()
-
-    async def wait_until(
-        self, predicate: Callable[[HouseSnapshot], bool], *, timeout: float
-    ) -> HouseSnapshot:
-        self.waits += 1
-        if self.on_wait is not None:
-            self.on_wait(self.waits)
-        self.parked += 1
-        try:
-            return await super().wait_until(predicate, timeout=timeout)
-        finally:
-            self.parked -= 1
-
-
-class Recording(EventPublisher):
-    def __init__(self) -> None:
-        self.events: list[ClientEvent] = []
-
-    async def publish(self, event: ClientEvent) -> None:
-        self.events.append(event)
 
 
 class Links:
@@ -153,22 +90,6 @@ class Links:
     def __call__(self) -> str:
         self.minted += 1
         return LINK
-
-
-@dataclass
-class FakeTime:
-    """A monotonic clock that only the dispatcher's own `sleep` moves."""
-
-    now: float = 1_000.0
-    slept: list[float] = field(default_factory=list)
-
-    def monotonic(self) -> float:
-        return self.now
-
-    async def sleep(self, seconds: float) -> None:
-        self.slept.append(seconds)
-        self.now += seconds
-        await asyncio.sleep(0)
 
 
 @dataclass
@@ -194,7 +115,10 @@ class Rig:
 @pytest.fixture
 async def rig() -> AsyncIterator[Rig]:
     made = Rig(
-        players=ParkingPlayers(_house()), events=Recording(), links=Links(), clock=FakeTime()
+        players=ParkingPlayers(two_screen_house()),
+        events=Recording(),
+        links=Links(),
+        clock=FakeTime(),
     )
     yield made
     for dispatcher in made.built:
@@ -236,12 +160,7 @@ def settle(players: ParkingPlayers) -> Settle:
     """Until `parked` sends wait on the house; a send that never parks fails the case."""
 
     async def run(parked: int = 1) -> None:
-        deadline = time.monotonic() + DEADLINE_SECONDS
-        while True:
-            await asyncio.sleep(0.001)
-            if players.parked >= parked:
-                return
-            assert time.monotonic() < deadline, f"{players.parked} of {parked} sends parked"
+        await settle_parked(players, parked)
 
     return run
 

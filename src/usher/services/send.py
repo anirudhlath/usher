@@ -9,12 +9,16 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Final
 
 from loguru import logger
 from opentelemetry import metrics
 
+from usher.domain.episode import Episode
 from usher.domain.house import HouseSnapshot, HouseState
 from usher.domain.ids import new_id
+from usher.domain.recipes import Handover
+from usher.domain.screens import Screen, project
 from usher.domain.sends import (
     MAY_NOT_BE_INSTALLED,
     NOT_ANSWERING,
@@ -23,15 +27,23 @@ from usher.domain.sends import (
     Send,
     SendStage,
     StageMark,
+    busy_with,
     didnt_take,
     opened,
     showing,
     started,
 )
-from usher.domain.ways import Way
+from usher.domain.source import MediaItem
+from usher.domain.title import Title
+from usher.domain.watch import WatchState
+from usher.domain.ways import Way, rank
 from usher.ports.errors import PortDataMalformed, PortUnavailable, UsherPortError
 from usher.ports.events import ClientEvent, ClientEventKind, EventPublisher
 from usher.ports.players import Players
+from usher.ports.repository import MediaItemRepository, WatchStateRepository
+from usher.ports.source import wrap_deep_link
+from usher.services.playback import PlaybackService, episode_name, title_name
+from usher.services.screens import PLAYERS_OFF, PlayersUnavailable, unavailable
 
 _meter = metrics.get_meter("usher.send")
 
@@ -324,3 +336,148 @@ class SendDispatcher:
                 await self._end(send_id, cause(house), _Outcome.TIMED_OUT)
             return False
         return True
+
+
+class UnknownWay(LookupError):
+    """No way of this item's copies, on any screen, has this id."""
+
+
+class WayNotPlayable(Exception):
+    """The way cannot be sent. `detail` is safe to show."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
+
+
+class ScreenBusy(Exception):
+    """The screen is playing something else. `detail` is what, and is safe to show."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
+
+
+class SourceUnavailable(Exception):
+    """The source holding the copy gave no URL. `detail` is safe to show."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
+
+
+_SOURCE_UNAVAILABLE: Final = "could not reach the source holding this item"
+
+
+def build_link(handover: Handover, ticket_url: str, *, position_seconds: int) -> str:
+    """What the player is handed: the ticket URL in the handover's form, resuming at a point."""
+    if handover is not Handover.INFUSE_CALLBACK:
+        raise NotImplementedError(f"no link is built for the {handover.value} handover")
+    link = wrap_deep_link(ticket_url)
+    return f"{link}&position={position_seconds}" if position_seconds > 0 else link
+
+
+def _resume_point(watch: WatchState | None) -> int:
+    """The user's place, unless the item is played or has none."""
+    if watch is None or watch.played:
+        return 0
+    return watch.position_seconds
+
+
+class SendService:
+    """Turns a way's id into an order for the dispatcher; every refusal comes before any write."""
+
+    def __init__(
+        self,
+        players: Players | None,
+        dispatcher: SendDispatcher | None,
+        media_items: MediaItemRepository,
+        playback: PlaybackService,
+        watch_states: WatchStateRepository,
+        mint: Callable[[str, str], str],
+    ) -> None:
+        self._players = players
+        self._dispatcher = dispatcher
+        self._media_items = media_items
+        self._playback = playback
+        self._watch_states = watch_states
+        self._mint = mint
+
+    async def send_title(
+        self, title: Title, *, way_id: uuid.UUID, take_over: bool, user_id: uuid.UUID
+    ) -> Send:
+        dispatcher, screens = self._ready()
+        copies = await self._media_items.list_for_title(title.id)
+        way = _allowed(screens, copies, way_id, take_over=take_over)
+        url = await self._source_url(way)
+        watch = await self._watch_states.get_for_title(user_id, title.id)
+        return self._start(dispatcher, way, title.id, None, title_name(title), url, watch)
+
+    async def send_episode(
+        self,
+        series: Title | None,
+        episode: Episode,
+        *,
+        way_id: uuid.UUID,
+        take_over: bool,
+        user_id: uuid.UUID,
+    ) -> Send:
+        dispatcher, screens = self._ready()
+        copies = await self._media_items.list_for_episode(episode.id)
+        way = _allowed(screens, copies, way_id, take_over=take_over)
+        url = await self._source_url(way)
+        watch = await self._watch_states.get_for_episode(user_id, episode.id)
+        name = episode_name(series, episode)
+        return self._start(dispatcher, way, episode.title_id, episode.id, name, url, watch)
+
+    def _ready(self) -> tuple[SendDispatcher, tuple[Screen, ...]]:
+        """The dispatcher and the screens as the house reads now, or why there are none."""
+        if self._players is None or self._dispatcher is None:
+            raise PlayersUnavailable(PLAYERS_OFF, retryable=False)
+        try:
+            return self._dispatcher, project(self._players.snapshot()).screens
+        except UsherPortError as error:
+            raise unavailable(error) from error
+
+    async def _source_url(self, way: Way) -> str:
+        url = await self._playback.direct_url(way.file)
+        if url is None:
+            raise SourceUnavailable(_SOURCE_UNAVAILABLE)
+        return url
+
+    def _start(
+        self,
+        dispatcher: SendDispatcher,
+        way: Way,
+        title_id: uuid.UUID,
+        episode_id: uuid.UUID | None,
+        name: str,
+        source_url: str,
+        watch: WatchState | None,
+    ) -> Send:
+        """Start the send; the ticket is minted when the dispatcher asks for the link."""
+        position = _resume_point(watch)
+
+        def link() -> str:
+            return build_link(
+                way.recipe.handover, self._mint(source_url, name), position_seconds=position
+            )
+
+        return dispatcher.start(SendOrder(title_id, episode_id, way, link))
+
+
+def _allowed(
+    screens: tuple[Screen, ...], copies: list[MediaItem], way_id: uuid.UUID, *, take_over: bool
+) -> Way:
+    """The way, once it is known, playable, proven and its screen free or taken over."""
+    way = next((one for one in rank(screens, copies) if one.id == way_id), None)
+    if way is None:
+        raise UnknownWay
+    if way.refusal is not None:
+        raise WayNotPlayable(f"CAN'T · {way.refusal}")
+    if not way.recipe.proven:
+        raise WayNotPlayable(f"CAN'T SEND · {way.recipe.name.upper()} IS NOT PROVEN")
+    busy = busy_with(way.device.state)
+    if busy is not None and not take_over:
+        raise ScreenBusy(busy)
+    return way
