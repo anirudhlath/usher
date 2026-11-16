@@ -350,6 +350,20 @@ async def test_a_player_that_turns_off_while_opening_reads_as_turned_off(
     assert send.detail == "DIDN'T TAKE · OPENING · LIVING ROOM APPLE TV TURNED OFF"
 
 
+async def test_another_app_in_front_while_opening_is_not_the_player_turning_off(
+    players: ParkingPlayers, dispatcher: SendDispatcher, short_order: SendOrder, finished: Finished
+) -> None:
+    players.on_wait = lambda n: (
+        players.publish(players.snapshot().with_state(NETFLIX_IDLE)) if n == 1 else None
+    )
+    started = dispatcher.start(short_order)
+    await finished(started.id)
+    assert players.waits == 1, "the premise: the reading changed while the app was opening"
+    send = _send_of(dispatcher, started.id)
+    assert send.failed_stage is SendStage.OPENING
+    assert send.detail == "DIDN'T TAKE · OPENING · INFUSE MAY NOT BE INSTALLED"
+
+
 async def test_the_old_item_still_playing_is_not_the_send_playing(
     dispatcher: SendDispatcher,
     order: SendOrder,

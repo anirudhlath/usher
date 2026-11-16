@@ -647,9 +647,9 @@ by default ([08](08-operations.md)).
 - **A send that does not take ends at `didnt_take`**, with `failed_stage` the
   stage it was in and `detail` one printed line saying what the player showed,
   such as `DIDN'T TAKE · OPENING · INFUSE MAY NOT BE INSTALLED`. At `opening`
-  the line is `<DEVICE> TURNED OFF` when the player's reading is gone, or has
-  turned off, standby or unavailable since the handover, and `<APP> MAY NOT BE
-  INSTALLED` otherwise. A player that
+  the line is `<DEVICE> TURNED OFF` when the player's reading has changed since
+  the handover and is now gone, off, standby or unavailable, and `<APP> MAY NOT
+  BE INSTALLED` otherwise. A player that
   stays asleep through the waking window, or a Home Assistant that stops
   answering, ends it the same way. Once Home Assistant accepts a handover the
   link is never handed over again, and no stage is retried.
