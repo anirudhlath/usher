@@ -28,6 +28,7 @@ _ADAPTIVE_PAGE_SIZE_TABLE = "## Adaptive page size (from"
 _EVERY_VERSION_TABLE = "## Every version playable (from"
 _SELF_HEALING_TABLE = "## Self-healing sync, slice 1 (from"
 _BECAUSE_YOU_WATCHED_TABLE = "## Because You Watched rows (from"
+_DETAILS_SIMILAR_TABLE = "## Details page similar titles (from"
 _IMPLEMENTATION_PLAN_TABLE = "## Implementation plans"
 
 # A dated plan filename, excluding the `-design.md` specs that sit beside them.
@@ -87,6 +88,7 @@ def test_every_plan_file_is_named_by_every_status_table() -> None:
             | _table_rows(progress, _EVERY_VERSION_TABLE)
             | _table_rows(progress, _SELF_HEALING_TABLE)
             | _table_rows(progress, _BECAUSE_YOU_WATCHED_TABLE)
+            | _table_rows(progress, _DETAILS_SIMILAR_TABLE)
         ),
         "docs/prd/README.md's implementation-plan table": _table_rows(
             _PRD_README.read_text(), _IMPLEMENTATION_PLAN_TABLE
@@ -219,6 +221,7 @@ def test_the_progress_log_really_does_name_plan_files_outside_its_table() -> Non
         | set(_section(text, _EVERY_VERSION_TABLE))
         | set(_section(text, _SELF_HEALING_TABLE))
         | set(_section(text, _BECAUSE_YOU_WATCHED_TABLE))
+        | set(_section(text, _DETAILS_SIMILAR_TABLE))
     )
     outside = [
         line

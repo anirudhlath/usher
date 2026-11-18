@@ -211,6 +211,22 @@ heading false. `tests/unit/test_docs_currency.py` reads it into the same union.
 spec and is not a milestone, so a row under any heading above would make that
 heading false. `tests/unit/test_docs_currency.py` reads it into the same union.
 
+## Details page similar titles (from docs/specs/2026-11-16-details-similar-rows-design.md)
+| Task | What it delivers | Plan file | Status |
+|---|---|---|---|
+| 1 | A `seed_row` job builds one title's stored row, tells clients the title changed, and waits out a model outage five minutes at a time | docs/plans/2026-11-18-details-similar-rows.md | 📋 planned |
+| 2 | One read picks a title's stored row or its neighbours, up to 20 cards with poster, watched and owned marks, and queues the build when the record is due | docs/plans/2026-11-18-details-similar-rows.md | 📋 planned |
+| 3 | `GET /titles/{id}/similar` answers `{cards, source, building}` | docs/plans/2026-11-18-details-similar-rows.md | 📋 planned |
+| 4 | The console's "Similar titles" section renders home cards with posters | docs/plans/2026-11-18-details-similar-rows.md | 📋 planned |
+| 5 | The section shows an "updating" marker and re-reads every 5 seconds for at most 60 while a build is waited on | docs/plans/2026-11-18-details-similar-rows.md | 📋 planned |
+| 6 | The whole gate and the status rows | docs/plans/2026-11-18-details-similar-rows.md | 📋 planned |
+| 7 | Live acceptance on production: same row in both places, posters, first and second view of an unbuilt title — owner-gated | docs/plans/2026-11-18-details-similar-rows.md | 📋 planned |
+
+**A thirteenth table, for the twelfth's reason.** The details page's similar
+titles has its own spec and is not a milestone, so a row under any heading above
+would make that heading false. `tests/unit/test_docs_currency.py` reads it into
+the same union.
+
 ## M1 task groups → plan line ranges
 Plan file: `docs/plans/2026-07-28-m1-foundation.md` (2470 lines)
 
