@@ -88,7 +88,8 @@ from usher.services.rows import enabled_row_providers, row_provider_settings
 from usher.services.rows.cache import RefreshQueue, RowCache
 from usher.services.screens import ScreensService
 from usher.services.search import SearchQueryBuffer, SearchService
-from usher.services.similar import SimilarityService
+from usher.services.seed_row_recall import seed_row_recipe
+from usher.services.similar_shelf import SimilarShelfService
 from usher.services.sources import SourceService
 from usher.services.taste import TasteService
 from usher.services.titles import TitleReadService
@@ -765,41 +766,26 @@ HomeServiceDep = Annotated[HomeService, Depends(get_home_service)]
 
 
 # ---------------------------------------------------------------------------
-# Similarity (M9). `GET /titles/{id}/similar` is a thin read over
-# `SimilarityService` and the `title_neighbors` artefact M6 built and shipped
-# no route for (boundary call 1).
+# Similarity. `GET /titles/{id}/similar` reads a title's stored row or its
+# neighbours through `SimilarShelfService`.
 # ---------------------------------------------------------------------------
 
 
-def get_similarity_service(
-    session: SessionDep,
-    settings: SettingsDep,
-    embeddings: Annotated[TitleEmbeddingRepository, Depends(get_title_embedding_repository)],
-    neighbors: Annotated[TitleNeighborRepository, Depends(get_title_neighbor_repository)],
-    titles: Annotated[TitleRepository, Depends(get_title_repository)],
-) -> SimilarityService:
-    """`commit` is `session.commit`, and only `rebuild` ever calls it.
+def get_similar_shelf_service(
+    ctx: RowContextDep, queue: JobQueueDep, settings: SettingsDep
+) -> SimilarShelfService:
+    """The recipe is the worker's own, so both sides agree on what "due" means.
 
-    **The route built over this provider only reads**, so nothing on this path
-    commits; the wiring exists because the constructor argument is not optional.
-    `usher similar --rebuild` is `rebuild`'s only caller.
-
-    **`settings` is here for `embedding_model` and nothing else**, and it is a
-    *setting* rather than an `Embedder` on purpose: `stale_neighbors` cannot
-    answer without knowing which checkpoint the stored scores were computed
-    under, while a request has no model and must never load one. Taking the name
-    keeps the read answerable on a deployment with no embedding extra installed.
+    `None` when no model is configured: the read then queues nothing.
     """
-    return SimilarityService(
-        embeddings,
-        neighbors,
-        titles,
-        session.commit,
-        embedding_model=settings.embedding_model,
+    return SimilarShelfService(
+        ctx=ctx,
+        queue=queue,
+        recipe=seed_row_recipe(model=settings.llm_model) if settings.llm_enabled else None,
     )
 
 
-SimilarityServiceDep = Annotated[SimilarityService, Depends(get_similarity_service)]
+SimilarShelfServiceDep = Annotated[SimilarShelfService, Depends(get_similar_shelf_service)]
 
 
 # ---------------------------------------------------------------------------

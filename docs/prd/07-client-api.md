@@ -92,7 +92,7 @@ Usher's vocabulary is mapped at read time.
 | Endpoint | Returns |
 |---|---|
 | `GET /titles/{id}?search_id=` | Detail: metadata, credits, images, availability, watch state. The optional, opaque `search_id` from a `GET /search` response records which result the household opened ([10](10-telemetry-and-dashboards.md)). Unknown, malformed or absent, it changes nothing and the resource is served identically |
-| `GET /titles/{id}/similar` | Precomputed neighbours with similarity reasons |
+| `GET /titles/{id}/similar` | Up to 20 cards in the home screen's card shape, from the title's stored row (`source: row`) or `title_neighbors` (`source: neighbors`). `building` is true while a build for the title is queued |
 | `GET /series/{id}/seasons` · `GET /seasons/{id}/episodes` | Series hierarchy |
 | `GET /episodes/{id}` | Episode detail |
 | `GET /people/{id}` | Filmography grouped by role |

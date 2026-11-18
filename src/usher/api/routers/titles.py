@@ -10,9 +10,8 @@ from usher.api.deps import (
     DefaultUserIdDep,
     SearchIdDep,
     SearchQueryRepositoryDep,
-    SimilarityServiceDep,
+    SimilarShelfServiceDep,
     TitleReadServiceDep,
-    TitleRepositoryDep,
 )
 from usher.api.dto.problem import ProblemCode, ProblemResponse
 from usher.api.dto.similar import SimilarResponse
@@ -79,29 +78,18 @@ async def get_title(
 
 
 @router.get("/titles/{title_id}/similar", response_model=SimilarResponse, responses=_TITLE_FAILURES)
-async def get_similar_titles(
-    title_id: uuid.UUID, titles: TitleRepositoryDep, similarity: SimilarityServiceDep
-) -> SimilarResponse:
-    """Precomputed neighbours, plus both of `title_neighbors`' staleness signals.
+async def get_similar_titles(title_id: uuid.UUID, shelf: SimilarShelfServiceDep) -> SimilarResponse:
+    """The title's stored "Because you watched" row, else its neighbours, as home cards.
 
-    A title with no stored neighbours is `200` with an empty list -- that is
-    a fact about the title, not a failure -- and only an unknown `title_id`
-    is `404`, the same existence read `POST /titles/{id}/play` makes
-    (`api/routers/playback.py`) rather than a second definition of "not
-    found".
-
-    **No `Embedder`, and no `SourceAdapter`.** Every signal this route reads
-    is precomputed: `SimilarityService` takes two repositories and a title
-    repository, never a model or a source, so there is no live computation
-    here to fail and no source outage that could turn into one.
+    Reads `seed_rows` and `title_neighbors`, and for an enriched title whose record is due
+    may queue one `seed_row` job. A title with nothing similar is `200` with no cards; only
+    an unknown `title_id` is `404`.
     """
-    if await titles.get(title_id) is None:
+    found = await shelf.read(title_id)
+    if found is None:
         raise ProblemException(
             status_code=status.HTTP_404_NOT_FOUND,
             code=ProblemCode.NOT_FOUND,
             detail="title not found",
         )
-    neighbors = await similarity.neighbors_of(title_id)
-    computed_at = await similarity.computed_at()
-    stale = await similarity.stale_neighbors(title_id=title_id) > 0
-    return SimilarResponse.of(neighbors, computed_at=computed_at, stale=stale)
+    return SimilarResponse.of(found)

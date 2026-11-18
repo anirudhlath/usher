@@ -165,10 +165,14 @@ Full-text and vector results are combined with **Reciprocal Rank Fusion**.
 
 ### Similarity
 
-`GET /titles/{id}/similar` blends, in application code, embedding cosine over
-overview text plus Jaccard over keywords and genres. Neighbours are precomputed
-offline into `title_neighbors`, so "more like this" is instant and
-engine-independent.
+`GET /titles/{id}/similar` answers the title's stored row from `seed_rows` when
+it holds cards, the same record and order as the home screen's row
+([06](06-rows-and-recommendations.md)), and the title's `title_neighbors`
+otherwise, up to 20 cards.
+
+`title_neighbors` blends, in application code, embedding cosine over overview
+text plus Jaccard over keywords and genres, precomputed offline, so "more like
+this" is instant and engine-independent.
 
 | Term | Weight | Renormalised share |
 |---|---|---|
