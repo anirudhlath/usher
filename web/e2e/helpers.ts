@@ -49,17 +49,23 @@ export async function sweep(page: Page): Promise<void> {
 /**
  * Wait for every animation that ends to end. A looping one, such as the
  * skeleton's shimmer, never finishes and is not waited on, and neither is a
- * paused one.
+ * paused one. One that starts while another is waited on, such as a toast that
+ * mounts late or a fade chained to another's end, is caught by the next pass;
+ * there are at most five.
  */
 async function atRest(page: Page): Promise<void> {
   await page.evaluate(async () => {
-    const ending = document
-      .getAnimations()
-      .filter(
-        (animation) =>
-          animation.playState === 'running' && Number.isFinite(animation.effect?.getComputedTiming().endTime),
-      )
-    await Promise.all(ending.map((animation) => animation.finished.catch(() => undefined)))
+    for (let pass = 0; pass < 5; pass += 1) {
+      const ending = document
+        .getAnimations()
+        .filter(
+          (animation) =>
+            animation.playState === 'running' &&
+            Number.isFinite(animation.effect?.getComputedTiming().endTime),
+        )
+      if (ending.length === 0) return
+      await Promise.all(ending.map((animation) => animation.finished.catch(() => undefined)))
+    }
   })
 }
 

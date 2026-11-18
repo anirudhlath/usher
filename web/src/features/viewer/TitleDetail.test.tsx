@@ -365,6 +365,13 @@ describe('TitleDetail', () => {
       expect(screen.getByText('cards: []')).toBeInTheDocument()
     })
 
+    it('says it could not read similar titles when the first read fails', async () => {
+      serveTitle(titleEnriched)
+      server.use(http.get('/titles/:title_id/similar', () => new HttpResponse(null, { status: 500 })))
+      renderTitle(TITLE_ENRICHED)
+      expect(await screen.findByText('We could not read similar titles for this one.')).toBeInTheDocument()
+    })
+
     describe('waiting for a build', () => {
       afterEach(() => {
         vi.useRealTimers()
@@ -458,6 +465,35 @@ describe('TitleDetail', () => {
         await advance(60_000)
         expect(screen.getByText('Nothing similar to show.')).toBeInTheDocument()
         expect(screen.queryByText('Finding similar titles for this one.')).not.toBeInTheDocument()
+      })
+
+      it('keeps the cards through a failed re-read, and the next re-read still swaps', async () => {
+        fakeTimers()
+        let reads = 0
+        server.use(
+          http.get('/titles/:title_id/similar', () => {
+            reads += 1
+            if (reads === 2) return new HttpResponse(null, { status: 500 })
+            return HttpResponse.json(reads === 1 ? similarUpdating : similarRow)
+          }),
+        )
+        useFakeEventSource()
+        renderTitle(TITLE_ENRICHED)
+        const similar = await screen.findByRole('region', { name: 'Similar titles' })
+        expect(await within(similar).findByText('updating')).toBeInTheDocument()
+
+        await advance(5_000)
+        await waitFor(() => expect(reads).toBe(2))
+        expect(screen.queryByText('We could not read similar titles for this one.')).not.toBeInTheDocument()
+        expect(within(similar).getByRole('button', { name: /Solaris, 1972/ })).toBeInTheDocument()
+        expect(within(similar).getByText('updating')).toBeInTheDocument()
+
+        await advance(5_000)
+        expect(
+          await within(similar).findByRole('button', { name: /Andrei Rublev, 1966/ }),
+        ).toBeInTheDocument()
+        expect(reads).toBe(3)
+        expect(within(similar).queryByText('updating')).not.toBeInTheDocument()
       })
 
       it('has no axe violations while updating', async () => {

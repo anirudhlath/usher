@@ -510,7 +510,8 @@ function CreditColumn({ heading, field, credits, secondary, onOpenPerson }: Cred
  * the home screen renders them, with the same poster, watched mark and
  * not-owned badge. No cards is one state: nothing similar to show, with `meta`
  * naming the field. While `waiting`, a list shows an `updating` badge and no list says it is
- * finding some; after the wait both go quiet.
+ * finding some; after the wait both go quiet. A failed read shows the error only
+ * when there is no list to keep.
  *
  * There are **no similarity reasons in this API**, so nothing here invents one.
  */
@@ -519,7 +520,7 @@ function SimilarSection({
   waiting,
   onOpenTitle,
 }: {
-  query: { isPending: boolean; isError: boolean; data: SimilarResponse | undefined }
+  query: { isPending: boolean; data: SimilarResponse | undefined }
   waiting: boolean
   onOpenTitle: (titleId: string) => void
 }) {
@@ -532,7 +533,8 @@ function SimilarSection({
     )
   }
 
-  if (query.isError || query.data === undefined) {
+  // A failed re-read keeps the data it had, so only a section with none says it failed.
+  if (query.data === undefined) {
     return (
       <section className="u-title__similar" aria-labelledby="title-similar">
         <h2 className="u-title__h2" id="title-similar">

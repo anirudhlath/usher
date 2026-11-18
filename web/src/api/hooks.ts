@@ -171,23 +171,24 @@ export function useTitle(id: string | undefined, searchId?: string) {
 
 export type SimilarResponse = Ok<'/titles/{title_id}/similar'>
 
-/**
- * `{ cards, source, building }`: home cards, from the title's stored row or else
- * its neighbours. No cards with `building` true means a build is under way; no
- * cards with `building` false means nothing similar.
- */
 /** How often a section with a build under way is read again. */
 export const SIMILAR_REREAD_MS = 5_000
 /** How long a build is waited on before the section stops asking. */
 export const SIMILAR_WAIT_MS = 60_000
 
 /**
- * The query, plus `waiting`: a build is under way and the 60 seconds are not up.
- * While waiting it re-reads every `SIMILAR_REREAD_MS`.
+ * `{ cards, source, building }`: home cards, from the title's stored row or else
+ * its neighbours. No cards with `building` true means a build is under way; no
+ * cards with `building` false means nothing similar.
+ *
+ * Returns the query plus `waiting`. A wait starts at a read that says `building`
+ * true while no wait is running, and re-reads every `SIMILAR_REREAD_MS`. A read
+ * that says `building` false ends it, and a later true read starts a new one.
+ * `SIMILAR_WAIT_MS` after its start the wait ends for good for this visit, so a
+ * build that never lands cannot keep the page asking. Opening the title again is
+ * a new visit and a new wait.
  */
 export function useSimilar(id: string | undefined): UseQueryResult<SimilarResponse> & { waiting: boolean } {
-  // The wait starts at the first read of this id that says a build is under
-  // way and ends on a timer, so a build that never lands cannot keep the page asking.
   const [phase, setPhase] = useState<{ id: string | undefined; state: 'idle' | 'waiting' | 'over' }>({
     id,
     state: 'idle',
@@ -217,8 +218,8 @@ export function useSimilar(id: string | undefined): UseQueryResult<SimilarRespon
     return () => clearTimeout(timer)
   }, [id, state])
 
-  // A first read that says building counts at once, before the effect has run.
-  const waiting = state === 'waiting' || (state === 'idle' && building === true)
+  // A read that says building counts at once, before the effect has run.
+  const waiting = state !== 'over' && building === true
   return { ...query, waiting }
 }
 

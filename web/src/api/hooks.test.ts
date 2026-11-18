@@ -315,6 +315,26 @@ describe('useSimilar waiting', () => {
     await advance(30_000)
     expect(counter.requests).toBe(asked + 1)
   })
+
+  it('counts the 60 seconds from the read that says building, not from the first read', async () => {
+    fakeTimers()
+    const counter = serve((n) => (n === 1 ? similarRow : similarUpdating))
+    const { result, client } = await mount()
+    expect(result.current.waiting).toBe(false)
+    await advance(50_000)
+    expect(counter.requests).toBe(1)
+
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ['similar', TITLE_ENRICHED] })
+    })
+    expect(counter.requests).toBe(2)
+    await waitFor(() => expect(result.current.data?.building).toBe(true))
+    expect(result.current.waiting).toBe(true)
+    await advance(59_000)
+    expect(result.current.waiting).toBe(true)
+    await advance(1_000)
+    expect(result.current.waiting).toBe(false)
+  })
 })
 
 describe('useHome', () => {

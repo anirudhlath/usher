@@ -133,10 +133,17 @@ test.describe('component gallery', () => {
         toast.getBoundingClientRect()
         toast.style.animation = ''
       }
-      return toasts.filter((toast) => Number(getComputedStyle(toast).opacity) < 1).length
+      return {
+        count: toasts.filter((toast) => Number(getComputedStyle(toast).opacity) < 1).length,
+        durations: toasts.map((toast) => getComputedStyle(toast).animationDuration),
+      }
     })
-    // The premise: the restart took, so there is a fade for the sweep to wait on.
-    expect(fading).toBeGreaterThan(0)
+    // The premises: the stretch reached the toast, so its fade lasts 3 s rather
+    // than the race-sized 180 ms, and the restart took, so there is a fade for
+    // the sweep to wait on.
+    expect(fading.durations.length).toBeGreaterThan(0)
+    expect(new Set(fading.durations)).toEqual(new Set(['3s']))
+    expect(fading.count).toBeGreaterThan(0)
 
     await sweep(page)
   })
