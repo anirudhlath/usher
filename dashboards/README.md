@@ -1515,7 +1515,7 @@ to catch that spelling would be the thing that accepted it.
 *Ingest stalled* is *"queue depth rising for 30 min with zero completions"*, and
 its two halves have **opposite shapes**:
 
-- **Depth is always nine series.** `PostgresJobQueue.depth` fills
+- **Depth is always ten series.** `PostgresJobQueue.depth` fills
   `dict.fromkeys(JobKind, 0)` before returning, with its own comment giving the
   reason: *"A GROUP BY returns only non-empty kinds, and a gauge that stops
   reporting a series is indistinguishable from one reporting zero."*

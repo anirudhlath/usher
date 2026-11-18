@@ -43,6 +43,7 @@ KIND_CONCURRENCY: Final[Mapping[JobKind, int | None]] = MappingProxyType(
         JobKind.CURATE: 1,
         JobKind.SYNC: 1,
         JobKind.BOOTSTRAP: BOOTSTRAP_CONCURRENCY,
+        JobKind.SEED_ROW: 1,
     }
 )
 
@@ -123,10 +124,10 @@ class JobWorker:
     def registered_kinds(self) -> frozenset[JobKind]:
         """Exactly what `run_once` will claim.
 
-        A read-only view rather than a test reaching into `_concurrency`. Four
-        of the nine kinds are registered conditionally by
+        A read-only view rather than a test reaching into `_concurrency`. Five
+        of the ten kinds are registered conditionally by
         `composition.build_worker` -- `ENRICH` and `DERIVE` on a TMDb key,
-        `INDEX` on an embedder, `CURATE` on an `LLMClient` -- so "this
+        `INDEX` on an embedder, `CURATE` and `SEED_ROW` on an `LLMClient` -- so "this
         deployment cannot run that kind" is wiring a test has to be able to see.
         The other five are in every build: there is no optional process resource
         behind a triggered sync or a bulk import, only the adapter factory and

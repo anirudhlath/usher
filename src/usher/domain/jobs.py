@@ -23,6 +23,7 @@ class JobKind(StrEnum):
     WATCH_WRITEBACK = "watch_writeback"
     SYNC = "sync"
     BOOTSTRAP = "bootstrap"
+    SEED_ROW = "seed_row"
 
 
 #: How many `bootstrap` jobs one worker runs at once: `bulk_load_window` commits the

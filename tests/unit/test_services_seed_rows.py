@@ -840,6 +840,66 @@ async def test_due_seeds_drop_what_is_built_and_what_the_catalog_no_longer_holds
     assert [seed.id for seed in due] == [kept.id]
 
 
+async def test_build_if_due_builds_a_title_that_has_no_record() -> None:
+    world = _World()
+    case = await _a_seed_with_three_lists(world)
+    seed: Title = case["seed"]
+    client = world.client(case["completion"])
+    assert await world.rows.list_for([seed.id]) == {}, "the premise: no record yet"
+
+    row = await world.service(client).build_if_due(seed.id)
+
+    assert row is not None
+    assert row.attempt_outcome is SeedRowOutcome.BUILT
+    assert (await world.rows.list_for([seed.id]))[seed.id] == row
+    assert len(client.calls) == 1, "the premise the next case's zero rests on"
+
+
+async def test_build_if_due_asks_for_nothing_when_the_record_is_not_due() -> None:
+    world = _World()
+    seed = await world.title("The Seed")
+    record = _built(days_ago=1, seed_id=seed.id)
+    await world.rows.save(record)
+    assert not is_due(record, recipe=_RECIPE, now=_NOW), "the premise: this record is not due"
+    client = world.client(_films())
+
+    assert await world.service(client).build_if_due(seed.id) is None
+
+    assert client.calls == []
+    assert world.calls.calls == []
+    assert world.rows.rows == {seed.id: record}
+
+
+async def test_build_if_due_is_none_for_a_title_the_catalog_no_longer_holds() -> None:
+    world = _World()
+    client = world.client(_films())
+
+    assert await world.service(client).build_if_due(new_id()) is None
+
+    assert client.calls == []
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param(PortUnavailable("down"), id="unavailable"),
+        pytest.param(PortRateLimited(retry_after=5.0), id="rate-limited"),
+    ],
+)
+async def test_build_if_due_lets_an_outage_out_with_no_record_saved(
+    failure: UsherPortError,
+) -> None:
+    world = _World()
+    seed = await world.title("The Seed")
+    client = world.client(failure)
+
+    with pytest.raises(type(failure)):
+        await world.service(client).build_if_due(seed.id)
+
+    assert len(client.calls) == 1, "the premise: the model was asked"
+    assert await world.rows.list_for([seed.id]) == {}
+
+
 async def _three_due_seeds(world: _World) -> list[Title]:
     seeds = [await world.title(f"Seed {index}", tmdb_id=None) for index in range(3)]
     for hours, seed in enumerate(seeds, start=1):

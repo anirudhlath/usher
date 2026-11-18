@@ -75,7 +75,7 @@ groups:
         # all -- and the intersection drops it. The depth series has the
         # opposite shape: `PostgresJobQueue.depth` fills every `JobKind` with 0
         # before returning ("a gauge that stops reporting a series is
-        # indistinguishable from one reporting zero"), so all nine kinds are
+        # indistinguishable from one reporting zero"), so all ten kinds are
         # always present on the left.
         #
         # Measured against this host's Prometheus on 2026-09-11: the `and`
@@ -164,7 +164,7 @@ groups:
         # Per `kind` by construction rather than by a grouping clause --
         # `composition.QueueGauges.refresh` tallies `queue.parked()` into
         # `dict.fromkeys(JobKind, 0)`, so every kind always has a series and
-        # `increase()` is evaluated on each of the nine separately.
+        # `increase()` is evaluated on each of the ten separately.
         #
         # ⚠️ **This series saturates at 1,000 and the rule inherits that.**
         # `QueueGauges.refresh` builds the parked counts from
