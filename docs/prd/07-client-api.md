@@ -376,7 +376,7 @@ holds no `queue_unavailable`, no `database_unavailable` and no
 
 | Event | Payload | Client action |
 |---|---|---|
-| `title.updated` | Title id + changed fields. `fields` is `["similar"]` when the title's stored similar-titles row was built | Patch in place |
+| `title.updated` | Title id + changed fields. `fields` is `["similar"]` when a build of the title's similar-titles row finished | Patch in place |
 | `watchstate.updated` | Title/episode id, position, played | Update progress |
 | `row.invalidated` | Row slug | Refetch that row |
 | `sync.progress` | Source, kind, counts; a whole-library walk's stage, units and expected items | Admin UI only |

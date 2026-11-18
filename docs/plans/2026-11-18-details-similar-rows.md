@@ -946,8 +946,12 @@ credential into the repo. Results go on the PR as comments.
 
 ## Residuals
 
-- **A long outage writes ledger rows.** Each deferred attempt settles one failed
-  `llm_calls` row: 12 an hour for each title whose build is waiting. Not guarded.
+- **A long outage writes ledger rows, and a TMDb outage spends money.** Each deferred
+  attempt settles one `llm_calls` row: 12 an hour for each title whose build is
+  waiting. When the model is unreachable the row is a failed call. When TMDb fails,
+  `build` has already spent a completion that succeeded, so every retry pays for
+  another, with no end for a refused TMDb key. A deferral reschedules the job and parks
+  nothing, so neither queue alert sees it. Not guarded; a back-off is a follow-up.
 - **The scheduled job and a queued job can build one seed at the same moment.** Both
   build and the later save wins. One extra completion, as the spec accepts.
 - **A deployment with a model but no running worker** reads `building: true` on every

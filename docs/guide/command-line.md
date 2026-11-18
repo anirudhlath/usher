@@ -180,8 +180,8 @@ splitting the lanes across containers.
   process, so a second worker spends TMDb's per-client rate limit twice. Set
   `USHER_WORKER_ENABLED=false` on the server first.
 - **A worker claims only the jobs it is configured for.** `enrich` and `derive`
-  need `USHER_TMDB_API_KEY`, `index` needs an embedding model, and `curate` needs
-  `USHER_LLM_ENABLED=true`. Other workers leave those jobs queued rather than
+  need `USHER_TMDB_API_KEY`, `index` needs an embedding model, and `curate` and
+  `seed_row` need `USHER_LLM_ENABLED=true`. Other workers leave those jobs queued rather than
   failing them.
 - **`usher work --once`** claims one batch and exits. It does not drain the
   queue.
