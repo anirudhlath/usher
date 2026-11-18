@@ -11,7 +11,7 @@
  *   rewrite would be evidence of a bug rather than of configuration.
  *
  * · **Variation is selected by the request, not by a separate handler.** The
- *   skeleton title, the never-computed similarity list, the second page of a
+ *   skeleton title, the still-building similarity list, the second page of a
  *   keyset walk and the two `facets.computed: false` reasons are all reachable
  *   from this one array by asking for the right id, cursor or query — so a test
  *   that wants one of them names an id instead of assembling a server.
@@ -79,11 +79,11 @@ import {
   TITLE_NOT_PLAYABLE,
   TITLE_SERIES,
   TITLE_SIMILAR_EMPTY,
-  TITLE_SIMILAR_NEVER,
-  TITLE_SIMILAR_STALE,
+  TITLE_SIMILAR_FINDING,
+  TITLE_SIMILAR_UPDATING,
   TITLE_SKELETON,
 } from './fixtures/ids'
-import { similarComputed, similarComputedEmpty, similarNeverComputed, similarStale } from './fixtures/titles'
+import { similarEmpty, similarFinding, similarRow, similarUpdating } from './fixtures/titles'
 
 /** One path parameter as a string. MSW types them `string | readonly string[]`. */
 function param(params: PathParams, key: string): string {
@@ -162,14 +162,14 @@ export const handlers = [
 
   http.get('/titles/:title_id/similar', ({ params }) => {
     switch (param(params, 'title_id')) {
-      case TITLE_SIMILAR_NEVER:
-        return HttpResponse.json(similarNeverComputed)
+      case TITLE_SIMILAR_FINDING:
+        return HttpResponse.json(similarFinding)
       case TITLE_SIMILAR_EMPTY:
-        return HttpResponse.json(similarComputedEmpty)
-      case TITLE_SIMILAR_STALE:
-        return HttpResponse.json(similarStale)
+        return HttpResponse.json(similarEmpty)
+      case TITLE_SIMILAR_UPDATING:
+        return HttpResponse.json(similarUpdating)
       default:
-        return HttpResponse.json(similarComputed)
+        return HttpResponse.json(similarRow)
     }
   }),
 

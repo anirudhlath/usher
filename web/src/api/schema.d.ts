@@ -767,18 +767,11 @@ export interface paths {
         };
         /**
          * Get Similar Titles
-         * @description Precomputed neighbours, plus both of `title_neighbors`' staleness signals.
+         * @description The title's stored "Because you watched" row, else its neighbours, as home cards.
          *
-         *     A title with no stored neighbours is `200` with an empty list -- that is
-         *     a fact about the title, not a failure -- and only an unknown `title_id`
-         *     is `404`, the same existence read `POST /titles/{id}/play` makes
-         *     (`api/routers/playback.py`) rather than a second definition of "not
-         *     found".
-         *
-         *     **No `Embedder`, and no `SourceAdapter`.** Every signal this route reads
-         *     is precomputed: `SimilarityService` takes two repositories and a title
-         *     repository, never a model or a source, so there is no live computation
-         *     here to fail and no source outage that could turn into one.
+         *     Reads `seed_rows` and `title_neighbors`, and for an enriched title whose record is due
+         *     may queue one `seed_row` job. A title with nothing similar is `200` with no cards; only
+         *     an unknown `title_id` is `404`.
          */
         get: operations["get_similar_titles_titles__title_id__similar_get"];
         put?: never;
@@ -1521,7 +1514,7 @@ export interface components {
          * @description What a worker does with a claimed job.
          * @enum {string}
          */
-        JobKind: "match" | "enrich" | "watch_history" | "index" | "derive" | "curate" | "watch_writeback" | "sync" | "bootstrap";
+        JobKind: "match" | "enrich" | "watch_history" | "index" | "derive" | "curate" | "watch_writeback" | "sync" | "bootstrap" | "seed_row";
         /**
          * LaneReport
          * @description Which background lanes this process is running.
@@ -2040,44 +2033,21 @@ export interface components {
         };
         /**
          * SimilarResponse
-         * @description Neighbours, plus both of `title_neighbors`' staleness signals.
-         *
-         *     Reported rather than implied: a client that could not see either would be
-         *     shown yesterday's neighbours, or none at all, with no way to tell that from
-         *     "this title genuinely has nothing like it".
+         * @description Cards in the order served; `building` is true while a build for the title is queued.
          */
         SimilarResponse: {
-            /** Neighbors */
-            neighbors: components["schemas"]["SimilarTitleResponse"][];
-            /** Computed At */
-            computed_at: string | null;
-            /** Stale */
-            stale: boolean;
+            /** Cards */
+            cards: components["schemas"]["RowCardResponse"][];
+            source: components["schemas"]["SimilarSource"];
+            /** Building */
+            building: boolean;
         };
         /**
-         * SimilarTitleResponse
-         * @description One neighbour, in the **stored order**.
-         *
-         *     `SimilarityService.neighbors_of` reads `title_neighbors` back by its own
-         *     stamped `rank`, best first, ties broken by id, and this DTO never re-sorts on
-         *     `score`. Reproducing the order from the score works only up to float ties,
-         *     and a tie broken differently on two reads would show a client two different
-         *     "most similar" titles for the same catalog.
+         * SimilarSource
+         * @description Where a title page's similar cards came from.
+         * @enum {string}
          */
-        SimilarTitleResponse: {
-            /**
-             * Id
-             * Format: uuid
-             */
-            id: string;
-            kind: components["schemas"]["TitleKind"];
-            /** Name */
-            name: string;
-            /** Year */
-            year: number | null;
-            /** Score */
-            score: number;
-        };
+        SimilarSource: "row" | "neighbors";
         /** SourceCreateRequest */
         SourceCreateRequest: {
             kind: components["schemas"]["SourceKind"];

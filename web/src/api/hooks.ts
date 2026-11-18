@@ -170,10 +170,9 @@ export function useTitle(id: string | undefined, searchId?: string) {
 export type SimilarResponse = Ok<'/titles/{title_id}/similar'>
 
 /**
- * Three different absent states arrive on this one route and patterns.md §2
- * gives each its own treatment: `computed_at: null` is never-computed,
- * `neighbors: []` with a `computed_at` is computed-and-empty, and `stale: true`
- * means the list is real and its inputs moved — which is shown, not hidden.
+ * `{ cards, source, building }`: home cards, from the title's stored row or else
+ * its neighbours. No cards with `building` true means a build is under way; no
+ * cards with `building` false means nothing similar.
  */
 export function useSimilar(id: string | undefined) {
   return useQuery({

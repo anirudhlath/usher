@@ -501,19 +501,13 @@ function CreditColumn({ heading, field, credits, secondary, onOpenPerson }: Cred
 /* ----------------------------------------------------------------- similar */
 
 /**
- * Four states, and every one of them is a different fact (patterns.md §2):
+ * The route answers home cards: the stored "Because you watched" row when there
+ * is one, else the title's neighbours, in the order served. They are rendered as
+ * the home screen renders them, with the same poster, watched mark and
+ * not-owned badge. No cards is one state: nothing similar to show, with `meta`
+ * naming the field. `building` is not rendered here yet.
  *
- * · neighbours, current — the row.
- * · `stale: true` — the row **is still shown**, with an amber marker. The list
- *   is real and its inputs moved; suppressing it would be a bigger lie than
- *   showing it.
- * · `neighbors: []` with a `computed_at` — computed, and nothing scored close
- *   enough.
- * · `computed_at: null` — never computed at all, with `meta` naming the field.
- *
- * There are **no similarity reasons in this API**. PRD 07 describes them and no
- * such field exists, so nothing here invents one: the row says outright that
- * there is no "why".
+ * There are **no similarity reasons in this API**, so nothing here invents one.
  */
 function SimilarSection({
   query,
@@ -544,7 +538,7 @@ function SimilarSection({
     )
   }
 
-  const { neighbors, computed_at: computedAt, stale } = query.data
+  const { cards } = query.data
 
   return (
     <section className="u-title__similar" aria-labelledby="title-similar">
@@ -552,39 +546,20 @@ function SimilarSection({
         <h2 className="u-title__h2" id="title-similar">
           Similar titles
         </h2>
-        {stale && (
-          <Badge tone="warn" icon={<Icon name="history" />}>
-            stale
-          </Badge>
-        )}
-        {stale && computedAt !== null && (
-          <span className="u-title__note">
-            Computed {shortDate(computedAt)}, before the scoring blend changed. Shown as they were. Fixed at
-            ten; there is no {'“why”'}.
-          </span>
-        )}
       </div>
 
-      {computedAt === null ? (
-        <StateBlock kind="never" meta="computed_at: null">
-          We have never computed similar titles for this one.
-        </StateBlock>
-      ) : neighbors.length === 0 ? (
-        <StateBlock kind="empty" meta={`neighbors: [] · computed_at: ${computedAt}`}>
-          Computed {shortDate(computedAt)}. Nothing scored close enough to show.
+      {cards.length === 0 ? (
+        <StateBlock kind="empty" meta="cards: []">
+          Nothing similar to show.
         </StateBlock>
       ) : (
         <div className="u-title__rail">
-          {neighbors.map((neighbor) => (
+          {cards.map((card) => (
             <PosterCard
-              key={neighbor.id}
-              card={{
-                title_id: neighbor.id,
-                kind: neighbor.kind,
-                name: neighbor.name,
-                year: neighbor.year,
-              }}
-              onOpen={() => onOpenTitle(neighbor.id)}
+              key={card.title_id}
+              card={card}
+              onOpen={() => onOpenTitle(card.title_id)}
+              badge={card.owned ? null : <Badge tone="neutral">not owned</Badge>}
             />
           ))}
         </div>

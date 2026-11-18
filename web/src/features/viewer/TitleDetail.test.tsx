@@ -6,12 +6,11 @@ import { expectNoViolations } from '@/test/axe'
 import { server } from '@/test/server'
 import { installFakeEventSource } from '@/test/sse'
 import {
+  IMAGE_POSTER,
   TITLE_ENRICHED,
   TITLE_MISSING,
   TITLE_NOT_PLAYABLE,
   TITLE_SIMILAR_EMPTY,
-  TITLE_SIMILAR_NEVER,
-  TITLE_SIMILAR_STALE,
   TITLE_SKELETON,
 } from '@/test/fixtures/ids'
 import { titleCreditsEmpty, titleSkeletonEnriched } from '@/test/fixtures/viewer-screens'
@@ -162,24 +161,6 @@ describe('TitleDetail', () => {
       expect(screen.getByText('cast: []')).toBeInTheDocument()
       expect(screen.getByText('crew: []')).toBeInTheDocument()
       expect(screen.getByText('images: []')).toBeInTheDocument()
-    })
-
-    it('says a computed similarity list found nothing, with its computed_at', async () => {
-      renderTitle(TITLE_SIMILAR_EMPTY)
-      await screen.findByRole('heading', { level: 1, name: 'Andrei Rublev' })
-
-      expect(screen.getByText(/Nothing scored close enough to show\./)).toBeInTheDocument()
-      expect(screen.getByText('neighbors: [] · computed_at: 2026-08-16T04:12:09Z')).toBeInTheDocument()
-    })
-
-    it('distinguishes a never-computed similarity list from an empty one', async () => {
-      serveTitle({ ...titleEnriched, id: TITLE_SIMILAR_NEVER })
-      renderTitle(TITLE_SIMILAR_NEVER)
-      await screen.findByRole('heading', { level: 1, name: 'Stalker' })
-
-      expect(screen.getByText('We have never computed similar titles for this one.')).toBeInTheDocument()
-      expect(screen.getByText('computed_at: null')).toBeInTheDocument()
-      expect(screen.queryByText(/Nothing scored close enough/)).not.toBeInTheDocument()
     })
   })
 
@@ -352,18 +333,27 @@ describe('TitleDetail', () => {
   })
 
   describe('similar titles', () => {
-    it('still shows the neighbours when the list is stale', async () => {
-      serveTitle({ ...titleEnriched, id: TITLE_SIMILAR_STALE })
-      renderTitle(TITLE_SIMILAR_STALE)
-      await screen.findByRole('heading', { level: 1, name: 'Stalker' })
-
+    it('renders the stored row as poster cards in the order the API gave', async () => {
+      renderTitle(TITLE_ENRICHED)
       const similar = await screen.findByRole('region', { name: 'Similar titles' })
-      // Stale content is SHOWN. Suppressing it would be the bigger lie.
-      expect(within(similar).getByRole('button', { name: /Solaris, 1972/ })).toBeInTheDocument()
-      expect(within(similar).getByText('stale')).toBeInTheDocument()
-      expect(
-        within(similar).getByText(/before the scoring blend changed\. Shown as they were\./),
-      ).toBeInTheDocument()
+      const cards = await within(similar).findAllByRole('button')
+      expect(cards.map((b) => b.getAttribute('aria-label') ?? b.textContent)).toEqual([
+        expect.stringMatching(/Solaris, 1972/),
+        expect.stringMatching(/The Mirror, 1975, watched/),
+        expect.stringMatching(/Andrei Rublev, 1966/),
+      ])
+      // Solaris's poster and not-owned mark, The Mirror's watched mark: the cards
+      // are the home screen's, so what Home shows is what this rail shows.
+      expect(similar.querySelectorAll('.u-card--poster')).toHaveLength(3)
+      expect(similar.querySelector('img[src*="' + IMAGE_POSTER + '"]')).not.toBeNull()
+      expect(within(similar).getAllByText('not owned')).toHaveLength(1)
+      expect(within(similar).queryByText('stale')).not.toBeInTheDocument()
+    })
+
+    it('says there is nothing similar when there are no cards', async () => {
+      renderTitle(TITLE_SIMILAR_EMPTY)
+      expect(await screen.findByText('Nothing similar to show.')).toBeInTheDocument()
+      expect(screen.getByText('cards: []')).toBeInTheDocument()
     })
 
     it('offers no similarity reason, because the API has none', async () => {

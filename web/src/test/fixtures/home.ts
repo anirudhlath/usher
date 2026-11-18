@@ -13,7 +13,7 @@
  *
  * `RowCardResponse` is the **only** DTO in this API that carries artwork, and it
  * carries an image *id string* rather than an object. Search, browse,
- * similarity, collection members and filmography entries have no artwork member
+ * collection members and filmography entries have no artwork member
  * at all, so those grids are text-forward by contract rather than by omission.
  */
 
@@ -23,7 +23,7 @@ import {
   IMAGE_POSTER,
   TITLE_ENRICHED,
   TITLE_SERIES,
-  TITLE_SIMILAR_STALE,
+  TITLE_SIMILAR_UPDATING,
   TITLE_SKELETON,
   EPISODE_PILOT,
 } from './ids'
@@ -77,7 +77,7 @@ export const cardTwinPeaks: RowCard = {
 }
 
 export const cardMirror: RowCard = {
-  title_id: TITLE_SIMILAR_STALE,
+  title_id: TITLE_SIMILAR_UPDATING,
   kind: 'movie',
   name: 'The Mirror',
   year: 1975,

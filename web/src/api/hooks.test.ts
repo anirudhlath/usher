@@ -38,11 +38,11 @@ import { browsePageOne, browsePageTwo } from '@/test/fixtures/browse'
 import { readinessDegraded, readinessNotADocument } from '@/test/fixtures/meta'
 import {
   SEASON_ONE,
+  IMAGE_POSTER,
   TITLE_ENRICHED,
   TITLE_MISSING,
   TITLE_SIMILAR_EMPTY,
-  TITLE_SIMILAR_NEVER,
-  TITLE_SIMILAR_STALE,
+  TITLE_SIMILAR_FINDING,
   TITLE_SKELETON,
 } from '@/test/fixtures/ids'
 import { UsherProblem } from './client'
@@ -195,27 +195,27 @@ describe('useTitle and the absent-vs-empty rule', () => {
   })
 })
 
-describe('useSimilar and its three absent states', () => {
-  it('distinguishes never-computed from computed-and-empty', async () => {
-    const never = renderHook(() => useSimilar(TITLE_SIMILAR_NEVER), { wrapper: makeWrapper() })
-    await waitFor(() => expect(never.result.current.isSuccess).toBe(true))
-    expect(never.result.current.data?.neighbors).toEqual([])
-    // `computed_at` is the field that proves the claim, which is why `meta`
-    // names it on screen.
-    expect(never.result.current.data?.computed_at).toBeNull()
+describe('useSimilar', () => {
+  it('reads the stored row as home cards', async () => {
+    const { result } = renderHook(() => useSimilar(TITLE_ENRICHED), { wrapper: makeWrapper() })
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    expect(result.current.data?.source).toBe('row')
+    expect(result.current.data?.cards.map((card) => card.name)).toEqual([
+      'Solaris',
+      'The Mirror',
+      'Andrei Rublev',
+    ])
+    expect(result.current.data?.cards[0]?.artwork).toBe(IMAGE_POSTER)
+  })
+
+  it('tells no cards with a build under way from no cards at all', async () => {
+    const finding = renderHook(() => useSimilar(TITLE_SIMILAR_FINDING), { wrapper: makeWrapper() })
+    await waitFor(() => expect(finding.result.current.isSuccess).toBe(true))
+    expect(finding.result.current.data).toEqual({ cards: [], source: 'neighbors', building: true })
 
     const empty = renderHook(() => useSimilar(TITLE_SIMILAR_EMPTY), { wrapper: makeWrapper() })
     await waitFor(() => expect(empty.result.current.isSuccess).toBe(true))
-    expect(empty.result.current.data?.neighbors).toEqual([])
-    expect(empty.result.current.data?.computed_at).not.toBeNull()
-  })
-
-  it('shows a stale list rather than hiding it', async () => {
-    const { result } = renderHook(() => useSimilar(TITLE_SIMILAR_STALE), { wrapper: makeWrapper() })
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-    // Suppressing it would be a bigger lie than showing it.
-    expect(result.current.data?.stale).toBe(true)
-    expect(result.current.data?.neighbors.length).toBeGreaterThan(0)
+    expect(empty.result.current.data).toEqual({ cards: [], source: 'neighbors', building: false })
   })
 })
 

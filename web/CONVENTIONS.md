@@ -150,6 +150,10 @@ with the reason, and `web/docs/` stays a verbatim copy.
   minutes, not a first batch that lands later, a later step of "Run all phases"
   or a job queued behind another bootstrap job. `WATCH_MINUTES` in
   `Bootstrap.tsx` has its arithmetic. Overview keeps §8 as written.
+- **Similar titles carry posters, watched marks and owned marks, and have no
+  never-computed or stale state.** The route now answers home cards, so the
+  title page draws the same `PosterCard` as Home. Its list is the stored row or
+  the old list and the API reports neither age, so there is nothing to mark.
 
 ## Commands
 

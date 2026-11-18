@@ -18,6 +18,7 @@
 
 import type { EpisodeResponse, SeasonsResponse, SimilarResponse, TitleResponse } from '@/api'
 import type { Schemas } from '@/api'
+import { cardMirror, cardSolaris, cardStalker } from './home'
 import {
   EPISODE_PILOT,
   EPISODE_SECOND,
@@ -31,7 +32,6 @@ import {
   TITLE_ENRICHED,
   TITLE_SERIES,
   TITLE_SIMILAR_EMPTY,
-  TITLE_SIMILAR_STALE,
   TITLE_SKELETON,
 } from './ids'
 
@@ -220,60 +220,42 @@ export const titleSeries: TitleResponse = {
 
 /* --------------------------------------------------------------- similar */
 
-/**
- * Computed, with neighbours, and current. `computed_at` set + `stale: false`.
- */
-export const similarComputed: SimilarResponse = {
-  neighbors: [
-    { id: TITLE_SKELETON, kind: 'movie', name: 'Solaris', year: 1972, score: 0.891 },
-    { id: TITLE_SIMILAR_STALE, kind: 'movie', name: 'The Mirror', year: 1975, score: 0.842 },
-    { id: TITLE_SIMILAR_EMPTY, kind: 'movie', name: 'Andrei Rublev', year: 1966, score: 0.817 },
+/** The stored row: three cards in the order served, no build under way. */
+export const similarRow: SimilarResponse = {
+  cards: [
+    { ...cardSolaris, artwork: IMAGE_POSTER },
+    { ...cardMirror, played: true },
+    {
+      title_id: TITLE_SIMILAR_EMPTY,
+      kind: 'movie',
+      name: 'Andrei Rublev',
+      year: 1966,
+      enrichment_state: 'enriched',
+      owned: true,
+      position_seconds: 0,
+      runtime_seconds: 10_920,
+      played: false,
+      episode_id: null,
+      episode_label: null,
+      artwork: null,
+    },
   ],
-  computed_at: '2026-08-16T04:12:09Z',
-  stale: false,
+  source: 'row',
+  building: false,
 }
 
-/**
- * **Never computed.** `computed_at: null` — dashed hairline, italic sentence,
- * and a mono `meta` naming the field that proves the claim. "We have never
- * computed similar titles for this one."
- *
- * Note `neighbors: []` here means nothing on its own; `computed_at` is the
- * field that distinguishes this from the case below, and that is exactly why
- * `meta` names it.
- */
-export const similarNeverComputed: SimilarResponse = {
-  neighbors: [],
-  computed_at: null,
-  stale: false,
+/** The old list, still shown, while a build for the title is under way. */
+export const similarUpdating: SimilarResponse = {
+  cards: [cardStalker, { ...cardSolaris, artwork: IMAGE_POSTER }],
+  source: 'neighbors',
+  building: true,
 }
 
-/**
- * **Computed and empty.** A `computed_at` with `neighbors: []`: we looked, and
- * nothing scored close enough to show. Solid hairline on `--bg-sunken`,
- * "Computed 3 days ago. Nothing scored close enough to show."
- */
-export const similarComputedEmpty: SimilarResponse = {
-  neighbors: [],
-  computed_at: '2026-08-16T04:12:09Z',
-  stale: false,
-}
+/** No cards yet, and a build under way. */
+export const similarFinding: SimilarResponse = { cards: [], source: 'neighbors', building: true }
 
-/**
- * **Stale.** The list is real and its inputs moved — a title's neighbours go
- * stale when some *other* title gains an embedding, which no per-row predicate
- * can decide, and nothing runs the rebuild automatically. Amber hairline, and
- * the content is **shown**: suppressing it would be a bigger lie than showing
- * it. "Computed before the scoring blend changed. Shown as they were."
- */
-export const similarStale: SimilarResponse = {
-  neighbors: [
-    { id: TITLE_ENRICHED, kind: 'movie', name: 'Stalker', year: 1979, score: 0.903 },
-    { id: TITLE_SKELETON, kind: 'movie', name: 'Solaris', year: 1972, score: 0.864 },
-  ],
-  computed_at: '2026-07-02T11:44:51Z',
-  stale: true,
-}
+/** No cards and no build: nothing similar to show. */
+export const similarEmpty: SimilarResponse = { cards: [], source: 'neighbors', building: false }
 
 /* ------------------------------------------------------ series hierarchy */
 
