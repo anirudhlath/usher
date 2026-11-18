@@ -1131,7 +1131,7 @@ async def llm_client(
     """
     if not settings.llm_enabled:
         if report:
-            logger.warning("no LLM configured; curate jobs will not be claimed")
+            logger.warning("no LLM configured; curate and seed_row jobs will not be claimed")
         return None, nothing
 
     if (

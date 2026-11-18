@@ -776,7 +776,7 @@ def get_similar_shelf_service(
 ) -> SimilarShelfService:
     """The recipe is the worker's own, so both sides agree on what "due" means.
 
-    `None` when no model is configured: the read then queues nothing.
+    `None` when `USHER_LLM_ENABLED` is false: the read then queues nothing.
     """
     return SimilarShelfService(
         ctx=ctx,

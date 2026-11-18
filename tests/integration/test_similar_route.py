@@ -12,7 +12,11 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import Connection, Engine, event, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from tests.fakes.event_publisher import FakeEventPublisher
+from tests.fakes.llm_client import FakeLLMClient, usage
+from tests.fakes.metadata_provider import FakeMetadataProvider
 from usher.api.app import create_app
+from usher.composition import build_pipeline, build_seed_row_service
 from usher.config import Settings
 from usher.db.repositories.image import PostgresImageRepository
 from usher.db.repositories.search import PostgresTitleNeighborRepository
@@ -20,6 +24,7 @@ from usher.db.repositories.seed_row import PostgresSeedRowRepository
 from usher.db.repositories.title import PostgresTitleRepository
 from usher.domain.enums import EnrichmentState, ImageKind, TitleKind
 from usher.domain.image import Image
+from usher.domain.jobs import Job, JobKind
 from usher.domain.seed_rows import (
     MIN_SEED_ROW_CARDS,
     CardSource,
@@ -29,12 +34,15 @@ from usher.domain.seed_rows import (
 )
 from usher.domain.title import Title
 from usher.ports.repository import ScoredNeighbor
+from usher.services.handlers import seed_row_handler
 from usher.services.seed_row_recall import seed_row_recipe
 
 SECRET_KEY = "0123456789abcdef0123456789abcdef"
 # Every title this file writes carries it, so teardown removes exactly what
 # this file created.
 MARK = "Similar Route Case"
+# The model the scripted client reports, so teardown removes its ledger rows.
+LEDGER_MODEL = "similar-route-case/scripted"
 
 
 def _settings(postgres_url: str, *, llm_enabled: bool) -> Settings:
@@ -62,6 +70,9 @@ async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:
                 "(SELECT id::text FROM titles WHERE sort_name LIKE :pattern)"
             ),
             {"pattern": f"{MARK} %"},
+        )
+        await session.execute(
+            text("DELETE FROM llm_calls WHERE model = :model"), {"model": LEDGER_MODEL}
         )
         # `title_neighbors`, `seed_rows` and `images` cascade from `titles`.
         await session.execute(
@@ -283,3 +294,40 @@ async def test_with_a_model_a_due_title_queues_exactly_one_seed_row_job(
     assert jobs[0]["key"] == str(seed.id)
     assert jobs[0]["priority"] == 100
     assert jobs[0]["status"] == "pending"
+
+
+async def test_the_row_the_worker_builds_is_the_row_the_route_stops_building(
+    postgres_url: str, clean: None, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    settings = _settings(postgres_url, llm_enabled=True)
+    seed = await _given_title(sessions, "A Seed The Worker Builds", enriched=True)
+    recalled = [
+        await _given_title(sessions, f"Recalled By The Worker {index}", enriched=True)
+        for index in range(MIN_SEED_ROW_CARDS)
+    ]
+    client = FakeLLMClient.returning(
+        {"films": [{"title": one.name, "year": one.year} for one in recalled]},
+        usages=[usage(model=LEDGER_MODEL)],
+    )
+
+    async with _serving(settings) as served:
+        before = (await served.get(f"/titles/{seed.id}/similar")).json()
+    queued = await _jobs(sessions, seed)
+    assert before["building"] is True, "premise: the route asked for a build"
+    assert [job["kind"] for job in queued] == ["seed_row"]
+
+    events = FakeEventPublisher()
+    async with sessions() as session:
+        pipeline = build_pipeline(session, settings)
+        service = build_seed_row_service(pipeline, settings, client, FakeMetadataProvider())
+        await seed_row_handler(service, events)(Job(kind=JobKind.SEED_ROW, key=str(seed.id)))
+    assert len(client.calls) == 1, "premise: the worker built the row"
+    assert [event.title_id for event in events.published] == [seed.id]
+
+    async with _serving(settings) as served:
+        after = (await served.get(f"/titles/{seed.id}/similar")).json()
+
+    assert after["source"] == "row"
+    assert {card["title_id"] for card in after["cards"]} == {str(one.id) for one in recalled}
+    assert after["building"] is False
+    assert await _jobs(sessions, seed) == queued

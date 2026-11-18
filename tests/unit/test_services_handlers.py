@@ -1357,7 +1357,7 @@ class _RecordingSeedRows(SeedRowService):
 _SEED_TITLE = uuid.UUID("0197a5b0-0000-7000-8000-0000000000aa")
 
 
-def _a_built_row(title_id: uuid.UUID) -> SeedRow:
+def _a_recorded_attempt(title_id: uuid.UUID) -> SeedRow:
     at = datetime(2026, 11, 18, tzinfo=UTC)
     return SeedRow(
         seed_title_id=title_id,
@@ -1368,7 +1368,7 @@ def _a_built_row(title_id: uuid.UUID) -> SeedRow:
 
 
 async def test_the_seed_row_handler_builds_its_key_and_says_the_title_changed() -> None:
-    service = _RecordingSeedRows(returns=_a_built_row(_SEED_TITLE))
+    service = _RecordingSeedRows(returns=_a_recorded_attempt(_SEED_TITLE))
     events = FakeEventPublisher()
 
     await seed_row_handler(service, events)(Job(kind=JobKind.SEED_ROW, key=str(_SEED_TITLE)))

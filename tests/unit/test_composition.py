@@ -857,7 +857,7 @@ async def test_no_llm_configured_degrades_rather_than_raising(
 
     assert built is None
     logged = warnings.getvalue()
-    assert logged.count("curate jobs") == 1, f"reported more than once: {logged}"
+    assert logged.count("curate and seed_row jobs") == 1, f"reported more than once: {logged}"
 
 
 async def test_a_configured_llm_is_built_and_says_nothing(warnings: io.StringIO) -> None:
