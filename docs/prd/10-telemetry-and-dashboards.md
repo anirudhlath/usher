@@ -111,7 +111,7 @@ control that does nothing.
 
 ### Metrics — OpenTelemetry → Prometheus
 
-**Every row is emitted today. 48 rows: 47 instruments Usher declares, plus one
+**Every row is emitted today. 49 rows: 48 instruments Usher declares, plus one
 `FastAPIInstrumentor` supplies.**
 
 | Metric | Type | Labels | Emitted |
@@ -145,6 +145,7 @@ control that does nothing.
 | `usher.source.push.connected` | gauge | source | ✅ M5 |
 | `usher.source.push.reconnects` | counter | source | ✅ M5 |
 | `usher.source.push.events` | counter | source, kind | ✅ M5 |
+| `usher.source.push.crashes` | counter | source | ✅ self-healing |
 | `usher.source.versions.fallbacks` | counter | — | ✅ every version playable |
 | `usher.provider.requests` | counter | provider, status | ✅ M4 |
 | `usher.metadata.request.duration` | histogram | status | ✅ M4 |
@@ -380,11 +381,11 @@ walks: the listing limit and the mean unit duration, by stage** · **listing
 page size, by source** · **retraction checks, by path and outcome** · **version
 fallbacks**.
 
-✅ **Every panel here but version fallbacks is backed by real data as of M9, the
-whole-library walk panel as of the fast first sync's acceptance walk, the
-retraction-checks panel as of confirmed retraction's acceptance, and the
-listing-page-size panel as of adaptive page size's acceptance walk.** ⏳ The
-version-fallbacks panel is unread until every version playable's acceptance.
+✅ **Every panel here is backed by real data as of M9, the whole-library walk
+panel as of the fast first sync's acceptance walk, the retraction-checks panel
+as of confirmed retraction's acceptance, the listing-page-size panel as of
+adaptive page size's acceptance walk, and the version-fallbacks panel as of
+every version playable's acceptance.**
 ⚠️ A panel that drains the whole unmatched queue should page with the keyset
 cursor; the `OFFSET` form is quadratic in queue depth.
 

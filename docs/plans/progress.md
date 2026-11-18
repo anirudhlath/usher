@@ -170,13 +170,13 @@ heading false. `tests/unit/test_docs_currency.py` reads it into the same union.
 ## Every version playable (from docs/specs/2026-10-28-every-version-playable-design.md)
 | Task | What it delivers | Plan file | Status |
 |---|---|---|---|
-| 1 | `version_group_by_id.json`, one version group read by id as each version, and a fake server that reads a group the same way | docs/plans/2026-11-02-every-version-own-file.md | 🔨 in review (PR #113) |
-| 2 | Each copy describes and plays its own file: the media source whose `ItemId` is the item's, with a counted WARNING fallback | docs/plans/2026-11-02-every-version-own-file.md | 🔨 in review (PR #113) |
-| 3 | `confirm_gone` returns a `Confirmation`: the ids gone and the entries served, each its own file | docs/plans/2026-11-02-every-version-own-file.md | 🔨 in review (PR #113) |
-| 4 | The sweep re-describes the hidden versions it keeps, in the commit that completes the run | docs/plans/2026-11-02-every-version-own-file.md | 🔨 in review (PR #113) |
-| 5 | `/play` offers copies in `/ways`' quality order, available copies first | docs/plans/2026-11-02-every-version-own-file.md | 🔨 in review (PR #113) |
-| 6 | Status rows: this plan in review | docs/plans/2026-11-02-every-version-own-file.md | 🔨 in review (PR #113) |
-| 7 | Live acceptance: one full walk, then each sampled copy's stored description, direct target and bytes checked against its own file — owner-gated | docs/plans/2026-11-02-every-version-own-file.md | 📋 planned |
+| 1 | `version_group_by_id.json`, one version group read by id as each version, and a fake server that reads a group the same way | docs/plans/2026-11-02-every-version-own-file.md | ✅ landed (PR #113) |
+| 2 | Each copy describes and plays its own file: the media source whose `ItemId` is the item's, with a counted WARNING fallback | docs/plans/2026-11-02-every-version-own-file.md | ✅ landed (PR #113) |
+| 3 | `confirm_gone` returns a `Confirmation`: the ids gone and the entries served, each its own file | docs/plans/2026-11-02-every-version-own-file.md | ✅ landed (PR #113) |
+| 4 | The sweep re-describes the hidden versions it keeps, in the commit that completes the run | docs/plans/2026-11-02-every-version-own-file.md | ✅ landed (PR #113) |
+| 5 | `/play` offers copies in `/ways`' quality order, available copies first | docs/plans/2026-11-02-every-version-own-file.md | ✅ landed (PR #113) |
+| 6 | Status rows: this plan in review | docs/plans/2026-11-02-every-version-own-file.md | ✅ landed (PR #113) |
+| 7 | Live acceptance: one full walk, then each sampled copy's stored description, direct target and bytes checked against its own file — owner-gated | docs/plans/2026-11-02-every-version-own-file.md | ✅ passed on production (PR #113's comments): 462 of 462 sampled copies describe and play their own file, 40 of 40 ranged reads report the copy's own size, the better copy first in all 210 groups that differ, and no fallback |
 
 **A tenth table, for the ninth's reason.** Every version playable has its own
 spec and is not a milestone, so a row under any heading above would make that
@@ -197,6 +197,20 @@ heading false. `tests/unit/test_docs_currency.py` reads it into the same union.
 | 10 | Live acceptance: the spec's bars on production after the deploy, then the owner's home screen — owner-gated | docs/plans/2026-11-09-because-you-watched-rows.md | 📋 planned |
 
 **An eleventh table, for the ninth's reason.** Because You Watched rows has its own
+spec and is not a milestone, so a row under any heading above would make that
+heading false. `tests/unit/test_docs_currency.py` reads it into the same union.
+
+## Self-healing sync, slice 1 (from docs/specs/2026-11-05-self-healing-sync-design.md)
+| Task | What it delivers | Plan file | Status |
+|---|---|---|---|
+| 1 | A lane keeps trying past the failure ceiling: it marks the source, logs one ERROR, and its wait stays at the maximum | docs/plans/2026-11-07-self-healing-lane.md | ✅ landed, acceptance pending |
+| 2 | `usher set-credentials` stores a source's new password, from the names of two environment variables | docs/plans/2026-11-07-self-healing-lane.md | ✅ landed, acceptance pending |
+| 3 | A rejected login marks the source and waits a day, without ending the lane | docs/plans/2026-11-07-self-healing-lane.md | ✅ landed, acceptance pending |
+| 4 | A crashed lane starts again on a new adapter past the spacing, and `usher.source.push.crashes` counts it | docs/plans/2026-11-07-self-healing-lane.md | ✅ landed, acceptance pending |
+| 5 | Status rows and the PR | docs/plans/2026-11-07-self-healing-lane.md | ✅ landed, acceptance pending |
+| 6 | Live acceptance at the next natural outage: the series reads 0 and returns to 1 with no deploy between — owner-gated | docs/plans/2026-11-07-self-healing-lane.md | 📋 planned |
+
+**A twelfth table, for the eleventh's reason.** Self-healing sync has its own
 spec and is not a milestone, so a row under any heading above would make that
 heading false. `tests/unit/test_docs_currency.py` reads it into the same union.
 

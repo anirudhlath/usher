@@ -2,18 +2,23 @@
 
 import asyncio
 import dataclasses
+import gc
 import inspect
 import io
+import json
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
+import warnings
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from loguru import logger
-from opentelemetry import trace
+from opentelemetry import metrics, trace
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -25,6 +30,7 @@ from tests.fakes.credential_store import FakeCredentialStore
 from tests.fakes.credit_repository import FakeCreditRepository
 from tests.fakes.curated_row_repository import FakeCuratedRowRepository
 from tests.fakes.embedding import FakeEmbedder
+from tests.fakes.emby_harness import gauge_readings
 from tests.fakes.episode_repository import FakeEpisodeRepository
 from tests.fakes.event_publisher import FakeEventPublisher
 from tests.fakes.image_repository import FakeImageRepository
@@ -54,7 +60,7 @@ from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from tests.unit.rows import Library
 from usher.api.lanes import LaneSupervisor
-from usher.composition import Pipeline, SourceRegistry
+from usher.composition import NO_CREDENTIALS, Pipeline, SourceRegistry
 from usher.config import Settings
 from usher.domain.enums import EnrichmentState, SourceKind, TitleKind
 from usher.domain.ids import new_id
@@ -65,6 +71,7 @@ from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus
 from usher.domain.watch import User
 from usher.ports.credentials import SourceCredentials
 from usher.ports.embedding import Embedder
+from usher.ports.errors import PortAuthFailed, PortUnavailable
 from usher.ports.events import EventPublisher
 from usher.ports.jobs import JobQueue, JobRequest
 from usher.ports.llm import LLMClient
@@ -95,6 +102,7 @@ from usher.services.search import SearchService
 from usher.services.similar import SimilarityService
 from usher.services.taste import TasteService
 from usher.services.watch_sync import WatchStateSyncService
+from usher.telemetry import register_push_gauges
 
 _EMBEDDING_MODEL = "fake:test-embedding"
 
@@ -133,6 +141,20 @@ class _CrashingAdapter(FakeSourceAdapter):
         raise ZeroDivisionError("a bug in the lane")
 
 
+class _DownAdapter(FakeSourceAdapter):
+    """A lane whose every connection fails, which is an outage rather than a bug."""
+
+    def events(self) -> AbstractAsyncContextManager[AsyncIterator[SourceEvent]]:
+        raise PortUnavailable("down")
+
+
+class _RejectedAdapter(FakeSourceAdapter):
+    """A lane whose every login is rejected, which waits a day rather than an outage's backoff."""
+
+    def events(self) -> AbstractAsyncContextManager[AsyncIterator[SourceEvent]]:
+        raise PortAuthFailed("rejected")
+
+
 class _SlowAdapter(FakeSourceAdapter):
     """Records the wall-clock window its lane spent resolving a pushed id.
 
@@ -164,14 +186,19 @@ class _Adapters(SourceAdapterFactory):
     def __init__(self) -> None:
         self.built: dict[str, FakeSourceAdapter] = {}
         self.crashing: set[str] = set()
+        self.down: set[str] = set()
+        self.rejecting: set[str] = set()
         self.slow: set[str] = set()
-        # Two spellings of one precondition, kept because each side's cases use its own:
-        # `_start_lane` builds the adapter and hands it straight to
-        # `PushSupervisor.run`, whose first act after connecting is to close the gap, so
-        # seeding off `built[...]` afterwards races the very walk the case is trying to
-        # observe -- and a case that lost the race would assert against a library of
+        # Two spellings of one precondition: `library` seeds items, and `prepare`, which runs
+        # first, does any other set-up. `_start_lane` hands the adapter straight to
+        # `PushSupervisor.run`, which closes the gap as soon as it connects, so seeding off
+        # `built[...]` afterwards races the walk under observation -- and losing that race
+        # reads as a library of zero items, which is exactly what a broken ceiling produces.
         self.prepare: Callable[[FakeSourceAdapter], None] | None = None
         self.library: list[tuple[SourceItem, datetime]] = []
+        # Every source name `build` was asked for, in order. `built` keeps only the latest
+        # adapter per source, so a rebuild is counted here.
+        self.builds: list[str] = []
 
     def crash(self, name: str) -> None:
         self.crashing.add(name)
@@ -182,6 +209,10 @@ class _Adapters(SourceAdapterFactory):
     def build(self, source: Source, credentials: SourceCredentials) -> SourceAdapter:
         if source.name in self.crashing:
             kind: type[FakeSourceAdapter] = _CrashingAdapter
+        elif source.name in self.down:
+            kind = _DownAdapter
+        elif source.name in self.rejecting:
+            kind = _RejectedAdapter
         elif source.name in self.slow:
             kind = _SlowAdapter
         else:
@@ -192,6 +223,7 @@ class _Adapters(SourceAdapterFactory):
         for item, changed_at in self.library:
             adapter.seed(item, changed_at)
         self.built[source.name] = adapter
+        self.builds.append(source.name)
         return adapter
 
 
@@ -512,6 +544,19 @@ def _pipeline(
     )
 
 
+class _Clock:
+    """The supervisor's clock, moved by hand, starting at `1_000.0` so a delta is not a reading."""
+
+    def __init__(self) -> None:
+        self.now = 1_000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
 def _settings(**overrides: object) -> Settings:
     """The one spelling of this file's `Settings`.
 
@@ -536,6 +581,7 @@ def _supervisor(
     refreshes: RefreshQueue | None = None,
     providers: Sequence[RowProvider] = ROW_PROVIDERS,
     provider_settings: RowProviderSettingsRepository | None = None,
+    clock: Callable[[], float] = time.monotonic,
     **overrides: object,
 ) -> LaneSupervisor:
     settings = _settings(**overrides)
@@ -559,11 +605,20 @@ def _supervisor(
         rows=rows,
         refreshes=refreshes,
         idle_seconds=worker_idle_seconds,
+        clock=clock,
     )
 
 
 async def _user_id() -> uuid.UUID:
     return USER_ID
+
+
+@pytest.fixture
+def meter_reader() -> Iterator[InMemoryMetricReader]:
+    """A provider of this test's own; `tests/conftest.py` resets the set-once global."""
+    reader = InMemoryMetricReader()
+    metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
+    yield reader
 
 
 @pytest.fixture
@@ -1089,7 +1144,7 @@ async def test_a_crashed_lane_says_so(fakes: _Fakes) -> None:
     CPython reports at garbage-collection time, to stderr, with no source
     name in it. An operator whose second Emby stopped updating would have
     nothing to search for. This is a log assertion on purpose: the log line
-    is the deliverable.
+    is the deliverable, and it says when the lane is retried.
     """
     await _seed(fakes, _source("A"))
     fakes.adapters.crash("A")
@@ -1102,55 +1157,537 @@ async def test_a_crashed_lane_says_so(fakes: _Fakes) -> None:
     finally:
         logger.remove(sink)
         await supervisor.stop()
-    crash = [line for line in lines if "crashed" in line]
+    crash = [json.loads(line)["record"] for line in lines if "crashed" in line]
     assert crash, lines
-    assert "A" in crash[0]
-    assert "ZeroDivisionError" in crash[0]
+    assert crash[0]["message"] == (
+        "the push lane for A crashed and is retried at the first refresh at least "
+        f"{_settings().push_max_backoff_seconds:.0f} s from now: a bug in the lane"
+    )
+    assert crash[0]["level"]["name"] == "ERROR"
+    assert crash[0]["exception"]["type"] == "ZeroDivisionError"
 
 
-async def test_a_lane_that_reached_the_failure_ceiling_releases_its_adapter_and_is_named_as_stopped(
-    fakes: _Fakes,
+async def test_a_crashed_lane_restarts_on_a_new_adapter_past_the_spacing(
+    fakes: _Fakes, meter_reader: InMemoryMetricReader
 ) -> None:
-    """The adapter leak, and its positive control in the same case."""
+    """A crashed lane comes back on a new adapter at the first refresh one spacing later.
+
+    One second short of it the lane keeps its crashed adapter, so the source is still named
+    and reads 0 rather than vanishing. The refresh standing on the boundary restarts it,
+    closes the old adapter once, counts the crash, and the new lane ingests.
+    """
+    source = _source("A")
+    await _seed(fakes, source)
+    fakes.adapters.crash("A")
+    clock = _Clock()
+    spacing = _settings().push_max_backoff_seconds
+    supervisor = _supervisor(fakes, clock=clock)
+    register_push_gauges(supervisor.push_snapshots)
+    await supervisor.start()
+    try:
+        await _drain(lambda: supervisor.crashed_sources() == ["A"])
+        first = fakes.adapters.built["A"]
+        fakes.adapters.crashing.discard("A")
+
+        clock.advance(spacing - 1)
+        await supervisor.refresh()
+        assert fakes.adapters.built["A"] is first, "restarted inside the spacing"
+        assert first._closes == 0, "the crashed lane's adapter was released inside the spacing"
+        assert supervisor.crashed_sources() == ["A"]
+        assert supervisor.push_available(source.id) is False
+        assert gauge_readings(meter_reader, "usher.source.push.connected") == [
+            (0.0, {"source": "A"})
+        ]
+
+        clock.advance(1)
+        await supervisor.refresh()
+        restarted = fakes.adapters.built["A"]
+        assert restarted is not first, "not restarted on the boundary"
+        assert first._closes == 1
+        assert supervisor.crashed_sources() == []
+        assert supervisor.running_sources() == ["A"]
+        assert gauge_readings(meter_reader, "usher.source.push.crashes") == [(1.0, {"source": "A"})]
+        restarted.seed(_item("a-1"), datetime.now(UTC))
+        restarted.push(SourceEvent(kind=SourceEventKind.ITEM_UPDATED, external_ids=("a-1",)))
+        await _drain(lambda: _stored(fakes.media_items) == ["a-1"])
+    finally:
+        await supervisor.stop()
+
+
+async def test_a_lane_that_crashes_on_every_start_stays_spaced_and_reads_zero(
+    fakes: _Fakes, meter_reader: InMemoryMetricReader
+) -> None:
+    """A lane that crashes again on its new adapter is not rebuilt at every refresh.
+
+    A refresh inside the spacing builds nothing and the one past it builds once. Both
+    crashes are counted, and the source reads 0 throughout, so `Push down` fires for it as
+    for an outage.
+    """
+    await _seed(fakes, _source("A"))
+    fakes.adapters.crash("A")
+    clock = _Clock()
+    spacing = _settings().push_max_backoff_seconds
+    supervisor = _supervisor(fakes, clock=clock)
+    register_push_gauges(supervisor.push_snapshots)
+    await supervisor.start()
+    try:
+        await _drain(lambda: supervisor.crashed_sources() == ["A"])
+        assert fakes.adapters.builds == ["A"]
+
+        clock.advance(spacing - 1)
+        await supervisor.refresh()
+        assert fakes.adapters.builds == ["A"], "a refresh inside the spacing built an adapter"
+
+        clock.advance(1)
+        await supervisor.refresh()
+        assert fakes.adapters.builds == ["A", "A"], "the refresh past the spacing builds once"
+        await _drain(
+            lambda: (
+                gauge_readings(meter_reader, "usher.source.push.crashes")
+                == [(2.0, {"source": "A"})]
+            ),
+            note=lambda: f"{gauge_readings(meter_reader, 'usher.source.push.crashes')}",
+        )
+        assert supervisor.crashed_sources() == ["A"]
+        assert gauge_readings(meter_reader, "usher.source.push.connected") == [
+            (0.0, {"source": "A"})
+        ]
+    finally:
+        await supervisor.stop()
+
+
+async def test_the_second_lane_keeps_ingesting_after_the_first_crashes_and_while_it_restarts(
+    fakes: _Fakes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B ingests after A crashes, and again while A's restart is parked in the old adapter's close.
+
+    The overlap is observed rather than counted: the refresh restarting A has not returned
+    when B's second item lands. A's new lane is already running then, because it is
+    launched before the old adapter is closed.
+    """
     await _seed(fakes, _source("A"))
     await _seed(fakes, _source("B"))
     fakes.adapters.crash("A")
-    supervisor = _supervisor(fakes)
+    clock = _Clock()
+    supervisor = _supervisor(fakes, clock=clock)
     await supervisor.start()
     try:
-        # The premise, asserted before anything else: a lane that never
-        # finished cannot pass this case.
-        await _drain(
-            lambda: supervisor.crashed_sources() == ["A"],
-            note=lambda: (
-                f"crashed={supervisor.crashed_sources()} running={supervisor.running_sources()}"
-            ),
+        await _drain(lambda: supervisor.crashed_sources() == ["A"])
+        survivor = fakes.adapters.built["B"]
+        survivor.seed(_item("b-1"), datetime.now(UTC))
+        survivor.push(SourceEvent(kind=SourceEventKind.ITEM_UPDATED, external_ids=("b-1",)))
+        await _drain(lambda: _stored(fakes.media_items) == ["b-1"])
+
+        first = fakes.adapters.built["A"]
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def parked_close() -> None:
+            entered.set()
+            await release.wait()
+            await FakeSourceAdapter.aclose(first)
+
+        monkeypatch.setattr(first, "aclose", parked_close)
+        fakes.adapters.crashing.discard("A")
+        clock.advance(_settings().push_max_backoff_seconds)
+        refreshing = asyncio.create_task(supervisor.refresh())
+        try:
+            await asyncio.wait_for(entered.wait(), 5.0)
+            survivor.seed(_item("b-2"), datetime.now(UTC))
+            survivor.push(SourceEvent(kind=SourceEventKind.ITEM_UPDATED, external_ids=("b-2",)))
+            await _drain(lambda: _stored(fakes.media_items) == ["b-1", "b-2"])
+            assert not refreshing.done(), "the refresh returned before B's item landed"
+            assert supervisor.running_sources() == ["A", "B"], (
+                "A's new lane is not running while its old adapter closes"
+            )
+        finally:
+            release.set()
+            await asyncio.wait_for(refreshing, 5.0)
+        assert first._closes == 1
+    finally:
+        await supervisor.stop()
+
+
+async def test_a_restart_whose_old_adapter_fails_to_close_leaves_the_new_lane_running(
+    fakes: _Fakes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restart whose crashed adapter fails to close fails the refresh and nothing else.
+
+    The new lane is launched before the old adapter closes, so it is running, the source is
+    not named, and an event pushed at the new adapter lands. The close refuses only once: a
+    regression that left the old adapter open would otherwise have `stop()` raise over the
+    assertion that names it.
+    """
+    source = _source("A")
+    await _seed(fakes, source)
+    fakes.adapters.crash("A")
+    clock = _Clock()
+    supervisor = _supervisor(fakes, clock=clock)
+    await supervisor.start()
+    try:
+        await _drain(lambda: supervisor.crashed_sources() == ["A"])
+        first = fakes.adapters.built["A"]
+        refused: list[str] = []
+
+        async def refusing_close() -> None:
+            if not refused:
+                refused.append(source.name)
+                raise RuntimeError("the crashed adapter's socket would not close")
+            await FakeSourceAdapter.aclose(first)
+
+        monkeypatch.setattr(first, "aclose", refusing_close)
+        fakes.adapters.crashing.discard("A")
+        clock.advance(_settings().push_max_backoff_seconds)
+        with pytest.raises(RuntimeError, match="would not close"):
+            await supervisor.refresh()
+        restarted = fakes.adapters.built["A"]
+        assert restarted is not first, "the premise: the refresh opened a new adapter"
+        assert supervisor.running_sources() == ["A"], (
+            "the new lane is not running after the old adapter failed to close"
         )
-        by_name = {source.name: source for source in await fakes.sources.list_all()}
-        stopped = fakes.adapters.built["A"]
-        live = fakes.adapters.built["B"]
-        assert stopped._closes == 0, "the leak: nothing has released it yet"
+        assert supervisor.crashed_sources() == []
+        restarted.seed(_item("a-1"), datetime.now(UTC))
+        restarted.push(SourceEvent(kind=SourceEventKind.ITEM_UPDATED, external_ids=("a-1",)))
+        await _drain(lambda: _stored(fakes.media_items) == ["a-1"])
+    finally:
+        await supervisor.stop()
+
+
+async def test_a_disabled_sources_crashed_lane_does_not_come_back(fakes: _Fakes) -> None:
+    """Disabling a source drops its crashed lane at the next refresh, crash and adapter both.
+
+    Nothing restarts it past the spacing. The control: enabled again, it gets a lane at the
+    next refresh, as any source with none does.
+    """
+    source = _source("A")
+    await _seed(fakes, source)
+    fakes.adapters.crash("A")
+    clock = _Clock()
+    supervisor = _supervisor(fakes, clock=clock)
+    await supervisor.start()
+    try:
+        await _drain(lambda: supervisor.crashed_sources() == ["A"])
+        first = fakes.adapters.built["A"]
+        fakes.adapters.crashing.discard("A")
+        await fakes.sources.update(source.evolve(enabled=False))
+
+        await supervisor.refresh()
+        assert first._closes == 1
+        assert supervisor.crashed_sources() == []
+        assert supervisor.push_snapshots() == {}
+
+        clock.advance(_settings().push_max_backoff_seconds)
+        await supervisor.refresh()
+        assert fakes.adapters.builds == ["A"], "a disabled source's crashed lane came back"
+        assert supervisor.running_sources() == []
+
+        await fakes.sources.update(source.evolve(enabled=True))
+        await supervisor.refresh()
+        assert fakes.adapters.builds == ["A", "A"]
+        assert supervisor.running_sources() == ["A"]
+    finally:
+        await supervisor.stop()
+
+
+async def test_a_restart_with_no_stored_credentials_keeps_the_old_adapter_and_is_spaced_again(
+    fakes: _Fakes, meter_reader: InMemoryMetricReader
+) -> None:
+    """A restart that finds no credential row keeps the crashed lane and waits another spacing.
+
+    The source stays named and reads 0 on its old adapter, and one WARNING says why. A
+    refresh one second inside the new spacing adds none; the one on its boundary, with the
+    row back, restarts the lane.
+    """
+    source = _source("A")
+    await _seed(fakes, source)
+    fakes.adapters.crash("A")
+    clock = _Clock()
+    spacing = _settings().push_max_backoff_seconds
+    supervisor = _supervisor(fakes, clock=clock)
+    register_push_gauges(supervisor.push_snapshots)
+    lines: list[str] = []
+    sink = logger.add(lines.append, level="WARNING", format="{level.name}|{message}")
+    try:
+        await supervisor.start()
+        await _drain(lambda: supervisor.crashed_sources() == ["A"])
+        first = fakes.adapters.built["A"]
+        fakes.adapters.crashing.discard("A")
+        await fakes.credentials.delete(source.credentials_ref)
+
+        clock.advance(spacing)
+        await supervisor.refresh()
+        assert fakes.adapters.built["A"] is first
+        assert first._closes == 0
+        assert supervisor.crashed_sources() == ["A"]
+        assert gauge_readings(meter_reader, "usher.source.push.connected") == [
+            (0.0, {"source": "A"})
+        ]
+        missing = [f"WARNING|A: {NO_CREDENTIALS}\n"]
+        assert [line for line in lines if NO_CREDENTIALS in line] == missing
+
+        clock.advance(spacing - 1)
+        await supervisor.refresh()
+        assert [line for line in lines if NO_CREDENTIALS in line] == missing, (
+            "a refresh inside the new spacing tried the missing row again"
+        )
+
+        await fakes.credentials.put(source.credentials_ref, CREDENTIALS, owner_id=source.id)
+        clock.advance(1)
+        await supervisor.refresh()
+        restarted = fakes.adapters.built["A"]
+        assert restarted is not first
+        assert first._closes == 1
+        assert supervisor.crashed_sources() == []
+        assert supervisor.running_sources() == ["A"]
+    finally:
+        logger.remove(sink)
+        await supervisor.stop()
+
+
+async def test_a_restart_whose_credential_read_raises_is_spaced_again(
+    fakes: _Fakes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A credential read that raises fails one refresh, and the next inside the spacing skips it.
+
+    So the refreshes after it are not each lost to the same raise: a source added meanwhile
+    gets its lane, and its own read is the premise that the refresh read credentials at all.
+    A's row raises on its first read only, so a read inside the spacing is recorded, and the
+    assertion that names it reports it rather than the raise.
+    """
+    crashed, added = _source("A"), _source("B")
+    await _seed(fakes, crashed)
+    fakes.adapters.crash("A")
+    clock = _Clock()
+    spacing = _settings().push_max_backoff_seconds
+    supervisor = _supervisor(fakes, clock=clock)
+    await supervisor.start()
+    try:
+        await _drain(lambda: supervisor.crashed_sources() == ["A"])
+        fakes.adapters.crashing.discard("A")
+        asked: list[str] = []
+        stored = fakes.credentials.get
+
+        async def unreadable(ref: str) -> SourceCredentials | None:
+            asked.append(ref)
+            if ref == crashed.credentials_ref and asked.count(ref) == 1:
+                raise RuntimeError("A's credential row cannot be decrypted")
+            return await stored(ref)
+
+        monkeypatch.setattr(fakes.credentials, "get", unreadable)
+        clock.advance(spacing)
+        with pytest.raises(RuntimeError, match="cannot be decrypted"):
+            await supervisor.refresh()
+        assert asked == [crashed.credentials_ref]
+
+        await _seed(fakes, added)
+        clock.advance(spacing - 1)
+        await supervisor.refresh()
+        assert added.credentials_ref in asked, (
+            "the premise: the refresh inside the spacing read credentials at all"
+        )
+        assert asked == [crashed.credentials_ref, added.credentials_ref], (
+            "a refresh inside the spacing read the crashed lane's row again"
+        )
+        assert supervisor.running_sources() == ["B"]
+    finally:
+        await supervisor.stop()
+
+
+async def test_a_lane_whose_availability_write_fails_crashes_and_comes_back(
+    fakes: _Fakes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A database write that fails escapes the lane as a crash, and the lane comes back.
+
+    Seeded `supports_push=True`, since the writer no-ops on an equal value, so the ceiling's
+    write reaches `update`. The restarted lane meets the same outage and makes the same
+    write, which lands this time, and it is running and not named.
+    """
+    source = _source("A").evolve(supports_push=True)
+    await _seed(fakes, source)
+    fakes.adapters.down.add("A")
+
+    async def unwritable(changed: Source) -> None:
+        raise RuntimeError("the database refused the write")
+
+    monkeypatch.setattr(fakes.sources, "update", unwritable)
+    clock = _Clock()
+    supervisor = _supervisor(fakes, clock=clock, push_max_consecutive_failures=1)
+    await supervisor.start()
+    try:
+        await _drain(lambda: supervisor.crashed_sources() == ["A"])
+        assert fakes.sources._sources[source.id].supports_push is True, (
+            "the premise: the ceiling's write did not land"
+        )
+        monkeypatch.undo()
+
+        clock.advance(_settings().push_max_backoff_seconds)
+        await supervisor.refresh()
+        await _drain(lambda: fakes.sources._sources[source.id].supports_push is False)
+        assert supervisor.running_sources() == ["A"]
+        assert supervisor.crashed_sources() == []
+    finally:
+        await asyncio.wait_for(supervisor.stop(), 5.0)
+
+
+async def test_stopping_after_a_crash_closes_the_adapter_and_forgets_it(fakes: _Fakes) -> None:
+    """`stop()` closes a crashed lane's adapter once, and names no crash afterwards."""
+    await _seed(fakes, _source("A"))
+    fakes.adapters.crash("A")
+    supervisor = _supervisor(fakes, clock=_Clock())
+    await supervisor.start()
+    await _drain(lambda: supervisor.crashed_sources() == ["A"])
+    first = fakes.adapters.built["A"]
+    assert first._closes == 0, "the premise: the crashed lane still holds its adapter"
+
+    await supervisor.stop()
+
+    assert first._closes == 1
+    assert supervisor.crashed_sources() == []
+
+
+async def test_a_lane_cancelled_before_its_first_step_leaves_no_coroutine_unawaited(
+    fakes: _Fakes,
+) -> None:
+    """A lane cancelled before its first step leaves no coroutine unawaited.
+
+    A `stop()` straight after the refresh that launched it is one: the refresh returns
+    before the loop has run the lane. A coroutine built for the lane outside its task is
+    dropped unawaited then, and CPython warns about it at garbage collection.
+    """
+    await _seed(fakes, _source("A"))
+    supervisor = _supervisor(fakes)
+    launched: list[str] = []
+    # Collected before the block as well, so what it records is only what this case leaves.
+    gc.collect()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            await supervisor.refresh()
+            launched = supervisor.running_sources()
+        finally:
+            await supervisor.stop()
+        # A turn of the loop inside the block: the handle that resumed this task still
+        # holds `stop()`'s gather, and through it the cancelled lane, so whatever the lane
+        # left is freed, and warned about, only once this task suspends.
+        await asyncio.sleep(0)
+        gc.collect()
+    assert launched == ["A"], "the premise: the refresh launched a lane"
+    assert fakes.adapters.built["A"]._push_opened_at is None, (
+        "the premise: the lane was stopped before its first step"
+    )
+    unawaited = [
+        str(warning.message)
+        for warning in caught
+        if issubclass(warning.category, RuntimeWarning)
+        and "was never awaited" in str(warning.message)
+    ]
+    assert unawaited == []
+
+
+async def test_a_source_with_no_push_channel_releases_its_adapter_and_is_not_restarted(
+    fakes: _Fakes,
+) -> None:
+    """A lane that ended because its source has no push channel did not crash.
+
+    Its adapter is released at the next refresh, at most once, and nothing restarts it
+    past any spacing. The lane beside it is the control: the same calls leave it alone.
+    """
+    ended, live = _source("A"), _source("B")
+    await _seed(fakes, ended)
+    await _seed(fakes, live)
+
+    def no_channel_on_a(adapter: FakeSourceAdapter) -> None:
+        if adapter.source_id == ended.id:
+            adapter.disable_push()
+
+    fakes.adapters.prepare = no_channel_on_a
+    clock = _Clock()
+    supervisor = _supervisor(fakes, clock=clock)
+    await supervisor.start()
+    try:
+        await _drain(
+            lambda: supervisor.running_sources() == ["B"],
+            note=lambda: f"running={supervisor.running_sources()}",
+        )
+        released, kept = fakes.adapters.built["A"], fakes.adapters.built["B"]
+        assert released._closes == 0, "the premise: nothing has released it yet"
         assert set(supervisor.push_snapshots()) == {"A", "B"}
 
         await supervisor.refresh()
-
-        assert stopped._closes == 1
-        assert set(supervisor.push_snapshots()) == {"B"}, "the dead lane stops publishing"
-        assert supervisor.push_available(by_name["A"].id) is None, "not probed, not broken"
-        assert supervisor.crashed_sources() == ["A"], "F2 still has a state to report"
-        assert supervisor.running_sources() == ["B"], "and the lane is not restarted"
-
-        # The control: the live lane is untouched by the same call.
-        assert live._closes == 0
-        assert supervisor.push_available(by_name["B"].id) is not None
-
-        # And a second tick does not close it again -- the `pop` is what makes
-        # the release at-most-once, and a timer-driven refresh is what would
-        # otherwise call `aclose` forever.
+        assert released._closes == 1
+        clock.advance(_settings().push_max_backoff_seconds)
         await supervisor.refresh()
-        assert stopped._closes == 1
+        assert released._closes == 1, "released again on a later refresh"
+
+        assert fakes.adapters.builds == ["A", "B"], "a lane with no push channel was restarted"
+        assert set(supervisor.push_snapshots()) == {"B"}
+        assert supervisor.push_available(ended.id) is None, "not probed, not broken"
+        assert supervisor.crashed_sources() == []
+        assert supervisor.running_sources() == ["B"]
+        assert fakes.adapters.built["B"] is kept
+        assert kept._closes == 0
     finally:
         await supervisor.stop()
+
+
+async def test_a_lane_past_the_ceiling_keeps_its_adapter_and_reads_zero(
+    fakes: _Fakes, meter_reader: InMemoryMetricReader
+) -> None:
+    """Past the ceiling the lane goes on trying, so the series reads 0 rather than vanishing.
+
+    Seeded `supports_push=True`: the writer no-ops on an equal value, so the false the case
+    waits for is this lane's own write. The drain stands on that write and the refresh runs
+    while the lane sits in its backoff, which is where it spends an outage.
+    """
+    source = _source("A").evolve(supports_push=True)
+    await _seed(fakes, source)
+    fakes.adapters.down.add("A")
+    supervisor = _supervisor(fakes, push_max_consecutive_failures=1)
+    register_push_gauges(supervisor.push_snapshots)
+    await supervisor.start()
+    try:
+        await _drain(lambda: fakes.sources._sources[source.id].supports_push is False)
+
+        await supervisor.refresh()
+
+        assert supervisor.running_sources() == ["A"]
+        assert supervisor.crashed_sources() == []
+        assert fakes.adapters.built["A"]._closes == 0
+        assert supervisor.push_available(source.id) is False
+        assert gauge_readings(meter_reader, "usher.source.push.connected") == [
+            (0.0, {"source": "A"})
+        ]
+    finally:
+        await asyncio.wait_for(supervisor.stop(), 5.0)
+
+
+async def test_a_rejected_login_parks_its_lane_reads_zero_and_stops_at_once(
+    fakes: _Fakes, meter_reader: InMemoryMetricReader
+) -> None:
+    """A rejected login parks the lane for a day: still running, reading 0, and cancellable.
+
+    Seeded `supports_push=True`, so the false the drain waits for is this lane's write. At
+    the default ceiling an ordinary failure writes nothing inside the drain's bound, so the
+    write is the rejection's. The real sleep then holds the lane until `stop()` cancels it.
+    """
+    source = _source("A").evolve(supports_push=True)
+    await _seed(fakes, source)
+    fakes.adapters.rejecting.add("A")
+    supervisor = _supervisor(fakes)
+    register_push_gauges(supervisor.push_snapshots)
+    await supervisor.start()
+    try:
+        await _drain(lambda: fakes.sources._sources[source.id].supports_push is False)
+
+        assert supervisor.running_sources() == ["A"]
+        assert supervisor.crashed_sources() == []
+        assert gauge_readings(meter_reader, "usher.source.push.connected") == [
+            (0.0, {"source": "A"})
+        ]
+        stored = await fakes.sources.get(source.id)
+        assert stored is not None
+        assert stored.supports_push is False
+    finally:
+        await asyncio.wait_for(supervisor.stop(), 5.0)
 
 
 async def test_push_snapshots_report_the_adapters_own_ledger(fakes: _Fakes) -> None:

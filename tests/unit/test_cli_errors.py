@@ -83,6 +83,15 @@ _MINIMAL_ARGV: dict[str, list[str]] = {
     # than a key -- so this row, unlike every other one here, would be a place a secret
     # could be written down if the surface had been designed the other way.
     "rotate-secret": ["rotate-secret", "--new-key-env", "USHER_NEW_SECRET_KEY"],
+    "set-credentials": [
+        "set-credentials",
+        "--source",
+        "A",
+        "--username-env",
+        "U",
+        "--password-env",
+        "P",
+    ],
 }
 
 
