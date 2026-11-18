@@ -43,7 +43,7 @@ _MAX_OVERLAP = 0.5
 # deletion race.
 _MIN_NEIGHBOURS = 2
 
-_MAX_CARDS = 20
+FALLBACK_CARDS = 20
 
 # PRD 06's `SimilarityRow` family: "hours". Both artefacts it reads, `seed_rows`
 # and `title_neighbors`, move only when a job runs, so a shorter TTL would
@@ -203,7 +203,7 @@ class BecauseYouWatchedProvider(RowProvider):
                     neighbours_built = await self._neighbours_were_built(ctx)
                 if not neighbours_built:
                     continue
-                neighbours = await ctx.neighbors.list_for(entry.title_id, limit=_MAX_CARDS)
+                neighbours = await ctx.neighbors.list_for(entry.title_id, limit=FALLBACK_CARDS)
                 card_ids = [one.neighbor_title_id for one in neighbours]
             if len(card_ids) < _MIN_NEIGHBOURS:
                 continue
@@ -269,6 +269,7 @@ class BecauseYouWatchedProvider(RowProvider):
 
 __all__ = [
     "BECAUSE_YOU_WATCHED_SCORE_CEILING",
+    "FALLBACK_CARDS",
     "SEED_WINDOW",
     "BecauseYouWatchedProvider",
     "BecauseYouWatchedRow",

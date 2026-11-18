@@ -113,6 +113,7 @@ class Library:
         added: datetime | None = None,
         seen: datetime | None = None,
         runtime_minutes: int | None = 120,
+        enrichment_state: EnrichmentState | None = None,
     ) -> uuid.UUID:
         title = Title(
             id=new_id(),
@@ -127,7 +128,9 @@ class Library:
             tmdb_popularity=popularity,
             tmdb_vote_count=vote_count,
             runtime_minutes=runtime_minutes,
-            enrichment_state=EnrichmentState.ENRICHED,
+            enrichment_state=(
+                EnrichmentState.ENRICHED if enrichment_state is None else enrichment_state
+            ),
         )
         await self.titles.add(title)
         # `FakeCollectionRepository` models `titles.kind` and the catalog's own order

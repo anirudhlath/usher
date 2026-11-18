@@ -97,4 +97,26 @@ class BuiltRow(DomainModel):
     cards: tuple[RowCard, ...] = ()
 
 
-__all__ = ["BuiltRow", "DisplayHint", "RowCard", "RowFamily"]
+class SimilarSource(StrEnum):
+    """Where a title page's similar cards came from."""
+
+    ROW = "row"
+    NEIGHBORS = "neighbors"
+
+
+class SimilarShelf(DomainModel):
+    """A title's similar cards, and whether a better row is being built."""
+
+    cards: tuple[RowCard, ...] = ()
+    source: SimilarSource
+    building: bool
+
+
+__all__ = [
+    "BuiltRow",
+    "DisplayHint",
+    "RowCard",
+    "RowFamily",
+    "SimilarShelf",
+    "SimilarSource",
+]
