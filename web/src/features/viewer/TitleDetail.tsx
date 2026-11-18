@@ -363,7 +363,11 @@ export default function TitleDetail() {
           />
         </div>
 
-        <SimilarSection query={similar} onOpenTitle={(id) => navigate(titlePath(id))} />
+        <SimilarSection
+          query={similar}
+          waiting={similar.waiting}
+          onOpenTitle={(id) => navigate(titlePath(id))}
+        />
 
         <ImagesSection images={imagesOf(record)} name={record.name} />
 
@@ -505,15 +509,18 @@ function CreditColumn({ heading, field, credits, secondary, onOpenPerson }: Cred
  * is one, else the title's neighbours, in the order served. They are rendered as
  * the home screen renders them, with the same poster, watched mark and
  * not-owned badge. No cards is one state: nothing similar to show, with `meta`
- * naming the field. `building` is not rendered here yet.
+ * naming the field. While `waiting`, a list shows an `updating` badge and no list says it is
+ * finding some; after the wait both go quiet.
  *
  * There are **no similarity reasons in this API**, so nothing here invents one.
  */
 function SimilarSection({
   query,
+  waiting,
   onOpenTitle,
 }: {
   query: { isPending: boolean; isError: boolean; data: SimilarResponse | undefined }
+  waiting: boolean
   onOpenTitle: (titleId: string) => void
 }) {
   if (query.isPending) {
@@ -546,12 +553,23 @@ function SimilarSection({
         <h2 className="u-title__h2" id="title-similar">
           Similar titles
         </h2>
+        {waiting && cards.length > 0 ? (
+          <Badge tone="neutral" icon={<Icon name="history" />}>
+            updating
+          </Badge>
+        ) : null}
       </div>
 
       {cards.length === 0 ? (
-        <StateBlock kind="empty" meta="cards: []">
-          Nothing similar to show.
-        </StateBlock>
+        waiting ? (
+          <StateBlock kind="never" meta="building: true">
+            Finding similar titles for this one.
+          </StateBlock>
+        ) : (
+          <StateBlock kind="empty" meta="cards: []">
+            Nothing similar to show.
+          </StateBlock>
+        )
       ) : (
         <div className="u-title__rail">
           {cards.map((card) => (

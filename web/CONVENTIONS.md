@@ -154,6 +154,10 @@ with the reason, and `web/docs/` stays a verbatim copy.
   never-computed or stale state.** The route now answers home cards, so the
   title page draws the same `PosterCard` as Home. Its list is the stored row or
   the old list and the API reports neither age, so there is nothing to mark.
+- **Similar titles wait for a build, for at most a minute.** While the API says a
+  build is under way the section re-reads every 5 seconds for at most 60
+  seconds, so the swap never depends on an event; the window is bounded and the
+  marker goes with it (`SIMILAR_WAIT_MS` in `api/hooks.ts`).
 
 ## Commands
 

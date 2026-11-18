@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { http, HttpResponse } from 'msw'
 import { Route, Routes } from 'react-router-dom'
-import { renderApp, screen, waitFor, within } from '@/test/render'
+import { act, renderApp, screen, waitFor, within } from '@/test/render'
 import { expectNoViolations } from '@/test/axe'
 import { server } from '@/test/server'
 import { installFakeEventSource } from '@/test/sse'
@@ -11,11 +11,13 @@ import {
   TITLE_MISSING,
   TITLE_NOT_PLAYABLE,
   TITLE_SIMILAR_EMPTY,
+  TITLE_SIMILAR_FINDING,
+  TITLE_SIMILAR_UPDATING,
   TITLE_SKELETON,
 } from '@/test/fixtures/ids'
 import { titleCreditsEmpty, titleSkeletonEnriched } from '@/test/fixtures/viewer-screens'
 import type { TitleResponse } from '@/api'
-import { titleEnriched, titleSkeleton } from '@/test/fixtures/titles'
+import { similarRow, similarUpdating, titleEnriched, titleSkeleton } from '@/test/fixtures/titles'
 import { PLAYBACK_TICKET, TRACE_ID } from '@/test/fixtures/ids'
 import { notFound, notPlayable, problemHandler } from '@/test/fixtures'
 import { TEMPO_URL, deadLinks, traceLinks, withTempo } from '@/test/trace'
@@ -91,6 +93,13 @@ function expectNoTicketAnywhere(container: HTMLElement) {
       for (const secret of SECRETS) expect(value).not.toContain(secret)
     }
   }
+}
+
+/** Advances the fake clock inside act, so the state a timer sets is flushed. */
+async function advance(ms: number) {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(ms)
+  })
 }
 
 describe('TitleDetail', () => {
@@ -354,6 +363,110 @@ describe('TitleDetail', () => {
       renderTitle(TITLE_SIMILAR_EMPTY)
       expect(await screen.findByText('Nothing similar to show.')).toBeInTheDocument()
       expect(screen.getByText('cards: []')).toBeInTheDocument()
+    })
+
+    describe('waiting for a build', () => {
+      afterEach(() => {
+        vi.useRealTimers()
+      })
+
+      function fakeTimers() {
+        vi.useFakeTimers({
+          toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'],
+          shouldAdvanceTime: true,
+        })
+      }
+
+      it('shows the old list with an updating marker while a build is waited on', async () => {
+        serveTitle(titleEnriched)
+        renderTitle(TITLE_SIMILAR_UPDATING)
+        const similar = await screen.findByRole('region', { name: 'Similar titles' })
+        expect(await within(similar).findByRole('button', { name: /Solaris, 1972/ })).toBeInTheDocument()
+        expect(within(similar).getByText('updating')).toBeInTheDocument()
+      })
+
+      it('says it is finding similar titles when there are none yet', async () => {
+        serveTitle(titleEnriched)
+        renderTitle(TITLE_SIMILAR_FINDING)
+        expect(await screen.findByText('Finding similar titles for this one.')).toBeInTheDocument()
+        expect(screen.getByText('building: true')).toBeInTheDocument()
+        expect(screen.queryByText('Nothing similar to show.')).not.toBeInTheDocument()
+      })
+
+      it('swaps to the built row on a re-read when no event ever arrives', async () => {
+        fakeTimers()
+        let reads = 0
+        server.use(
+          http.get('/titles/:title_id/similar', () => {
+            reads += 1
+            return HttpResponse.json(reads === 1 ? similarUpdating : similarRow)
+          }),
+        )
+        useFakeEventSource()
+        renderTitle(TITLE_ENRICHED)
+        const similar = await screen.findByRole('region', { name: 'Similar titles' })
+        expect(await within(similar).findByText('updating')).toBeInTheDocument()
+        await advance(5_000)
+        expect(
+          await within(similar).findByRole('button', { name: /Andrei Rublev, 1966/ }),
+        ).toBeInTheDocument()
+        expect(within(similar).queryByText('updating')).not.toBeInTheDocument()
+      })
+
+      it('swaps on title.updated without waiting for the re-read', async () => {
+        fakeTimers()
+        let reads = 0
+        server.use(
+          http.get('/titles/:title_id/similar', () => {
+            reads += 1
+            return HttpResponse.json(reads === 1 ? similarUpdating : similarRow)
+          }),
+        )
+        const stream = useFakeEventSource()
+        renderTitle(TITLE_ENRICHED)
+        const similar = await screen.findByRole('region', { name: 'Similar titles' })
+        expect(await within(similar).findByText('updating')).toBeInTheDocument()
+        await advance(1_000)
+        stream.latest().open()
+        stream.latest().emit('title.updated', {
+          title_id: TITLE_ENRICHED,
+          episode_id: null,
+          fields: ['similar'],
+        })
+        expect(
+          await within(similar).findByRole('button', { name: /Andrei Rublev, 1966/ }),
+        ).toBeInTheDocument()
+        expect(reads).toBe(2)
+      })
+
+      it('drops the marker at 60 seconds and keeps the list', async () => {
+        fakeTimers()
+        serveTitle(titleEnriched)
+        renderTitle(TITLE_SIMILAR_UPDATING)
+        const similar = await screen.findByRole('region', { name: 'Similar titles' })
+        expect(await within(similar).findByText('updating')).toBeInTheDocument()
+        await advance(60_000)
+        expect(within(similar).queryByText('updating')).not.toBeInTheDocument()
+        expect(within(similar).getByRole('button', { name: /Solaris, 1972/ })).toBeInTheDocument()
+      })
+
+      it('says nothing similar once 60 seconds pass with no cards', async () => {
+        fakeTimers()
+        serveTitle(titleEnriched)
+        renderTitle(TITLE_SIMILAR_FINDING)
+        expect(await screen.findByText('Finding similar titles for this one.')).toBeInTheDocument()
+        await advance(60_000)
+        expect(screen.getByText('Nothing similar to show.')).toBeInTheDocument()
+        expect(screen.queryByText('Finding similar titles for this one.')).not.toBeInTheDocument()
+      })
+
+      it('has no axe violations while updating', async () => {
+        serveTitle(titleEnriched)
+        const { container } = renderTitle(TITLE_SIMILAR_UPDATING)
+        const similar = await screen.findByRole('region', { name: 'Similar titles' })
+        await within(similar).findByText('updating')
+        await expectNoViolations(container)
+      })
     })
 
     it('offers no similarity reason, because the API has none', async () => {
