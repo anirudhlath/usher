@@ -78,7 +78,7 @@ def test_an_empty_key_is_rejected() -> None:
         Job(kind=JobKind.MATCH, key="")
 
 
-def test_the_nine_kinds_this_tree_ships() -> None:
+def test_the_ten_kinds_this_tree_ships() -> None:
     """Each kind arrives with the artefacts it maintains, not before."""
     assert set(JobKind) == {
         JobKind.MATCH,
@@ -90,6 +90,7 @@ def test_the_nine_kinds_this_tree_ships() -> None:
         JobKind.WATCH_WRITEBACK,
         JobKind.SYNC,
         JobKind.BOOTSTRAP,
+        JobKind.SEED_ROW,
     }
 
 
@@ -115,6 +116,7 @@ def test_every_member_of_every_enum_is_its_stored_value() -> None:
         "watch_writeback",
         "sync",
         "bootstrap",
+        "seed_row",
     }
     assert {s.value for s in JobStatus} == {"pending", "running", "parked"}
 

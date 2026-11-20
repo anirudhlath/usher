@@ -29,12 +29,12 @@ export const TITLE_SERIES = '0191f4c3-0c25-7e53-92d7-6f8c3a1b5d72'
 export const TITLE_MISSING = '0191f4c3-1d36-7f64-83e6-7a9d4b2c6e83'
 /** Owned by nobody: `POST /play` answers `not_playable` for this one. */
 export const TITLE_NOT_PLAYABLE = '0191f4c3-2e47-7075-74f5-8b0e5c3d7f94'
-/** Similar titles were computed and nothing scored close enough. */
+/** Similar titles: no cards and no build under way. */
 export const TITLE_SIMILAR_EMPTY = '0191f4c3-3f58-7186-a5e4-9c1f6d4e80a5'
-/** Similar titles have never been computed: `computed_at: null`. */
-export const TITLE_SIMILAR_NEVER = '0191f4c3-4069-7297-b6d3-0d2a7e5f91b6'
-/** Similar titles are real and their inputs moved: `stale: true`. */
-export const TITLE_SIMILAR_STALE = '0191f4c3-517a-73a8-87c2-1e3b8f6a02c7'
+/** Similar titles: no cards yet and a build under way. */
+export const TITLE_SIMILAR_FINDING = '0191f4c3-4069-7297-b6d3-0d2a7e5f91b6'
+/** Similar titles: the old list is shown and a build is under way. */
+export const TITLE_SIMILAR_UPDATING = '0191f4c3-517a-73a8-87c2-1e3b8f6a02c7'
 
 /* ---------------------------------------------------------------- episodes */
 

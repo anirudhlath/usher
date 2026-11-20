@@ -21,6 +21,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from tests.contract.job_queue_contract import ClaimWindow, overlapping
 from tests.fakes.job_queue import FakeJobQueue
 from usher.domain.jobs import Job, JobKind, JobPriority, JobStatus
+from usher.domain.seed_rows import SeedRow
 from usher.ports.errors import PortDataMalformed, PortRateLimited, PortUnavailable, UsherPortError
 from usher.ports.events import (
     ClientEvent,
@@ -30,6 +31,7 @@ from usher.ports.events import (
 )
 from usher.ports.jobs import JobRequest
 from usher.services.events import DeferredEventPublisher
+from usher.services.handlers import seed_row_handler
 from usher.services.jobs import (
     DEFAULT_LEASE_SECONDS,
     JobDeferred,
@@ -37,6 +39,7 @@ from usher.services.jobs import (
     JobWorker,
     _links_for,
 )
+from usher.services.seed_rows import SeedRowService
 from usher.telemetry import current_traceparent
 
 
@@ -1251,3 +1254,70 @@ async def test_a_job_waiting_at_its_kinds_ceiling_is_heartbeated_too() -> None:
         "the job queued behind the ceiling was not heartbeated, so its claim ages out "
         f"of the lease while a worker still intends to run it: {held}"
     )
+
+
+def _seed_row_worker(
+    handler: Callable[[Job], Awaitable[None]], *, max_attempts: int = 5
+) -> tuple[JobWorker, FakeJobQueue]:
+    queue = FakeJobQueue(max_attempts=max_attempts, backoff_seconds=1.0)
+
+    async def _commit() -> None:
+        return None
+
+    @asynccontextmanager
+    async def _scope() -> AsyncIterator[JobScope]:
+        yield JobScope(
+            queue=queue,
+            commit=_commit,
+            handlers={JobKind.SEED_ROW: handler},
+            events=DeferredEventPublisher(NullEventPublisher()),
+        )
+
+    return JobWorker(_scope, {JobKind.SEED_ROW: 1}, max_in_flight=1), queue
+
+
+class _DownSeedRows(SeedRowService):
+    def __init__(self) -> None:
+        pass
+
+    async def build_if_due(self, title_id: uuid.UUID) -> SeedRow | None:
+        raise PortUnavailable("the model is down")
+
+
+async def _enqueue_seed_row(queue: FakeJobQueue) -> None:
+    await queue.enqueue(
+        [JobRequest(kind=JobKind.SEED_ROW, key=str(uuid.uuid4()), priority=JobPriority.NEW)]
+    )
+
+
+async def test_an_outage_never_parks_a_seed_row_job() -> None:
+    handler = seed_row_handler(_DownSeedRows(), NullEventPublisher())
+    worker, queue = _seed_row_worker(handler)
+    await _enqueue_seed_row(queue)
+    began = datetime.now(UTC)
+
+    for _ in range(6):  # one more pass than max_attempts
+        assert await worker.run_once() == 1
+        (job,) = queue.jobs_of(JobKind.SEED_ROW)
+        assert job.run_after is not None
+        assert job.run_after - began >= timedelta(seconds=300)
+        await queue.clear_backoff()
+
+    (job,) = queue.jobs_of(JobKind.SEED_ROW)
+    assert job.status is JobStatus.PENDING
+    assert job.attempts == 0
+    assert await queue.parked() == []
+
+
+async def test_the_same_six_passes_park_a_job_whose_handler_fails_outright() -> None:
+    async def fails(job: Job) -> None:
+        raise PortUnavailable("the model is down")
+
+    worker, queue = _seed_row_worker(fails)
+    await _enqueue_seed_row(queue)
+
+    for _ in range(6):
+        await worker.run_once()
+        await queue.clear_backoff()
+
+    assert len(await queue.parked()) == 1

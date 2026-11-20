@@ -118,6 +118,7 @@ from usher.services.handlers import (
     enrich_handler,
     index_handler,
     match_handler,
+    seed_row_handler,
     sync_handler,
     watch_history_handler,
     watch_writeback_handler,
@@ -668,7 +669,7 @@ def worker_kinds(
     if embedder is not None:
         kinds.add(JobKind.INDEX)
     if client is not None:
-        kinds.add(JobKind.CURATE)
+        kinds |= {JobKind.CURATE, JobKind.SEED_ROW}
     return frozenset(kinds)
 
 
@@ -966,7 +967,28 @@ def _worker_handlers(
         handlers[JobKind.CURATE] = curate_handler(
             build_curation_service(pipeline, settings, client)
         )
+        handlers[JobKind.SEED_ROW] = seed_row_handler(
+            build_seed_row_service(pipeline, settings, client, provider), events
+        )
     return handlers
+
+
+def build_seed_row_service(
+    pipeline: Pipeline, settings: Settings, client: LLMClient, provider: MetadataProvider | None
+) -> SeedRowService:
+    """One session's repositories plus the completion client, as `seed_row_service` builds it."""
+    return SeedRowService(
+        titles=pipeline.titles,
+        embeddings=pipeline.embeddings,
+        watch_states=pipeline.watch_states,
+        rows=pipeline.seed_rows,
+        calls=pipeline.llm_calls,
+        client=client,
+        metadata=provider,
+        commit=pipeline.commit,
+        model=settings.llm_model,
+        now=lambda: datetime.now(UTC),
+    )
 
 
 def build_derive_service(pipeline: Pipeline, provider: MetadataProvider) -> DeriveService:
@@ -1109,7 +1131,7 @@ async def llm_client(
     """
     if not settings.llm_enabled:
         if report:
-            logger.warning("no LLM configured; curate jobs will not be claimed")
+            logger.warning("no LLM configured; curate and seed_row jobs will not be claimed")
         return None, nothing
 
     if (

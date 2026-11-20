@@ -223,8 +223,15 @@ genres and themes to Dune" instead.
 
 The scheduler's `seed_rows.build` job ([08](08-operations.md)) builds the
 stored rows off the request path, one seed at a time, for the household's 12
-most recent titles, a series watched through its episodes included. Each build
-makes three lists:
+most recent titles, a series watched through its episodes included.
+
+Reading `GET /titles/{id}/similar` for an enriched title whose record is due
+also queues one `seed_row` job for that title when `USHER_LLM_ENABLED` is true,
+at `DEMAND` priority, one at a time. It writes the same record under the same
+rules. A model or provider outage defers it five minutes at a time and spends
+no attempt.
+
+Each build makes three lists:
 
 | List | From | Order |
 |---|---|---|

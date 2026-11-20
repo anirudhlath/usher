@@ -16,7 +16,7 @@ import {
   PERSON_DIRECTOR,
   TITLE_ENRICHED,
   TITLE_SIMILAR_EMPTY,
-  TITLE_SIMILAR_STALE,
+  TITLE_SIMILAR_UPDATING,
   TITLE_SKELETON,
 } from './ids'
 
@@ -34,7 +34,7 @@ export const person: PersonResponse = {
       role: 'Director',
       titles: [
         {
-          title_id: TITLE_SIMILAR_STALE,
+          title_id: TITLE_SIMILAR_UPDATING,
           kind: 'movie',
           name: 'The Mirror',
           year: 1975,
@@ -111,7 +111,7 @@ export const collection: CollectionResponse = {
       owned: false,
     },
     {
-      title_id: TITLE_SIMILAR_STALE,
+      title_id: TITLE_SIMILAR_UPDATING,
       kind: 'movie',
       name: 'The Mirror',
       year: 1975,

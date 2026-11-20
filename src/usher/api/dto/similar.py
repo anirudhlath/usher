@@ -1,69 +1,26 @@
-"""`GET /titles/{id}/similar`.
+"""`GET /titles/{id}/similar`: a title's stored row, or its neighbours, as home cards."""
 
-PRD 05's precomputed neighbours, over `SimilarityService` (`services/similar.py`).
-"""
-
-import uuid
-from collections.abc import Sequence
 from typing import Self
 
-from pydantic import AwareDatetime, BaseModel
+from pydantic import BaseModel
 
-from usher.domain.enums import TitleKind
-from usher.domain.search import SimilarTitle
+from usher.api.dto.home import RowCardResponse
+from usher.domain.rows import SimilarShelf, SimilarSource
 
-__all__ = ["SimilarResponse", "SimilarTitleResponse"]
-
-
-class SimilarTitleResponse(BaseModel):
-    """One neighbour, in the **stored order**.
-
-    `SimilarityService.neighbors_of` reads `title_neighbors` back by its own
-    stamped `rank`, best first, ties broken by id, and this DTO never re-sorts on
-    `score`. Reproducing the order from the score works only up to float ties,
-    and a tie broken differently on two reads would show a client two different
-    "most similar" titles for the same catalog.
-    """
-
-    id: uuid.UUID
-    kind: TitleKind
-    name: str
-    year: int | None
-    score: float
-
-    @classmethod
-    def of(cls, neighbor: SimilarTitle) -> Self:
-        return cls(
-            id=neighbor.title_id,
-            kind=neighbor.kind,
-            name=neighbor.name,
-            year=neighbor.year,
-            score=neighbor.score,
-        )
+__all__ = ["SimilarResponse"]
 
 
 class SimilarResponse(BaseModel):
-    """Neighbours, plus both of `title_neighbors`' staleness signals.
+    """Cards in the order served; `building` is true while a build for the title is queued."""
 
-    Reported rather than implied: a client that could not see either would be
-    shown yesterday's neighbours, or none at all, with no way to tell that from
-    "this title genuinely has nothing like it".
-    """
-
-    neighbors: list[SimilarTitleResponse]
-    computed_at: AwareDatetime | None
-    stale: bool
+    cards: list[RowCardResponse]
+    source: SimilarSource
+    building: bool
 
     @classmethod
-    def of(
-        cls,
-        neighbors: Sequence[SimilarTitle],
-        *,
-        computed_at: AwareDatetime | None,
-        stale: bool,
-    ) -> Self:
+    def of(cls, shelf: SimilarShelf) -> Self:
         return cls(
-            neighbors=[SimilarTitleResponse.of(neighbor) for neighbor in neighbors],
-            computed_at=computed_at,
-            stale=stale,
+            cards=[RowCardResponse.of(card) for card in shelf.cards],
+            source=shelf.source,
+            building=shelf.building,
         )

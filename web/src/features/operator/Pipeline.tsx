@@ -26,7 +26,7 @@ import { useProblemTrace } from '@/features/shared/trace'
  * screen is where the evidence would appear, and until the four routes exist it
  * has to say so out loud rather than draw a queue out of nothing.
  *
- * What it does show is real: the nine job kinds and the four priorities are
+ * What it does show is real: the ten job kinds and the four priorities are
  * documented vocabulary, and `GET /health/ready` genuinely reports whether the
  * worker lane that drains the queue is running. Showing the vocabulary is
  * honest; showing invented counts is not, so every place a number would go
@@ -84,7 +84,7 @@ export default function Pipeline() {
             than zero — a zero here would claim an empty queue, which is a measurement nobody has taken.
           </StateBlock>
           <DataTable
-            caption="The nine job kinds"
+            caption="The ten job kinds"
             keyField="kind"
             rows={JOB_KINDS}
             asCards={phone}
@@ -188,7 +188,7 @@ interface JobKindRow extends Record<string, unknown> {
 }
 
 /**
- * `JobKind`'s nine members, in the enum's own order. Real vocabulary — this is
+ * `JobKind`'s ten members, in the enum's own order. Real vocabulary — this is
  * what the queue deduplicates on together with a key — and deliberately without
  * a priority column: a priority belongs to an *enqueued job*, not to a kind, so
  * a table pairing them would state a fact the system does not hold.
@@ -203,6 +203,7 @@ const JOB_KINDS: JobKindRow[] = [
   { kind: 'watch_writeback', does: 'Push watch state back out to the source.' },
   { kind: 'sync', does: 'Walk a source’s library, full or delta.' },
   { kind: 'bootstrap', does: 'Run one bulk-import phase.' },
+  { kind: 'seed_row', does: 'Build one title’s “Because you watched” row.' },
 ]
 
 const KIND_COLUMNS: Column<JobKindRow>[] = [

@@ -857,7 +857,7 @@ async def test_no_llm_configured_degrades_rather_than_raising(
 
     assert built is None
     logged = warnings.getvalue()
-    assert logged.count("curate jobs") == 1, f"reported more than once: {logged}"
+    assert logged.count("curate and seed_row jobs") == 1, f"reported more than once: {logged}"
 
 
 async def test_a_configured_llm_is_built_and_says_nothing(warnings: io.StringIO) -> None:
@@ -3328,6 +3328,13 @@ def test_every_configuration_registers_exactly_the_kinds_it_claims() -> None:
                 checked += 1
 
     assert checked == 8, f"the premise: all eight configurations were built -- {checked}"
+
+
+def test_the_seed_row_kind_is_claimed_exactly_when_there_is_a_client() -> None:
+    with_client = worker_kinds(provider=None, embedder=None, client=FakeLLMClient())
+    without = worker_kinds(provider=FakeMetadataProvider(), embedder=FakeEmbedder(), client=None)
+    assert JobKind.SEED_ROW in with_client
+    assert JobKind.SEED_ROW not in without
 
 
 def test_the_concurrency_table_covers_exactly_the_kinds_a_build_claims() -> None:

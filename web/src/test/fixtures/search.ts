@@ -16,7 +16,7 @@
  */
 
 import type { SearchResponse, SuggestResponse } from '@/api'
-import { TITLE_ENRICHED, TITLE_SERIES, TITLE_SIMILAR_STALE, TITLE_SKELETON } from './ids'
+import { TITLE_ENRICHED, TITLE_SERIES, TITLE_SIMILAR_UPDATING, TITLE_SKELETON } from './ids'
 
 /** Attributes a play or a title view back to the query that produced it. */
 export const SEARCH_ID = '0191f4ca-517a-73a8-9741-1e85c96ab28c'
@@ -41,7 +41,7 @@ const results: SearchResponse['results'] = [
     score: 0.0161,
   },
   {
-    title_id: TITLE_SIMILAR_STALE,
+    title_id: TITLE_SIMILAR_UPDATING,
     kind: 'movie',
     name: 'The Mirror',
     year: 1975,

@@ -127,6 +127,20 @@ class SeedRowService:
         catalog = {title.id: title for title in await self._titles.list_by_ids(due)}
         return [catalog[seed_id] for seed_id in due if seed_id in catalog]
 
+    async def build_if_due(self, title_id: uuid.UUID) -> SeedRow | None:
+        """Build `title_id`'s row when its record asks for one, else `None`.
+
+        `None` too for a title the catalog no longer holds. Catches nothing: whatever
+        `build` raises is raised.
+        """
+        title = await self._titles.get(title_id)
+        if title is None:
+            return None
+        record = (await self._rows.list_for([title_id])).get(title_id)
+        if not is_due(record, recipe=self._recipe, now=self._now()):
+            return None
+        return await self.build(title)
+
     async def build(self, seed: Title) -> SeedRow:
         """Build `seed`'s row now, due or not, and store what came of it.
 

@@ -166,6 +166,7 @@ own bound, so a slow upstream cannot starve the API.
 | — `derive` | 4 | a fixed per-kind cap |
 | — `index` | 1 | the embedder |
 | — `curate` | 1 | one completion at a time |
+| — `seed_row` | 1 | one completion at a time |
 | — `sync`, `bootstrap` | 1 | a walk of the whole library |
 | Embedding | the `index` row above; `USHER_EMBEDDING_BATCH_SIZE` is its batch | CPU/GPU |
 | **Row build** | **1, sequential — not a setting** | `AsyncSession` |

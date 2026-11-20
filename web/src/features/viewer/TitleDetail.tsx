@@ -363,7 +363,11 @@ export default function TitleDetail() {
           />
         </div>
 
-        <SimilarSection query={similar} onOpenTitle={(id) => navigate(titlePath(id))} />
+        <SimilarSection
+          query={similar}
+          waiting={similar.waiting}
+          onOpenTitle={(id) => navigate(titlePath(id))}
+        />
 
         <ImagesSection images={imagesOf(record)} name={record.name} />
 
@@ -501,25 +505,23 @@ function CreditColumn({ heading, field, credits, secondary, onOpenPerson }: Cred
 /* ----------------------------------------------------------------- similar */
 
 /**
- * Four states, and every one of them is a different fact (patterns.md §2):
+ * The route answers home cards: the stored "Because you watched" row when there
+ * is one, else the title's neighbours, in the order served. They are rendered as
+ * the home screen renders them, with the same poster, watched mark and
+ * not-owned badge. No cards is one state: nothing similar to show, with `meta`
+ * naming the field. While `waiting`, a list shows an `updating` badge and no list says it is
+ * finding some; after the wait both go quiet. A failed read shows the error only
+ * when there is no list to keep.
  *
- * · neighbours, current — the row.
- * · `stale: true` — the row **is still shown**, with an amber marker. The list
- *   is real and its inputs moved; suppressing it would be a bigger lie than
- *   showing it.
- * · `neighbors: []` with a `computed_at` — computed, and nothing scored close
- *   enough.
- * · `computed_at: null` — never computed at all, with `meta` naming the field.
- *
- * There are **no similarity reasons in this API**. PRD 07 describes them and no
- * such field exists, so nothing here invents one: the row says outright that
- * there is no "why".
+ * There are **no similarity reasons in this API**, so nothing here invents one.
  */
 function SimilarSection({
   query,
+  waiting,
   onOpenTitle,
 }: {
-  query: { isPending: boolean; isError: boolean; data: SimilarResponse | undefined }
+  query: { isPending: boolean; data: SimilarResponse | undefined }
+  waiting: boolean
   onOpenTitle: (titleId: string) => void
 }) {
   if (query.isPending) {
@@ -531,7 +533,8 @@ function SimilarSection({
     )
   }
 
-  if (query.isError || query.data === undefined) {
+  // A failed re-read keeps the data it had, so only a section with none says it failed.
+  if (query.data === undefined) {
     return (
       <section className="u-title__similar" aria-labelledby="title-similar">
         <h2 className="u-title__h2" id="title-similar">
@@ -544,7 +547,7 @@ function SimilarSection({
     )
   }
 
-  const { neighbors, computed_at: computedAt, stale } = query.data
+  const { cards } = query.data
 
   return (
     <section className="u-title__similar" aria-labelledby="title-similar">
@@ -552,39 +555,31 @@ function SimilarSection({
         <h2 className="u-title__h2" id="title-similar">
           Similar titles
         </h2>
-        {stale && (
-          <Badge tone="warn" icon={<Icon name="history" />}>
-            stale
+        {waiting && cards.length > 0 ? (
+          <Badge tone="neutral" icon={<Icon name="history" />}>
+            updating
           </Badge>
-        )}
-        {stale && computedAt !== null && (
-          <span className="u-title__note">
-            Computed {shortDate(computedAt)}, before the scoring blend changed. Shown as they were. Fixed at
-            ten; there is no {'“why”'}.
-          </span>
-        )}
+        ) : null}
       </div>
 
-      {computedAt === null ? (
-        <StateBlock kind="never" meta="computed_at: null">
-          We have never computed similar titles for this one.
-        </StateBlock>
-      ) : neighbors.length === 0 ? (
-        <StateBlock kind="empty" meta={`neighbors: [] · computed_at: ${computedAt}`}>
-          Computed {shortDate(computedAt)}. Nothing scored close enough to show.
-        </StateBlock>
+      {cards.length === 0 ? (
+        waiting ? (
+          <StateBlock kind="never" meta="building: true">
+            Finding similar titles for this one.
+          </StateBlock>
+        ) : (
+          <StateBlock kind="empty" meta="cards: []">
+            Nothing similar to show.
+          </StateBlock>
+        )
       ) : (
         <div className="u-title__rail">
-          {neighbors.map((neighbor) => (
+          {cards.map((card) => (
             <PosterCard
-              key={neighbor.id}
-              card={{
-                title_id: neighbor.id,
-                kind: neighbor.kind,
-                name: neighbor.name,
-                year: neighbor.year,
-              }}
-              onOpen={() => onOpenTitle(neighbor.id)}
+              key={card.title_id}
+              card={card}
+              onOpen={() => onOpenTitle(card.title_id)}
+              badge={card.owned ? null : <Badge tone="neutral">not owned</Badge>}
             />
           ))}
         </div>

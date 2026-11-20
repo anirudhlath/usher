@@ -10,6 +10,10 @@ Versioning is `0.x` while the wire contract may still move —
 
 ### Added
 
+- A `seed_row` job builds one title's Because You Watched row. Reading the
+  similar titles of an enriched title whose row is due queues it when
+  `USHER_LLM_ENABLED=true`, and the title page waits for it for up to a minute.
+
 - **`usher set-credentials` stores a source's new username and password.** It
   reads them from the exported environment variables its `--username-env` and
   `--password-env` flags name, and refuses a credential typed on the command
@@ -82,6 +86,10 @@ Versioning is `0.x` while the wire contract may still move —
   an origin a browser would write differently is refused at startup.
 
 ### Changed
+
+- **`GET /titles/{id}/similar` answers `{cards, source, building}`**: home cards
+  from the title's stored Because You Watched row, or else its neighbours.
+  `neighbors`, `score`, `computed_at` and `stale` are gone from the response.
 
 - A playback ticket URL ends with the item's name, `GET /stream/{ticket}/{name}`
   — the title, or `Series - S01E03 - Episode` — so Infuse shows the title

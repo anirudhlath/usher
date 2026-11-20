@@ -39,7 +39,7 @@ describe('Pipeline', () => {
       await waitFor(() => expect(screen.getByText('worker running')).toBeInTheDocument())
     })
 
-    it('shows the nine job kinds and the four priorities as vocabulary', async () => {
+    it('shows the ten job kinds and the four priorities as vocabulary', async () => {
       renderPipeline()
 
       for (const kind of [
@@ -52,6 +52,7 @@ describe('Pipeline', () => {
         'watch_writeback',
         'sync',
         'bootstrap',
+        'seed_row',
       ]) {
         expect(screen.getByRole('cell', { name: kind })).toBeInTheDocument()
       }

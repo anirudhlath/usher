@@ -115,6 +115,39 @@ test.describe('component gallery', () => {
     await expect(page).toHaveURL(/theme=dark&density=comfortable/)
   })
 
+  /**
+   * The sweep is a claim about the page at rest. A toast fades in over
+   * `--dur-base`, and `--text-muted` sits at 4.5:1 exactly, so a sweep that
+   * samples a toast part-way through its fade reports the toast's key as a
+   * contrast failure. Here the fade is stretched and restarted, so a sweep that
+   * does not wait for it fails every time rather than once in a few runs.
+   */
+  test('the sweep waits for a toast that is still fading in', async ({ page }) => {
+    await openGallery(page, DEFAULT_APPEARANCE)
+    await page.addStyleTag({ content: ':root{--dur-base:3000ms}' })
+
+    const fading = await page.evaluate(() => {
+      const toasts = [...document.querySelectorAll<HTMLElement>('.u-toast')]
+      for (const toast of toasts) {
+        toast.style.animation = 'none'
+        toast.getBoundingClientRect()
+        toast.style.animation = ''
+      }
+      return {
+        count: toasts.filter((toast) => Number(getComputedStyle(toast).opacity) < 1).length,
+        durations: toasts.map((toast) => getComputedStyle(toast).animationDuration),
+      }
+    })
+    // The premises: the stretch reached the toast, so its fade lasts 3 s rather
+    // than the race-sized 180 ms, and the restart took, so there is a fade for
+    // the sweep to wait on.
+    expect(fading.durations.length).toBeGreaterThan(0)
+    expect(new Set(fading.durations)).toEqual(new Set(['3s']))
+    expect(fading.count).toBeGreaterThan(0)
+
+    await sweep(page)
+  })
+
   for (const appearance of APPEARANCES) {
     const label = `${appearance.theme}-${appearance.density}`
 

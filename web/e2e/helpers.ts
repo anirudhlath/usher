@@ -26,8 +26,13 @@ export async function visit(page: Page, path: string): Promise<void> {
  * properties, so it reports every pair as failing; here the tokens are resolved
  * and the 103-pair ledger in `docs/contrast.md` has something to be measured
  * against.
+ *
+ * **It sweeps the page at rest.** A toast fades in, and `--text-muted` sits at
+ * 4.5:1 exactly, so a toast sampled part-way through its fade fails the rule on
+ * its key. That is a fact about one frame of an entry, not about the design.
  */
 export async function sweep(page: Page): Promise<void> {
+  await atRest(page)
   const results = await new AxeBuilder({ page })
     .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'])
     .analyze()
@@ -39,6 +44,29 @@ export async function sweep(page: Page): Promise<void> {
     nodes: violation.nodes.map((node) => node.html),
   }))
   expect(readable, JSON.stringify(readable, null, 2)).toEqual([])
+}
+
+/**
+ * Wait for every animation that ends to end. A looping one, such as the
+ * skeleton's shimmer, never finishes and is not waited on, and neither is a
+ * paused one. One that starts while another is waited on, such as a toast that
+ * mounts late or a fade chained to another's end, is caught by the next pass;
+ * there are at most five.
+ */
+async function atRest(page: Page): Promise<void> {
+  await page.evaluate(async () => {
+    for (let pass = 0; pass < 5; pass += 1) {
+      const ending = document
+        .getAnimations()
+        .filter(
+          (animation) =>
+            animation.playState === 'running' &&
+            Number.isFinite(animation.effect?.getComputedTiming().endTime),
+        )
+      if (ending.length === 0) return
+      await Promise.all(ending.map((animation) => animation.finished.catch(() => undefined)))
+    }
+  })
 }
 
 /**

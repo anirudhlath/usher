@@ -150,6 +150,20 @@ with the reason, and `web/docs/` stays a verbatim copy.
   minutes, not a first batch that lands later, a later step of "Run all phases"
   or a job queued behind another bootstrap job. `WATCH_MINUTES` in
   `Bootstrap.tsx` has its arithmetic. Overview keeps §8 as written.
+- **Similar titles carry posters, watched marks and owned marks, and have no
+  stale state.** The route now answers home cards, so the title page draws the
+  same `PosterCard` as Home. Its list is the stored row or the old list and the
+  API reports neither age, so there is nothing to mark stale. The one
+  never-computed state is "Finding similar titles", shown while a build is
+  waited on and there are no cards yet.
+- **Similar titles wait for a build, for at most a minute.** A wait starts at a
+  read that says `building: true` while none is running; the section re-reads
+  every 5 seconds, so the swap never depends on an event. A read that says
+  `building: false` ends it, and a later `true` read is a new wait. Sixty
+  seconds after it starts the wait ends for good for that visit and the marker
+  goes with it; opening the title again is a new wait (`SIMILAR_WAIT_MS` in
+  `api/hooks.ts`). A failed re-read keeps the cards on screen, and the marker
+  while the wait lasts; the error shows only when there is nothing to keep.
 
 ## Commands
 

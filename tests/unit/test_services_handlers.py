@@ -22,10 +22,18 @@ from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from usher.domain.bootstrap import BootstrapPhase
 from usher.domain.enums import EnrichmentState, MatchMethod, SourceKind, TitleKind
 from usher.domain.jobs import Job, JobKind, JobPriority
+from usher.domain.seed_rows import SeedRow, SeedRowOutcome
 from usher.domain.source import Source
 from usher.domain.sync import STALE_AFTER, SyncRun, SyncRunKind, SyncRunStatus
 from usher.domain.title import Title
-from usher.ports.errors import PortDataMalformed, PortUnavailable, UsherPortError
+from usher.ports.errors import (
+    PortAuthFailed,
+    PortDataMalformed,
+    PortRateLimited,
+    PortUnavailable,
+    UsherPortError,
+)
+from usher.ports.events import ClientEvent, ClientEventKind
 from usher.ports.ingest import MediaItemUpsert, WatchStateWrite
 from usher.ports.llm import LLMUsage
 from usher.ports.metadata import MetadataCandidate
@@ -39,11 +47,13 @@ from usher.ports.source import (
 from usher.services.curation import CurationReport, CurationService
 from usher.services.enrich import EnrichService
 from usher.services.handlers import (
+    SEED_ROW_RETRY_SECONDS,
     SourceBinding,
     bootstrap_handler,
     curate_handler,
     enrich_handler,
     match_handler,
+    seed_row_handler,
     sync_handler,
     watch_history_handler,
     watch_writeback_handler,
@@ -51,6 +61,8 @@ from usher.services.handlers import (
 from usher.services.jobs import JobDeferred
 from usher.services.matching import MatchService
 from usher.services.reconcile import AfterSeed, ReconcileService, WalkRefused
+from usher.services.seed_row_recall import seed_row_recipe
+from usher.services.seed_rows import SeedRowService
 from usher.services.watch_sync import WatchStateSyncService
 from usher.services.watch_write import WatchWriteService
 
@@ -1319,3 +1331,98 @@ async def test_a_bootstrap_handler_absorbs_nothing_its_runner_raises() -> None:
 
     with pytest.raises(PortUnavailable):
         await bootstrap_handler(run)(Job(kind=JobKind.BOOTSTRAP, key="imdb"))
+
+
+# -- seed_row -------------------------------------------------------------
+
+
+class _RecordingSeedRows(SeedRowService):
+    """A `SeedRowService` that records which title it was asked to build.
+
+    `__init__` skips `super()`: `build_if_due` is the only call the handler makes.
+    """
+
+    def __init__(self, *, returns: SeedRow | None = None, raises: UsherPortError | None = None):
+        self.asked: list[uuid.UUID] = []
+        self._returns = returns
+        self._raises = raises
+
+    async def build_if_due(self, title_id: uuid.UUID) -> SeedRow | None:
+        self.asked.append(title_id)
+        if self._raises is not None:
+            raise self._raises
+        return self._returns
+
+
+_SEED_TITLE = uuid.UUID("0197a5b0-0000-7000-8000-0000000000aa")
+
+
+def _a_recorded_attempt(title_id: uuid.UUID) -> SeedRow:
+    at = datetime(2026, 11, 18, tzinfo=UTC)
+    return SeedRow(
+        seed_title_id=title_id,
+        attempted_at=at,
+        attempt_outcome=SeedRowOutcome.TOO_FEW,
+        attempt_recipe=seed_row_recipe(model="test/scripted-1"),
+    )
+
+
+async def test_the_seed_row_handler_builds_its_key_and_says_the_title_changed() -> None:
+    service = _RecordingSeedRows(returns=_a_recorded_attempt(_SEED_TITLE))
+    events = FakeEventPublisher()
+
+    await seed_row_handler(service, events)(Job(kind=JobKind.SEED_ROW, key=str(_SEED_TITLE)))
+
+    assert service.asked == [_SEED_TITLE]
+    assert events.published == [
+        ClientEvent(
+            kind=ClientEventKind.TITLE_UPDATED,
+            title_id=_SEED_TITLE,
+            data={"fields": ["similar"]},
+        )
+    ]
+
+
+async def test_the_seed_row_handler_says_nothing_when_nothing_was_built() -> None:
+    service = _RecordingSeedRows(returns=None)
+    events = FakeEventPublisher()
+
+    await seed_row_handler(service, events)(Job(kind=JobKind.SEED_ROW, key=str(_SEED_TITLE)))
+
+    assert service.asked == [_SEED_TITLE]
+    assert events.published == []
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param(PortUnavailable("down"), id="unavailable"),
+        pytest.param(PortRateLimited(retry_after=5.0), id="rate-limited"),
+        pytest.param(PortAuthFailed("no"), id="auth-failed"),
+        pytest.param(PortDataMalformed("x"), id="malformed"),
+    ],
+)
+async def test_an_outage_defers_the_build_five_minutes_and_says_nothing(
+    failure: UsherPortError,
+) -> None:
+    service = _RecordingSeedRows(raises=failure)
+    events = FakeEventPublisher()
+
+    with pytest.raises(JobDeferred) as caught:
+        await seed_row_handler(service, events)(Job(kind=JobKind.SEED_ROW, key=str(_SEED_TITLE)))
+
+    assert service.asked == [_SEED_TITLE], "the premise: the build was reached"
+    assert SEED_ROW_RETRY_SECONDS == 300.0
+    assert caught.value.retry_after == 300.0
+    assert caught.value.__cause__ is failure
+    assert events.published == []
+
+
+async def test_a_seed_row_key_that_is_not_a_uuid_parks() -> None:
+    service = _RecordingSeedRows(returns=None)
+    events = FakeEventPublisher()
+
+    with pytest.raises(PortDataMalformed):
+        await seed_row_handler(service, events)(Job(kind=JobKind.SEED_ROW, key="not-a-uuid"))
+
+    assert service.asked == []

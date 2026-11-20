@@ -32,7 +32,7 @@ from usher.api.deps import (
     get_row_context,
     get_search_service,
     get_session,
-    get_similarity_service,
+    get_similar_shelf_service,
     get_source_repository,
     get_sync_run_repository,
     get_taste_repository,
@@ -92,12 +92,9 @@ _PROVIDERS = {
     "row_context": get_row_context,
     "row_cache": get_row_cache,
     "home_service": get_home_service,
-    # `GET /titles/{id}/similar`, resolved through FastAPI's own graph for the
-    # reason every provider above is: `get_similarity_service` takes
-    # `session.commit` as a bound method, which only exists once `SessionDep`
-    # has resolved a real session, and a plain call cannot reach that failure
-    # mode.
-    "similarity_service": get_similarity_service,
+    # `GET /titles/{id}/similar`, resolved through FastAPI's own graph: it composes
+    # `RowContextDep`, `JobQueueDep` and `SettingsDep`, which a plain call cannot reach.
+    "similar_shelf_service": get_similar_shelf_service,
     # `GET /search`, and the first provider here that reaches its collaborators
     # through `usher.composition` rather than naming them: the import-linter contract
     # that keeps `PostgresSearchIndex` inside its package lists `usher.api` whole, so
@@ -157,7 +154,7 @@ async def test_every_pipeline_provider_resolves_in_a_request(probe: AsyncClient)
                 "Search",
                 "Taste",
                 "User",
-                "Similarity",
+                "Similar",
             )
         )
 

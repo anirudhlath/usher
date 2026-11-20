@@ -6,12 +6,14 @@
  * tables. An operation with no hook is an operation no screen can reach.
  */
 
+import { useEffect, useState } from 'react'
 import {
   useInfiniteQuery,
   useMutation,
   useQuery,
   useQueryClient,
   type UseQueryOptions,
+  type UseQueryResult,
 } from '@tanstack/react-query'
 import { request, UsherProblem, type Ok, type OkPost, type OkPut, type Schemas } from './client'
 
@@ -169,18 +171,56 @@ export function useTitle(id: string | undefined, searchId?: string) {
 
 export type SimilarResponse = Ok<'/titles/{title_id}/similar'>
 
+/** How often a section with a build under way is read again. */
+export const SIMILAR_REREAD_MS = 5_000
+/** How long a build is waited on before the section stops asking. */
+export const SIMILAR_WAIT_MS = 60_000
+
 /**
- * Three different absent states arrive on this one route and patterns.md §2
- * gives each its own treatment: `computed_at: null` is never-computed,
- * `neighbors: []` with a `computed_at` is computed-and-empty, and `stale: true`
- * means the list is real and its inputs moved — which is shown, not hidden.
+ * `{ cards, source, building }`: home cards, from the title's stored row or else
+ * its neighbours. No cards with `building` true means a build is under way; no
+ * cards with `building` false means nothing similar.
+ *
+ * Returns the query plus `waiting`. A wait starts at a read that says `building`
+ * true while no wait is running, and re-reads every `SIMILAR_REREAD_MS`. A read
+ * that says `building` false ends it, and a later true read starts a new one.
+ * `SIMILAR_WAIT_MS` after its start the wait ends for good for this visit, so a
+ * build that never lands cannot keep the page asking. Opening the title again is
+ * a new visit and a new wait.
  */
-export function useSimilar(id: string | undefined) {
-  return useQuery({
+export function useSimilar(id: string | undefined): UseQueryResult<SimilarResponse> & { waiting: boolean } {
+  const [phase, setPhase] = useState<{ id: string | undefined; state: 'idle' | 'waiting' | 'over' }>({
+    id,
+    state: 'idle',
+  })
+  const state = phase.id === id ? phase.state : 'idle'
+
+  const query = useQuery({
     queryKey: ['similar', id],
     queryFn: () => request<SimilarResponse>(`/titles/${id}/similar`),
     enabled: Boolean(id),
+    refetchInterval: (q) => (state !== 'over' && q.state.data?.building === true ? SIMILAR_REREAD_MS : false),
   })
+
+  const building = query.data?.building
+  useEffect(() => {
+    setPhase((now) => {
+      const current = now.id === id ? now.state : 'idle'
+      if (current === 'idle' && building === true) return { id, state: 'waiting' }
+      if (current === 'waiting' && building === false) return { id, state: 'idle' }
+      return now.id === id ? now : { id, state: current }
+    })
+  }, [id, building])
+
+  useEffect(() => {
+    if (state !== 'waiting') return undefined
+    const timer = setTimeout(() => setPhase({ id, state: 'over' }), SIMILAR_WAIT_MS)
+    return () => clearTimeout(timer)
+  }, [id, state])
+
+  // A read that says building counts at once, before the effect has run.
+  const waiting = state !== 'over' && building === true
+  return { ...query, waiting }
 }
 
 export type EpisodeResponse = Ok<'/episodes/{episode_id}'>

@@ -14,8 +14,8 @@
  *   carries a readable readiness document.
  */
 
-import { describe, expect, it } from 'vitest'
-import { renderHook, waitFor } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { act, renderHook, waitFor } from '@testing-library/react'
 import { QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 import React from 'react'
@@ -38,13 +38,16 @@ import { browsePageOne, browsePageTwo } from '@/test/fixtures/browse'
 import { readinessDegraded, readinessNotADocument } from '@/test/fixtures/meta'
 import {
   SEASON_ONE,
+  IMAGE_POSTER,
   TITLE_ENRICHED,
   TITLE_MISSING,
   TITLE_SIMILAR_EMPTY,
-  TITLE_SIMILAR_NEVER,
-  TITLE_SIMILAR_STALE,
+  TITLE_SIMILAR_FINDING,
   TITLE_SKELETON,
 } from '@/test/fixtures/ids'
+import { SIMILAR_REREAD_MS, SIMILAR_WAIT_MS } from './hooks'
+import { similarRow, similarUpdating } from '@/test/fixtures/titles'
+import type { SimilarResponse } from './hooks'
 import { UsherProblem } from './client'
 
 /**
@@ -195,27 +198,142 @@ describe('useTitle and the absent-vs-empty rule', () => {
   })
 })
 
-describe('useSimilar and its three absent states', () => {
-  it('distinguishes never-computed from computed-and-empty', async () => {
-    const never = renderHook(() => useSimilar(TITLE_SIMILAR_NEVER), { wrapper: makeWrapper() })
-    await waitFor(() => expect(never.result.current.isSuccess).toBe(true))
-    expect(never.result.current.data?.neighbors).toEqual([])
-    // `computed_at` is the field that proves the claim, which is why `meta`
-    // names it on screen.
-    expect(never.result.current.data?.computed_at).toBeNull()
+describe('useSimilar', () => {
+  it('reads the stored row as home cards', async () => {
+    const { result } = renderHook(() => useSimilar(TITLE_ENRICHED), { wrapper: makeWrapper() })
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    expect(result.current.data?.source).toBe('row')
+    expect(result.current.data?.cards.map((card) => card.name)).toEqual([
+      'Solaris',
+      'The Mirror',
+      'Andrei Rublev',
+    ])
+    expect(result.current.data?.cards[0]?.artwork).toBe(IMAGE_POSTER)
+  })
+
+  it('tells no cards with a build under way from no cards at all', async () => {
+    const finding = renderHook(() => useSimilar(TITLE_SIMILAR_FINDING), { wrapper: makeWrapper() })
+    await waitFor(() => expect(finding.result.current.isSuccess).toBe(true))
+    expect(finding.result.current.data).toEqual({ cards: [], source: 'neighbors', building: true })
 
     const empty = renderHook(() => useSimilar(TITLE_SIMILAR_EMPTY), { wrapper: makeWrapper() })
     await waitFor(() => expect(empty.result.current.isSuccess).toBe(true))
-    expect(empty.result.current.data?.neighbors).toEqual([])
-    expect(empty.result.current.data?.computed_at).not.toBeNull()
+    expect(empty.result.current.data).toEqual({ cards: [], source: 'neighbors', building: false })
+  })
+})
+
+/** Advances the fake clock inside act, so the state a timer sets is flushed. */
+async function advance(ms: number) {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(ms)
+  })
+}
+
+describe('useSimilar waiting', () => {
+  afterEach(() => {
+    vi.useRealTimers()
   })
 
-  it('shows a stale list rather than hiding it', async () => {
-    const { result } = renderHook(() => useSimilar(TITLE_SIMILAR_STALE), { wrapper: makeWrapper() })
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-    // Suppressing it would be a bigger lie than showing it.
-    expect(result.current.data?.stale).toBe(true)
-    expect(result.current.data?.neighbors.length).toBeGreaterThan(0)
+  /** Fake timers that still let MSW and `waitFor` settle, as Bootstrap.test does. */
+  function fakeTimers() {
+    vi.useFakeTimers({
+      toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'],
+      shouldAdvanceTime: true,
+    })
+  }
+
+  /** Serves `answer(n)` for the nth request (1-based) and counts them. */
+  function serve(answer: (n: number) => SimilarResponse) {
+    const counter = { requests: 0 }
+    server.use(
+      http.get('/titles/:title_id/similar', () => {
+        counter.requests += 1
+        return HttpResponse.json(answer(counter.requests))
+      }),
+    )
+    return counter
+  }
+
+  async function mount() {
+    const client = createTestQueryClient()
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      React.createElement(QueryClientProvider, { client }, children)
+    const view = renderHook(() => useSimilar(TITLE_ENRICHED), { wrapper })
+    await waitFor(() => expect(view.result.current.isSuccess).toBe(true))
+    return { ...view, client }
+  }
+
+  it('exports the two bounds', () => {
+    expect(SIMILAR_REREAD_MS).toBe(5_000)
+    expect(SIMILAR_WAIT_MS).toBe(60_000)
+  })
+
+  it('does not re-read a section with no build under way', async () => {
+    fakeTimers()
+    const counter = serve(() => similarRow)
+    const { result } = await mount()
+    await advance(30_000)
+    expect(counter.requests).toBe(1)
+    expect(result.current.waiting).toBe(false)
+  })
+
+  it('re-reads every 5 seconds and swaps when a read says the row is built', async () => {
+    fakeTimers()
+    const counter = serve((n) => (n <= 2 ? similarUpdating : similarRow))
+    const { result } = await mount()
+    expect(result.current.waiting).toBe(true)
+    await advance(5_000)
+    expect(counter.requests).toBe(2)
+    await advance(5_000)
+    expect(counter.requests).toBe(3)
+    expect(result.current.data?.source).toBe('row')
+    expect(result.current.waiting).toBe(false)
+    await advance(30_000)
+    expect(counter.requests).toBe(3)
+  })
+
+  it('stops asking and stops waiting at 60 seconds, and does not wait again', async () => {
+    fakeTimers()
+    const counter = serve(() => similarUpdating)
+    const { result, client } = await mount()
+    await advance(59_000)
+    expect(result.current.waiting).toBe(true)
+    await advance(1_000)
+    expect(result.current.waiting).toBe(false)
+    const asked = counter.requests
+    expect(asked).toBeGreaterThanOrEqual(12)
+    await advance(60_000)
+    expect(counter.requests).toBe(asked)
+    expect(result.current.data?.cards.length).toBe(2)
+
+    // A later read that still says building does not start a new wait.
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ['similar', TITLE_ENRICHED] })
+    })
+    expect(counter.requests).toBe(asked + 1)
+    expect(result.current.waiting).toBe(false)
+    await advance(30_000)
+    expect(counter.requests).toBe(asked + 1)
+  })
+
+  it('counts the 60 seconds from the read that says building, not from the first read', async () => {
+    fakeTimers()
+    const counter = serve((n) => (n === 1 ? similarRow : similarUpdating))
+    const { result, client } = await mount()
+    expect(result.current.waiting).toBe(false)
+    await advance(50_000)
+    expect(counter.requests).toBe(1)
+
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ['similar', TITLE_ENRICHED] })
+    })
+    expect(counter.requests).toBe(2)
+    await waitFor(() => expect(result.current.data?.building).toBe(true))
+    expect(result.current.waiting).toBe(true)
+    await advance(59_000)
+    expect(result.current.waiting).toBe(true)
+    await advance(1_000)
+    expect(result.current.waiting).toBe(false)
   })
 })
 

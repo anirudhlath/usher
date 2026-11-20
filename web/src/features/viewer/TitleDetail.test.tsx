@@ -1,22 +1,23 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { http, HttpResponse } from 'msw'
 import { Route, Routes } from 'react-router-dom'
-import { renderApp, screen, waitFor, within } from '@/test/render'
+import { act, renderApp, screen, waitFor, within } from '@/test/render'
 import { expectNoViolations } from '@/test/axe'
 import { server } from '@/test/server'
 import { installFakeEventSource } from '@/test/sse'
 import {
+  IMAGE_POSTER,
   TITLE_ENRICHED,
   TITLE_MISSING,
   TITLE_NOT_PLAYABLE,
   TITLE_SIMILAR_EMPTY,
-  TITLE_SIMILAR_NEVER,
-  TITLE_SIMILAR_STALE,
+  TITLE_SIMILAR_FINDING,
+  TITLE_SIMILAR_UPDATING,
   TITLE_SKELETON,
 } from '@/test/fixtures/ids'
 import { titleCreditsEmpty, titleSkeletonEnriched } from '@/test/fixtures/viewer-screens'
 import type { TitleResponse } from '@/api'
-import { titleEnriched, titleSkeleton } from '@/test/fixtures/titles'
+import { similarRow, similarUpdating, titleEnriched, titleSkeleton } from '@/test/fixtures/titles'
 import { PLAYBACK_TICKET, TRACE_ID } from '@/test/fixtures/ids'
 import { notFound, notPlayable, problemHandler } from '@/test/fixtures'
 import { TEMPO_URL, deadLinks, traceLinks, withTempo } from '@/test/trace'
@@ -94,6 +95,13 @@ function expectNoTicketAnywhere(container: HTMLElement) {
   }
 }
 
+/** Advances the fake clock inside act, so the state a timer sets is flushed. */
+async function advance(ms: number) {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(ms)
+  })
+}
+
 describe('TitleDetail', () => {
   describe('ready', () => {
     it('renders its own h1, the composed per-copy specs and the credits', async () => {
@@ -162,24 +170,6 @@ describe('TitleDetail', () => {
       expect(screen.getByText('cast: []')).toBeInTheDocument()
       expect(screen.getByText('crew: []')).toBeInTheDocument()
       expect(screen.getByText('images: []')).toBeInTheDocument()
-    })
-
-    it('says a computed similarity list found nothing, with its computed_at', async () => {
-      renderTitle(TITLE_SIMILAR_EMPTY)
-      await screen.findByRole('heading', { level: 1, name: 'Andrei Rublev' })
-
-      expect(screen.getByText(/Nothing scored close enough to show\./)).toBeInTheDocument()
-      expect(screen.getByText('neighbors: [] · computed_at: 2026-08-16T04:12:09Z')).toBeInTheDocument()
-    })
-
-    it('distinguishes a never-computed similarity list from an empty one', async () => {
-      serveTitle({ ...titleEnriched, id: TITLE_SIMILAR_NEVER })
-      renderTitle(TITLE_SIMILAR_NEVER)
-      await screen.findByRole('heading', { level: 1, name: 'Stalker' })
-
-      expect(screen.getByText('We have never computed similar titles for this one.')).toBeInTheDocument()
-      expect(screen.getByText('computed_at: null')).toBeInTheDocument()
-      expect(screen.queryByText(/Nothing scored close enough/)).not.toBeInTheDocument()
     })
   })
 
@@ -352,18 +342,167 @@ describe('TitleDetail', () => {
   })
 
   describe('similar titles', () => {
-    it('still shows the neighbours when the list is stale', async () => {
-      serveTitle({ ...titleEnriched, id: TITLE_SIMILAR_STALE })
-      renderTitle(TITLE_SIMILAR_STALE)
-      await screen.findByRole('heading', { level: 1, name: 'Stalker' })
-
+    it('renders the stored row as poster cards in the order the API gave', async () => {
+      renderTitle(TITLE_ENRICHED)
       const similar = await screen.findByRole('region', { name: 'Similar titles' })
-      // Stale content is SHOWN. Suppressing it would be the bigger lie.
-      expect(within(similar).getByRole('button', { name: /Solaris, 1972/ })).toBeInTheDocument()
-      expect(within(similar).getByText('stale')).toBeInTheDocument()
-      expect(
-        within(similar).getByText(/before the scoring blend changed\. Shown as they were\./),
-      ).toBeInTheDocument()
+      const cards = await within(similar).findAllByRole('button')
+      expect(cards.map((b) => b.getAttribute('aria-label') ?? b.textContent)).toEqual([
+        expect.stringMatching(/Solaris, 1972/),
+        expect.stringMatching(/The Mirror, 1975, watched/),
+        expect.stringMatching(/Andrei Rublev, 1966/),
+      ])
+      // Solaris's poster and not-owned mark, The Mirror's watched mark: the cards
+      // are the home screen's, so what Home shows is what this rail shows.
+      expect(similar.querySelectorAll('.u-card--poster')).toHaveLength(3)
+      expect(similar.querySelector('img[src*="' + IMAGE_POSTER + '"]')).not.toBeNull()
+      expect(within(similar).getAllByText('not owned')).toHaveLength(1)
+      expect(within(similar).queryByText('stale')).not.toBeInTheDocument()
+    })
+
+    it('says there is nothing similar when there are no cards', async () => {
+      renderTitle(TITLE_SIMILAR_EMPTY)
+      expect(await screen.findByText('Nothing similar to show.')).toBeInTheDocument()
+      expect(screen.getByText('cards: []')).toBeInTheDocument()
+    })
+
+    it('says it could not read similar titles when the first read fails', async () => {
+      serveTitle(titleEnriched)
+      server.use(http.get('/titles/:title_id/similar', () => new HttpResponse(null, { status: 500 })))
+      renderTitle(TITLE_ENRICHED)
+      expect(await screen.findByText('We could not read similar titles for this one.')).toBeInTheDocument()
+    })
+
+    describe('waiting for a build', () => {
+      afterEach(() => {
+        vi.useRealTimers()
+      })
+
+      function fakeTimers() {
+        vi.useFakeTimers({
+          toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'],
+          shouldAdvanceTime: true,
+        })
+      }
+
+      it('shows the old list with an updating marker while a build is waited on', async () => {
+        serveTitle(titleEnriched)
+        renderTitle(TITLE_SIMILAR_UPDATING)
+        const similar = await screen.findByRole('region', { name: 'Similar titles' })
+        expect(await within(similar).findByRole('button', { name: /Solaris, 1972/ })).toBeInTheDocument()
+        expect(within(similar).getByText('updating')).toBeInTheDocument()
+      })
+
+      it('says it is finding similar titles when there are none yet', async () => {
+        serveTitle(titleEnriched)
+        renderTitle(TITLE_SIMILAR_FINDING)
+        expect(await screen.findByText('Finding similar titles for this one.')).toBeInTheDocument()
+        expect(screen.getByText('building: true')).toBeInTheDocument()
+        expect(screen.queryByText('Nothing similar to show.')).not.toBeInTheDocument()
+      })
+
+      it('swaps to the built row on a re-read when no event ever arrives', async () => {
+        fakeTimers()
+        let reads = 0
+        server.use(
+          http.get('/titles/:title_id/similar', () => {
+            reads += 1
+            return HttpResponse.json(reads === 1 ? similarUpdating : similarRow)
+          }),
+        )
+        useFakeEventSource()
+        renderTitle(TITLE_ENRICHED)
+        const similar = await screen.findByRole('region', { name: 'Similar titles' })
+        expect(await within(similar).findByText('updating')).toBeInTheDocument()
+        await advance(5_000)
+        expect(
+          await within(similar).findByRole('button', { name: /Andrei Rublev, 1966/ }),
+        ).toBeInTheDocument()
+        expect(within(similar).queryByText('updating')).not.toBeInTheDocument()
+      })
+
+      it('swaps on title.updated without waiting for the re-read', async () => {
+        fakeTimers()
+        let reads = 0
+        server.use(
+          http.get('/titles/:title_id/similar', () => {
+            reads += 1
+            return HttpResponse.json(reads === 1 ? similarUpdating : similarRow)
+          }),
+        )
+        const stream = useFakeEventSource()
+        renderTitle(TITLE_ENRICHED)
+        const similar = await screen.findByRole('region', { name: 'Similar titles' })
+        expect(await within(similar).findByText('updating')).toBeInTheDocument()
+        await advance(1_000)
+        stream.latest().open()
+        stream.latest().emit('title.updated', {
+          title_id: TITLE_ENRICHED,
+          episode_id: null,
+          fields: ['similar'],
+        })
+        expect(
+          await within(similar).findByRole('button', { name: /Andrei Rublev, 1966/ }),
+        ).toBeInTheDocument()
+        expect(reads).toBe(2)
+      })
+
+      it('drops the marker at 60 seconds and keeps the list', async () => {
+        fakeTimers()
+        serveTitle(titleEnriched)
+        renderTitle(TITLE_SIMILAR_UPDATING)
+        const similar = await screen.findByRole('region', { name: 'Similar titles' })
+        expect(await within(similar).findByText('updating')).toBeInTheDocument()
+        await advance(60_000)
+        expect(within(similar).queryByText('updating')).not.toBeInTheDocument()
+        expect(within(similar).getByRole('button', { name: /Solaris, 1972/ })).toBeInTheDocument()
+      })
+
+      it('says nothing similar once 60 seconds pass with no cards', async () => {
+        fakeTimers()
+        serveTitle(titleEnriched)
+        renderTitle(TITLE_SIMILAR_FINDING)
+        expect(await screen.findByText('Finding similar titles for this one.')).toBeInTheDocument()
+        await advance(60_000)
+        expect(screen.getByText('Nothing similar to show.')).toBeInTheDocument()
+        expect(screen.queryByText('Finding similar titles for this one.')).not.toBeInTheDocument()
+      })
+
+      it('keeps the cards through a failed re-read, and the next re-read still swaps', async () => {
+        fakeTimers()
+        let reads = 0
+        server.use(
+          http.get('/titles/:title_id/similar', () => {
+            reads += 1
+            if (reads === 2) return new HttpResponse(null, { status: 500 })
+            return HttpResponse.json(reads === 1 ? similarUpdating : similarRow)
+          }),
+        )
+        useFakeEventSource()
+        renderTitle(TITLE_ENRICHED)
+        const similar = await screen.findByRole('region', { name: 'Similar titles' })
+        expect(await within(similar).findByText('updating')).toBeInTheDocument()
+
+        await advance(5_000)
+        await waitFor(() => expect(reads).toBe(2))
+        expect(screen.queryByText('We could not read similar titles for this one.')).not.toBeInTheDocument()
+        expect(within(similar).getByRole('button', { name: /Solaris, 1972/ })).toBeInTheDocument()
+        expect(within(similar).getByText('updating')).toBeInTheDocument()
+
+        await advance(5_000)
+        expect(
+          await within(similar).findByRole('button', { name: /Andrei Rublev, 1966/ }),
+        ).toBeInTheDocument()
+        expect(reads).toBe(3)
+        expect(within(similar).queryByText('updating')).not.toBeInTheDocument()
+      })
+
+      it('has no axe violations while updating', async () => {
+        serveTitle(titleEnriched)
+        const { container } = renderTitle(TITLE_SIMILAR_UPDATING)
+        const similar = await screen.findByRole('region', { name: 'Similar titles' })
+        await within(similar).findByText('updating')
+        await expectNoViolations(container)
+      })
     })
 
     it('offers no similarity reason, because the API has none', async () => {

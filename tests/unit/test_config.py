@@ -274,6 +274,7 @@ def test_the_worker_concurrency_settings_have_the_measured_defaults(
     assert KIND_CONCURRENCY[JobKind.ENRICH] is None, "the network-bound kind takes the global"
     assert KIND_CONCURRENCY[JobKind.INDEX] == 1, "fastembed is CPU-bound at a flat tokens/s rate"
     assert KIND_CONCURRENCY[JobKind.CURATE] == 1, "the reference endpoint has no context to spare"
+    assert KIND_CONCURRENCY[JobKind.SEED_ROW] == 1, "one row's completion at a time"
     assert KIND_CONCURRENCY[JobKind.BOOTSTRAP] == 1, "bulk_load_window commits the caller's session"
 
 

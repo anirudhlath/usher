@@ -254,7 +254,7 @@ class Settings(BaseSettings):
     # hardening flag.
     embedding_offline: bool = True
 
-    # The LLM (PRD 06's curation, PRD 05's query expansion).
+    # The LLM (PRD 06's curation and seed rows, PRD 05's query expansion).
     llm_enabled: bool = False
     # The provider abstraction, and the whole of it.
     llm_base_url: str = Field(default=DEFAULT_LLM_BASE_URL, min_length=1)

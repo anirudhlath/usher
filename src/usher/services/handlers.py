@@ -3,6 +3,7 @@
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Final
 
 from loguru import logger
 
@@ -11,7 +12,8 @@ from usher.domain.jobs import Job
 from usher.domain.source import MediaItem, Source
 from usher.domain.sync import STALE_AFTER, SyncRunKind
 from usher.domain.watch import WatchState
-from usher.ports.errors import PortDataMalformed
+from usher.ports.errors import PortDataMalformed, UsherPortError
+from usher.ports.events import ClientEvent, ClientEventKind, EventPublisher
 from usher.ports.repository import MediaItemRepository, SourceRepository, WatchStateRepository
 from usher.ports.source import SourceAdapter, WatchStateUpdate
 from usher.services.curation import CurationService
@@ -21,6 +23,7 @@ from usher.services.index import IndexService
 from usher.services.jobs import Handler, JobDeferred
 from usher.services.matching import MatchService
 from usher.services.reconcile import ReconcileService, WalkRefused
+from usher.services.seed_rows import SeedRowService
 from usher.services.watch_sync import WatchStateSyncService
 
 #: `SyncRunKind` has a third member, `WATCH_STATE`, which is never a lane an
@@ -28,6 +31,9 @@ from usher.services.watch_sync import WatchStateSyncService
 #: sync, run by `sync_handler` itself immediately after the item lane. A key
 #: naming it is exactly as malformed as one naming no lane at all.
 _TRIGGERABLE_SYNC_LANES = frozenset({SyncRunKind.FULL, SyncRunKind.DELTA})
+
+#: How long a `seed_row` build waits after the model or provider fails it.
+SEED_ROW_RETRY_SECONDS: Final = 300.0
 
 #: One bulk-import phase, run to completion. The alias exists so this module
 #: can name the collaborator without importing the composition root, exactly as
@@ -127,6 +133,27 @@ def curate_handler(service: CurationService) -> Handler:
 
     async def handle(job: Job) -> None:
         await service.generate(_user_id(job))
+
+    return handle
+
+
+def seed_row_handler(service: SeedRowService, events: EventPublisher) -> Handler:
+    """`seed_row` jobs key on a `Title.id`; an outage defers rather than spends an attempt."""
+
+    async def handle(job: Job) -> None:
+        title_id = _title_id(job)
+        try:
+            row = await service.build_if_due(title_id)
+        except UsherPortError as exc:
+            raise JobDeferred(str(exc), retry_after=SEED_ROW_RETRY_SECONDS) from exc
+        if row is not None:
+            await events.publish(
+                ClientEvent(
+                    kind=ClientEventKind.TITLE_UPDATED,
+                    title_id=title_id,
+                    data={"fields": ["similar"]},
+                )
+            )
 
     return handle
 
@@ -478,6 +505,7 @@ def _uuid_key(job: Job, expected: str) -> uuid.UUID:
 
 
 __all__ = [
+    "SEED_ROW_RETRY_SECONDS",
     "AdapterOpener",
     "BootstrapRunner",
     "SourceBinding",
@@ -488,6 +516,7 @@ __all__ = [
     "enrich_handler",
     "index_handler",
     "match_handler",
+    "seed_row_handler",
     "sync_handler",
     "watch_history_handler",
     "watch_writeback_handler",

@@ -16,7 +16,7 @@
  */
 
 import type { BrowseFacets, BrowseItem, BrowseResponse } from '@/api'
-import { CURSOR_PAGE_TWO, TITLE_ENRICHED, TITLE_SERIES, TITLE_SIMILAR_STALE, TITLE_SKELETON } from './ids'
+import { CURSOR_PAGE_TWO, TITLE_ENRICHED, TITLE_SERIES, TITLE_SIMILAR_UPDATING, TITLE_SKELETON } from './ids'
 
 /** `computed: true`: counts are on the wire and `reason` is not. */
 export type ComputedFacets = Omit<BrowseFacets, 'reason'>
@@ -45,7 +45,7 @@ export const browseItems: BrowseItem[] = [
     vote_count: 1_884,
   },
   {
-    title_id: TITLE_SIMILAR_STALE,
+    title_id: TITLE_SIMILAR_UPDATING,
     kind: 'movie',
     name: 'The Mirror',
     year: 1975,

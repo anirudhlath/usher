@@ -91,8 +91,8 @@ class SimilarityService:
     like this' is instant and engine-independent." PRD 06's `SimilarityRow` is the
     consumer.
 
-    There is no HTTP route here: `GET /titles/{id}/similar` is the API's, over
-    this service and this table.
+    There is no HTTP route here: `GET /titles/{id}/similar` reads through
+    `SimilarShelfService`.
     """
 
     def __init__(

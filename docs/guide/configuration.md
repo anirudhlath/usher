@@ -242,6 +242,11 @@ USHER_LLM_PRICE_OUT_PER_MTOK=0
 - **Nothing schedules a generation.** Run `usher curate` from cron. It exits 1
   when a night produces no rows. See the
   [command-line guide](command-line.md#llm-curation).
+- **A title page builds its own similar-titles row.** Opening an enriched title
+  whose Because You Watched row is due queues a `seed_row` job, with no
+  scheduler, and the worker that claims it makes one LLM call and one TMDb call.
+  A row is due when it has never been built, was built by another model or
+  prompt, or is over 30 days old; a failed attempt holds it back for 7 days.
 
 `USHER_QUERY_EXPANSION_ENABLED=true` makes semantic search rewrite a query with
 the LLM before embedding it. It needs `USHER_LLM_ENABLED=true`, and Usher
@@ -256,7 +261,8 @@ rewriting made retrieval worse on the one model it was measured against.
 - `usher similar --rebuild`, every `USHER_SIMILAR_REBUILD_PERIOD_HOURS` (24);
 - building the Because You Watched rows of the household's recent titles, every
   15 minutes. It needs `USHER_LLM_ENABLED=true` and the worker lane on, and makes
-  one LLM call and one TMDb call per row it builds.
+  one LLM call and one TMDb call per row it builds. A title page builds its own
+  row without it; see [LLM-curated rows](#llm-curated-rows).
 
 It is off by default. Turn it on in exactly one process, or run
 `usher schedule --once` from cron instead.
