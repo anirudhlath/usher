@@ -111,7 +111,7 @@ control that does nothing.
 
 ### Metrics — OpenTelemetry → Prometheus
 
-**Every row is emitted today. 48 rows: 47 instruments Usher declares, plus one
+**Every row is emitted today. 49 rows: 48 instruments Usher declares, plus one
 `FastAPIInstrumentor` supplies.**
 
 | Metric | Type | Labels | Emitted |
@@ -164,6 +164,7 @@ control that does nothing.
 | `usher.scheduler.job.duration` | histogram | job | ✅ M10 |
 | `usher.scheduler.job.failures` | counter | job | ✅ M10 |
 | `usher.scheduler.job.due` | gauge | job | ✅ M10 |
+| `usher.send.stage.duration` | histogram | recipe, stage, outcome | ✅ send to a screen |
 
 **`usher.source.listing.concurrency` is written after every listing page**, by
 the adapter that sent it, so an adapter that never lists leaves no reading. A
@@ -188,6 +189,14 @@ INFO line naming the source and the sizes it moved between.
 from the moment a walker claims the unit to the unit's last commit, recorded
 once for each unit that completes; a unit that fails records nothing. `stage` is
 `seed`, `titles` or `episodes`.
+
+**`usher.send.stage.duration` is seconds a send spent in one stage**, emitted
+by the dispatcher when a send leaves a stage, and is what a recipe's windows
+are read from. Its attributes are `usher.send.recipe` (the recipe key),
+`usher.send.stage` (`waking`, `opening` or `starting`) and `usher.send.outcome`
+(`confirmed`, `timed_out`, `unavailable`, `superseded` or `failed`). A send
+cancelled at shutdown records nothing for the stage it was in. Its bucket
+boundaries are 0.25, 0.5, 1, 2, 3, 5, 8, 12, 20, 30, 45 and 60 s.
 
 **The three scheduler rows.** `job` is the scheduled job's name, which is
 stable.
@@ -214,9 +223,9 @@ answers the same value for any median. The fix is per-instrument bucket
 boundaries; it is **not** yet done, and nothing in this document's dashboard
 section should be built on those histograms before it is.
 
-⚠️ **`usher.suggest.duration` and `usher.enrichment.latency` are the
-exceptions**: each declares its own bucket boundaries. Every other
-seconds-unit histogram has the defaults.
+⚠️ **`usher.suggest.duration`, `usher.enrichment.latency` and
+`usher.send.stage.duration` are the exceptions**: each declares its own bucket
+boundaries. Every other seconds-unit histogram has the defaults.
 
 **A metric never duplicates one the instrumentation already supplies.**
 `http.server.duration` is `FastAPIInstrumentor`'s and carries no `usher.`

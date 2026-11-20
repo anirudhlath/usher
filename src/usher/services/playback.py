@@ -170,6 +170,17 @@ class PlaybackService:
             copies = await self._media_items.list_for_episode(episode_id)
             return await self._resolve(copies, span, name)
 
+    async def direct_url(self, copy: MediaItem) -> str | None:
+        """The copy's source URL as its source streams it; `None` when there is none to give.
+
+        A credential, for a caller that mints a ticket: never log it or return it to a client.
+        """
+        source = await self._sources.get(copy.source_id)
+        if source is None:
+            return None
+        targets = await self._copy_targets(source, copy)
+        return next((one.url for one in targets or () if one.kind is StreamTargetKind.DIRECT), None)
+
     async def _resolve(
         self, copies: Sequence[MediaItem], span: Span, name: str
     ) -> PlaybackResolution:

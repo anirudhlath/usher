@@ -3,7 +3,7 @@
 import pytest
 
 from usher.domain.enums import HdrFormat
-from usher.domain.recipes import RECIPES, Handover, recipes_for
+from usher.domain.recipes import RECIPES, Handover, Windows, recipes_for
 
 APPLE_TV_MODEL = "Apple TV 4K (gen 3)"
 
@@ -50,9 +50,24 @@ def test_only_the_recipes_passed_are_consulted() -> None:
     assert tuple(recipe.key for recipe in matched) == ("apple_tv.airplay",)
 
 
-def test_every_recipe_is_assumed_until_proven_at_the_tv() -> None:
+def test_the_infuse_recipe_is_proven_and_no_other_is() -> None:
     assert RECIPES, "the premise: there are recipes to check"
-    assert [recipe.key for recipe in RECIPES if recipe.proven] == []
+    assert [recipe.key for recipe in RECIPES if recipe.proven] == ["apple_tv.infuse"]
+
+
+def test_infuse_waits_as_long_as_the_spike_showed_a_wake_takes() -> None:
+    windows = next(r for r in RECIPES if r.key == "apple_tv.infuse").windows
+    assert windows == Windows(
+        waking_seconds=45.0, retry_seconds=2.0, opening_seconds=20.0, starting_seconds=30.0
+    )
+
+
+def test_every_window_is_positive_and_a_retry_fits_inside_the_wake() -> None:
+    assert RECIPES, "the premise: there are recipes to check"
+    for recipe in RECIPES:
+        w = recipe.windows
+        assert min(w.waking_seconds, w.retry_seconds, w.opening_seconds, w.starting_seconds) > 0
+        assert w.retry_seconds < w.waking_seconds
 
 
 def test_infuse_needs_no_press_as_spike_one_found_at_the_tv() -> None:

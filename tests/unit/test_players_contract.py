@@ -11,7 +11,7 @@ from tests.contract.players_contract import PlayersContract, PlayersHarness
 from tests.fakes.house import APPLE_TV, BEDROOM, SHIELD, SHIELD_DEVICE, this_house
 from tests.fakes.players import FakePlayers
 from usher.domain.house import DeviceRole, HouseSnapshot, HouseState
-from usher.ports.errors import PortAuthFailed, PortUnavailable
+from usher.ports.errors import PortAuthFailed, PortDataMalformed, PortUnavailable
 
 type _Write = Callable[[FakePlayers], Coroutine[Any, Any, None]]
 
@@ -29,6 +29,15 @@ class _FakeHarness(PlayersHarness):
 
     async def change_state(self, state: HouseState) -> None:
         self.fake.publish(self.fake.snapshot().with_state(state))
+
+    def service_calls(self) -> list[tuple[str, str]]:
+        return [(kind, entity_id) for kind, entity_id, _ in self.fake.calls]
+
+    def refuse_next_handover(self) -> None:
+        self.fake.refuse_plays.append(PortDataMalformed("the fake refused the handover"))
+
+    async def lose_the_house(self) -> None:
+        self.fake.drop()
 
     async def aclose(self) -> None:
         pass

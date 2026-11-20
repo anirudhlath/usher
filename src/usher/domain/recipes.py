@@ -36,12 +36,32 @@ class DirectPlay:
 
 
 @dataclass(frozen=True, slots=True)
+class Windows:
+    """How long each stage of a send waits, in seconds, before it gives up.
+
+    Each value is assumed until the stage metric shows otherwise; the wake's
+    45 covers the 30 a wake from off took at the TV.
+    """
+
+    waking_seconds: float
+    retry_seconds: float
+    opening_seconds: float
+    starting_seconds: float
+
+
+_WINDOWS: Final = Windows(
+    waking_seconds=45.0, retry_seconds=2.0, opening_seconds=20.0, starting_seconds=30.0
+)
+
+
+@dataclass(frozen=True, slots=True)
 class Recipe:
     """One way to play on one family of device.
 
-    `proven` is false until a send at the TV confirms the profile, the handover
-    and the hands-free claim; a proven recipe ranks above an assumed one of
-    equal quality. `name` is the app as a screen names it.
+    A send goes only through a `proven` recipe, one a send at the TV confirmed
+    (the profile, the handover and the hands-free claim); Infuse on the Apple TV
+    is the proven one. A proven recipe ranks above an assumed one of equal
+    quality. `name` is the app as a screen names it.
     """
 
     key: str
@@ -53,6 +73,7 @@ class Recipe:
     direct_play: DirectPlay
     hands_free: bool
     proven: bool
+    windows: Windows
 
     def matches(self, integration: str, model: str | None) -> bool:
         """By integration *and* model prefix, so a Cast speaker is not a SHIELD."""
@@ -80,9 +101,10 @@ RECIPES: Final[tuple[Recipe, ...]] = (
             audio_codecs=None,
             max_height=2160,
         ),
-        # Spike 1 at the TV: Infuse opened and played with no prompt and no press.
+        # The sends at the TV proved the handover and the hands-free claim.
         hands_free=True,
-        proven=False,
+        proven=True,
+        windows=_WINDOWS,
     ),
     Recipe(
         key="apple_tv.airplay",
@@ -100,6 +122,7 @@ RECIPES: Final[tuple[Recipe, ...]] = (
         ),
         hands_free=True,
         proven=False,
+        windows=_WINDOWS,
     ),
     Recipe(
         key="cast.shield",
@@ -117,6 +140,7 @@ RECIPES: Final[tuple[Recipe, ...]] = (
         ),
         hands_free=True,
         proven=False,
+        windows=_WINDOWS,
     ),
 )
 

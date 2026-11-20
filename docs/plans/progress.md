@@ -130,9 +130,12 @@ row under any heading above would make that heading false.
 | 11–16 | Slice 1, the surface: settings and wiring, the screens and ways services, `GET /screens`, confirm and `/ways` with `players_unavailable`, the console's eighth code, `USHER_CORS_ORIGINS`, and the wrap-up | docs/plans/2026-10-06-send-to-screen-slice-1.md | ✅ landed (PR #99) |
 | 17 | Slice 1's live acceptance against this house's Home Assistant: the labels created, the Apple TV confirmed, the label registry's shape recorded — owner-gated | docs/plans/2026-10-06-send-to-screen-slice-1.md | ✅ passed: `/screens` read the Apple TV and the SHIELD as unconfirmed, confirm made the Living Room a screen and wrote only the two labels and `usher` on the Apple TV, and `/ways` ranked a real title's copies with Infuse best and AirPlay refused |
 
+| 1–7 | Slice 2, the send: a recipe's windows and Infuse proven, the port's wake and handover, a send's stages, the dispatcher with take-over and supersede and `send.stage` on `/events`, `POST /titles/{id}/send`, `POST /episodes/{id}/send` and `GET /sends/{id}` with `screen_busy` and `way_not_playable`, and the console's two codes | docs/plans/2026-11-12-send-to-screen-slice-2.md | 🔨 Tasks 1–7 built on `feat/send-to-screen-slice-2` (PR #117), not merged |
+| 8 | Slice 2's live acceptance at the TV: ten sends from off, the home screen and another app, results posted — owner-gated | docs/plans/2026-11-12-send-to-screen-slice-2.md | 📋 waits on the owner (live acceptance at the TV) |
+
 **A seventh table, for the fourth's reason.** Send to a screen has its own spec
 and is not a milestone, so a row under any heading above would make that
-heading false. Slices 2–4 get plans of their own and rows here.
+heading false. Slices 3–4 get plans of their own and rows here.
 
 ## Confirmed retraction (from docs/specs/2026-10-07-confirmed-retraction-design.md)
 | Task | What it delivers | Plan file | Status |

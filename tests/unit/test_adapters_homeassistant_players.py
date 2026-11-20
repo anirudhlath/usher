@@ -14,7 +14,8 @@ from loguru import logger
 from pydantic import SecretStr
 from websockets.asyncio.server import ServerConnection, serve
 
-from tests.contract.players_contract import PlayersContract, PlayersHarness
+from tests.contract.players_contract import PLAYER, PlayersContract, PlayersHarness
+from tests.contract.players_contract import URL as HANDOVER_URL
 from tests.fakes.home_assistant import (
     REFUSAL_MESSAGE,
     SENSOR,
@@ -110,10 +111,33 @@ def _reading(adapter: HomeAssistantPlayers, entity_id: str) -> str | None:
 class _HomeAssistantHarness(PlayersHarness):
     def __init__(self) -> None:
         self.server = FakeHomeAssistant()
-        self.players = self.adapter = _adapter(FakeHomeAssistantConnector(self.server))
+        self.connector = FakeHomeAssistantConnector(self.server)
+        self.players = self.adapter = _adapter(self.connector)
 
     async def change_state(self, state: HouseState) -> None:
         self.server.change_state(state)
+
+    def service_calls(self) -> list[tuple[str, str]]:
+        acts = {"turn_on": "wake", "play_media": "play_url"}
+        return [
+            (acts[call["service"]], call["target"]["entity_id"])
+            for call in self.server.service_calls
+        ]
+
+    def refuse_next_handover(self) -> None:
+        self.server.refuse_services.append("home_assistant_error")
+
+    async def lose_the_house(self) -> None:
+        self.connector.latest.drop()
+
+        def gone() -> bool:
+            try:
+                self.adapter.snapshot()
+            except PortUnavailable:
+                return True
+            return False
+
+        await _until(gone)
 
     async def aclose(self) -> None:
         await self.adapter.aclose()
@@ -140,7 +164,7 @@ def test_both_arms_run_every_contract_case() -> None:
     from tests.unit.test_players_contract import TestFakePlayers
 
     cases = {name for name in dir(PlayersContract) if name.startswith("test_")}
-    assert len(cases) == 10
+    assert len(cases) == 15
     for arm in (TestHomeAssistantPlayers, TestFakePlayers):
         overridden = {
             name for name in cases if getattr(arm, name) is not getattr(PlayersContract, name)
@@ -415,6 +439,58 @@ async def test_a_refused_write_names_the_code_and_never_the_message() -> None:
         server.refused["config/device_registry/update"] = "unauthorized"
         with pytest.raises(PortAuthFailed):
             await adapter.set_device_area(SHIELD_DEVICE, BEDROOM)
+    finally:
+        await adapter.aclose()
+
+
+async def test_wake_asks_the_media_player_to_turn_on() -> None:
+    server = FakeHomeAssistant()
+    adapter, _ = await _started(server)
+    try:
+        await adapter.wake(PLAYER)
+        assert server.service_calls == [
+            {
+                "type": "call_service",
+                "domain": "media_player",
+                "service": "turn_on",
+                "target": {"entity_id": PLAYER},
+            }
+        ]
+    finally:
+        await adapter.aclose()
+
+
+async def test_play_url_hands_the_url_over_as_a_url() -> None:
+    server = FakeHomeAssistant()
+    adapter, _ = await _started(server)
+    try:
+        await adapter.play_url(PLAYER, HANDOVER_URL)
+        assert server.service_calls == [
+            {
+                "type": "call_service",
+                "domain": "media_player",
+                "service": "play_media",
+                "service_data": {"media_content_type": "url", "media_content_id": HANDOVER_URL},
+                "target": {"entity_id": PLAYER},
+            }
+        ]
+    finally:
+        await adapter.aclose()
+
+
+async def test_a_refused_handover_names_the_code_and_never_the_url() -> None:
+    server = FakeHomeAssistant()
+    server.refuse_services.append("home_assistant_error")
+    adapter, _ = await _started(server)
+    try:
+        with pytest.raises(PortDataMalformed) as caught:
+            await adapter.play_url(PLAYER, HANDOVER_URL)
+        assert str(caught.value) == "Home Assistant refused call_service: home_assistant_error"
+        chain = [caught.value, caught.value.__cause__, caught.value.__context__]
+        assert all(HANDOVER_URL not in repr(link) and "TICKET" not in repr(link) for link in chain)
+        assert server.service_calls[0]["service_data"]["media_content_id"] == HANDOVER_URL, (
+            "the premise: it was sent"
+        )
     finally:
         await adapter.aclose()
 

@@ -20,7 +20,7 @@ __all__ = [
 
 
 class RecipeResponse(BaseModel):
-    """One way a player can be handed a title. `proven` is false until a send shows it."""
+    """One way a player can be handed a title. A send goes only through a `proven` one."""
 
     key: str
     name: str

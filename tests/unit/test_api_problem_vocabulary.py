@@ -24,6 +24,8 @@ _API = _REPO / "src" / "usher" / "api"
 # control, because a scan that finds it cannot be a scan that found nothing.
 _ANCHOR = "source_unavailable"
 
+_SEND_CODES = frozenset({"screen_busy", "way_not_playable"})
+
 # The DSN `tests/unit/test_api_health.py` already uses: nothing listens on
 # port 1, so a connection refused there fails exactly as a down database
 # does, with no container.
@@ -307,6 +309,13 @@ def test_every_code_carries_one_status_everywhere_it_is_raised() -> None:
             f"_CODE_FOR_STATUS answers {code.value} for {translated_status}, which "
             f"`ProblemException` raises with {sorted(seen)}"
         )
+
+
+def test_the_send_codes_are_each_raised_with_the_one_status_the_vocabulary_names() -> None:
+    """Both are 409 wherever they are raised, and both are raised."""
+    pairs = _emitted_pairs()
+    sends = {(code, code_status) for code, code_status in pairs if code in _SEND_CODES}
+    assert sends == {("screen_busy", 409), ("way_not_playable", 409)}
 
 
 def test_the_status_translation_table_covers_only_what_usher_does_not_raise_itself() -> None:

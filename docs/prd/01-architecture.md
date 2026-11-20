@@ -98,7 +98,7 @@ seven deliberately are not.
 | `SuggestIndex` | `PostgresSuggestIndex` (`MeilisearchSuggestIndex` gated) |
 | `Embedder` | `FastEmbedEmbedder`, `OpenAICompatEmbedder` — **optional**, off by default; a deployment without one still has full-text and trigram |
 | `LLMClient` | `OpenAICompatibleClient` — one `POST /v1/chat/completions`; the provider abstraction is `USHER_LLM_BASE_URL` |
-| `Players` | `HomeAssistantPlayers` — one websocket to Home Assistant; reads the area, device and entity registries and the media players' states, and writes only Usher's two labels, created when HA lacks them, one of them on an entity, and a device's area — **optional**, off by default (`USHER_PLAYERS_ENABLED`) |
+| `Players` | `HomeAssistantPlayers` — one websocket to Home Assistant; reads the area, device and entity registries and the media players' states, and writes only Usher's two labels, created when HA lacks them, one of them on an entity, and a device's area, and makes two service calls, waking a player and handing it a link; a `SendDispatcher` runs each send's stages over it — **optional**, off by default (`USHER_PLAYERS_ENABLED`) |
 | `TitleRepository` | `PostgresTitleRepository` |
 | `Row` | `BaseRow` in `services/rows/base.py` and its **ten** concrete rows |
 | `RowProvider` | `ContinueWatchingProvider`, `NextUpProvider`, `RecentlyAddedProvider`, `RediscoverProvider`, `BecauseYouWatchedProvider`, `FranchiseProvider`, `GenreAffinityProvider`, `SeasonalProvider`, `PeopleProvider`, `CuratedProvider` — **ten**, registered as `services/rows/__init__.py`'s `ROW_PROVIDERS` |

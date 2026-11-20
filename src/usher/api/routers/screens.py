@@ -58,7 +58,7 @@ async def list_screens(screens: ScreensServiceDep) -> ScreensResponse:
     try:
         return ScreensResponse.of(screens.house())
     except PlayersUnavailable as error:
-        raise _unavailable(error) from error
+        raise players_unavailable(error) from error
 
 
 @router.post(
@@ -97,12 +97,12 @@ async def confirm_device(
             detail=str(error),
         ) from None
     except PlayersUnavailable as error:
-        raise _unavailable(error) from error
+        raise players_unavailable(error) from error
     return ScreensResponse.of(view)
 
 
-def _unavailable(error: PlayersUnavailable) -> ProblemException:
-    """The one 503 both routes answer, with `Retry-After` only where asking again may help.
+def players_unavailable(error: PlayersUnavailable) -> ProblemException:
+    """The one 503 every player route answers, with `Retry-After` only where asking again may help.
 
     `detail` is the service's, which carries no input.
     """

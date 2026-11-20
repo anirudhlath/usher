@@ -892,6 +892,15 @@ export const CONFIG: readonly SettingRow[] = [
     secret: false,
     measured: false,
   },
+  {
+    key: 'USHER_PLAYERS_LINK_BASE_URL',
+    group: 'players',
+    def: 'unset',
+    about:
+      'Where a screen fetches a sent link: http:// or https://, plus any path prefix Usher sits under. Unset, the link names the address the send was posted to, and a send posted to a loopback address is refused.',
+    secret: false,
+    measured: false,
+  },
 ]
 
 /**

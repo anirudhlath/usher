@@ -20,6 +20,8 @@ class ClientEventKind(StrEnum):
     # "admin UI only" true rather than advisory: a `?titles=` subscriber
     # never sees one.
     BOOTSTRAP_PROGRESS = "bootstrap.progress"
+    # Scoped to the title sent; an episode's to its series.
+    SEND_STAGE = "send.stage"
     # Not a domain event: the channel telling a client its own stream has a
     # hole in it, so it refetches instead of going quietly stale.
     RESYNC_REQUIRED = "resync_required"

@@ -6,8 +6,10 @@ paths:
   - "src/usher/domain/house.py"
   - "src/usher/domain/recipes.py"
   - "src/usher/domain/screens.py"
+  - "src/usher/domain/sends.py"
   - "src/usher/domain/ways.py"
   - "src/usher/services/screens.py"
+  - "src/usher/services/send.py"
   - "src/usher/services/ways.py"
   - "scripts/capture_ha_shape.py"
   - "tests/fakes/house.py"
@@ -30,10 +32,10 @@ behaviour is PRD 07's `## Players`; the design is
 ```bash
 # Every test file touching these paths, by name: a `-k` word selects rows and search too.
 # test_push_loopback.py needs no Docker: `connect_websocket` over a real socket, `proxy=True` too.
-uv run pytest tests/unit/test_{domain_{house,recipes,screens,ways},services_{screens,ways}}.py \
+uv run pytest tests/unit/test_{domain_{house,recipes,screens,sends,ways},services_{screens,send{,_dispatcher},ways}}.py \
   tests/unit/test_adapters_{homeassistant_{mapping,session,players},websocket,emby_push}.py \
   tests/unit/test_{players_contract,fixtures_homeassistant,{config,composition}_players}.py \
-  tests/unit/test_{api_{screens,ways,problem},ports,outbound_call_sites}.py \
+  tests/unit/test_{api_{screens,send,ways,problem},ports,outbound_call_sites}.py \
   tests/integration/test_push_loopback.py
 # Read-only: key paths and type names, never a value. Capture while a player plays.
 set -a; . ./.env; set +a
@@ -45,7 +47,9 @@ uv run python scripts/capture_ha_shape.py --listen 30 \
 
 - **Usher writes three things: its two labels into HA's label registry when
   missing (`Usher` and `Usher ignore`, ids `usher` and `usher_ignore`), one of
-  them on an entity, and `area_id` on a device.** No service call until slice 2.
+  them on an entity, and `area_id` on a device.** Beyond those it makes two service calls:
+  `Players.wake` (`media_player.turn_on`) and `Players.play_url` (`play_media`,
+  type `url`).
 - **`config/entity_registry/update`'s `labels` replaces the whole list.** Read
   the entry, change only Usher's two, write the rest back. An entry that comes
   back with no label list is refused before the entry is written; creating a
@@ -90,6 +94,8 @@ uv run python scripts/capture_ha_shape.py --listen 30 \
   when the reader ends is failed at once, not at its timeout.
 - **An error names HA's code, never HA's message**, and the token travels only
   in the `auth` frame.
+- **A handover's URL is a credential**: `play_url` logs nothing and no error it
+  raises carries the URL, only HA's code.
 
 ## At the TV
 

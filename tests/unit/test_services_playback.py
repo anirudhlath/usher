@@ -1237,6 +1237,68 @@ async def test_an_adapter_whose_source_raised_is_closed_too() -> None:
     assert sorted(household.factory.closed) == sorted([down.id, up.id])
 
 
+# -- a copy's direct url ------------------------------------------------
+
+
+async def test_a_copys_direct_url_is_its_sources_own() -> None:
+    household = _Household()
+    source = await household.add_source("Living Room Emby")
+    await household.add_copy(source, external_id="e1")
+    household.factory.script(source, targets=list(reversed(_emby_shaped_targets(DIRECT_URL))))
+    (copy,) = await household.media_items.list_for_title(household.title_id)
+
+    url = await household.service().direct_url(copy)
+
+    assert url == DIRECT_URL
+    assert household.factory.asked == [(source.id, "e1")]
+    assert household.factory.closed == household.factory.built == [source.id]
+    assert household.mint.calls == []
+
+
+async def test_a_source_that_cannot_answer_has_no_direct_url() -> None:
+    household = _Household()
+    source = await household.add_source("Living Room Emby")
+    await household.add_copy(source, external_id="e1")
+    household.factory.script(source, error=PortUnavailable("connect timed out"))
+    (copy,) = await household.media_items.list_for_title(household.title_id)
+
+    assert await household.service().direct_url(copy) is None
+    assert household.factory.built == [source.id]  # the premise: the source was asked
+    assert household.factory.closed == [source.id]
+
+
+async def test_a_copy_offering_only_a_deep_link_has_no_direct_url() -> None:
+    household = _Household()
+    source = await household.add_source("Living Room Emby")
+    await household.add_copy(source, external_id="e1")
+    household.factory.script(source, targets=_emby_shaped_targets(DIRECT_URL)[1:])
+    (copy,) = await household.media_items.list_for_title(household.title_id)
+
+    assert await household.service().direct_url(copy) is None
+    assert household.factory.asked == [(source.id, "e1")]  # the premise
+
+
+async def test_a_copy_whose_source_is_gone_or_has_no_credentials_has_no_direct_url() -> None:
+    household = _Household()
+    source = await household.add_source("Living Room Emby")
+    bare = await household.add_source("Attic Emby", with_credentials=False)
+    await household.add_copy(source, external_id="e1")
+    await household.add_copy(bare, external_id="e2")
+    household.factory.script(source, targets=_emby_shaped_targets(DIRECT_URL))
+    household.factory.script(bare, targets=_emby_shaped_targets(SECOND_URL))
+    copies = {
+        copy.external_id: copy
+        for copy in await household.media_items.list_for_title(household.title_id)
+    }
+    assert await household.service().direct_url(copies["e1"]) == DIRECT_URL  # the premise
+
+    await household.sources.delete(source.id)
+
+    assert await household.service().direct_url(copies["e1"]) is None
+    assert await household.service().direct_url(copies["e2"]) is None
+    assert household.factory.asked == [(source.id, "e1")]  # only the premise's call asked
+
+
 # -- episodes -----------------------------------------------------------
 
 

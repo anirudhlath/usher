@@ -19,6 +19,7 @@ def test_every_event_kind_is_something_this_process_emits() -> None:
         "sync.progress",
         "bootstrap.progress",
         "resync_required",
+        "send.stage",
     }
 
 

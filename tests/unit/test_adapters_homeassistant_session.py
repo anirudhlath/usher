@@ -21,6 +21,7 @@ from tests.fakes.house import APPLE_TV, APPLE_TV_DEVICE, BEDROOM, LIVING_ROOM
 from usher.adapters.homeassistant.session import Event, HomeAssistantSession
 from usher.domain.house import HouseState
 from usher.ports.errors import PortAuthFailed, PortDataMalformed, PortUnavailable
+from usher.ports.players import CommandRefused
 
 URL = "ws://192.0.2.1:8123/api/websocket"
 #: A player HA has never reported, so its first state has no old one.
@@ -134,6 +135,29 @@ async def test_a_refusal_names_the_command_and_the_code_and_never_the_message() 
             await session.command("config/entity_registry/get", entity_id="media_player.nothing")
     assert str(refused.value) == "Home Assistant refused config/entity_registry/get: not_found"
     assert REFUSAL_MESSAGE not in str(refused.value)
+
+
+@pytest.mark.parametrize("code", ["not_found", "invalid_format", "service_validation_error"])
+async def test_a_refusal_no_retry_can_change_is_refused_for_good_naming_its_code(code: str) -> None:
+    server = FakeHomeAssistant()
+    server.refused["get_states"] = code
+    async with _session(server) as session:
+        with pytest.raises(CommandRefused) as refused:
+            await session.command("get_states")
+    assert isinstance(refused.value, PortDataMalformed)
+    assert refused.value.code == code
+    assert str(refused.value) == f"Home Assistant refused get_states: {code}"
+
+
+@pytest.mark.parametrize("code", ["home_assistant_error", "unknown_error"])
+async def test_a_refusal_a_wake_may_change_is_not_refused_for_good(code: str) -> None:
+    server = FakeHomeAssistant()
+    server.refused["get_states"] = code
+    async with _session(server) as session:
+        with pytest.raises(PortDataMalformed) as refused:
+            await session.command("get_states")
+    assert not isinstance(refused.value, CommandRefused)
+    assert str(refused.value) == f"Home Assistant refused get_states: {code}"
 
 
 @pytest.mark.parametrize("code", ["Not Found!", "x" * 65, "", "home_assistant_error\n"])
