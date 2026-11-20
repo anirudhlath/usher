@@ -24,6 +24,8 @@ FINISHED: Final = frozenset({SendStage.PLAYING, SendStage.DIDNT_TAKE, SendStage.
 STAYED_ASLEEP: Final = "{device} STAYED ASLEEP"
 MAY_NOT_BE_INSTALLED: Final = "{app} MAY NOT BE INSTALLED"
 NOT_ANSWERING: Final = "HOME ASSISTANT IS NOT ANSWERING"
+REFUSED: Final = "HOME ASSISTANT REFUSED {code}"
+REFUSED_USHER: Final = "HOME ASSISTANT REFUSED USHER'S TOKEN"
 USHER_FAILED: Final = "USHER FAILED"
 
 _SEPARATOR: Final = " · "
@@ -94,9 +96,19 @@ def busy_with(state: HouseState | None) -> str | None:
     return _SEPARATOR.join(parts) if parts else "SOMETHING ELSE"
 
 
+def _without_position(state: HouseState) -> HouseState:
+    """A reading less its playback position, which moves while nothing new opens."""
+    return replace(state, media_position_seconds=None, media_position_updated_at=None)
+
+
 def opened(now: HouseState | None, *, at_handover: HouseState | None, app_id: str | None) -> bool:
-    """The reading changed since the handover and, for a recipe with an app, shows that app."""
-    if now is None or now == at_handover:
+    """The reading changed since the handover, beyond its position.
+
+    For a recipe with an app, it also shows that app.
+    """
+    if now is None:
+        return False
+    if at_handover is not None and _without_position(now) == _without_position(at_handover):
         return False
     return app_id is None or now.app_id == app_id
 

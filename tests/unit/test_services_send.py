@@ -46,6 +46,7 @@ from usher.services.send import (
     UnknownWay,
     WayNotPlayable,
     build_link,
+    link_is_loopback,
 )
 
 USER = uuid.UUID("01900000-0000-7000-8000-0000000000a1")
@@ -130,7 +131,13 @@ class Harness:
         self.minted.append((url, name))
         return TICKET
 
-    def build(self, *, players: Players | None, dispatcher: SendDispatcher | None) -> SendService:
+    def build(
+        self,
+        *,
+        players: Players | None,
+        dispatcher: SendDispatcher | None,
+        loopback: bool = False,
+    ) -> SendService:
         return SendService(
             players,
             dispatcher,
@@ -138,6 +145,7 @@ class Harness:
             self.playback,
             self.watch_states,
             self.mint,
+            loopback=loopback,
         )
 
     @property
@@ -425,6 +433,39 @@ async def test_a_busy_screen_is_reported_before_the_source_is_asked(harness: Har
         await harness.service.send_title(MOVIE, way_id=way.id, take_over=False, user_id=USER)
     assert harness.playback.asked == []
     harness.assert_nothing_started()
+
+
+async def test_a_link_on_a_loopback_address_is_refused_before_the_source_is_asked(
+    harness: Harness,
+) -> None:
+    await harness.add_copy()
+    way = await harness.way()
+    service = harness.build(players=harness.players, dispatcher=harness.dispatcher, loopback=True)
+    with pytest.raises(WayNotPlayable) as refused:
+        await service.send_title(MOVIE, way_id=way.id, take_over=False, user_id=USER)
+    assert refused.value.detail == (
+        "CAN'T SEND · LIVING ROOM APPLE TV CAN'T REACH A LOOPBACK ADDRESS; "
+        "SET USHER_PLAYERS_LINK_BASE_URL"
+    )
+    assert harness.playback.asked == []
+    harness.assert_nothing_started()
+
+
+@pytest.mark.parametrize(
+    ("base", "loopback"),
+    [
+        ("http://localhost:8100/", True),
+        ("http://usher.localhost/", True),
+        ("http://127.0.0.1/", True),
+        ("http://127.1.2.3:8100/", True),
+        ("http://[::1]:8100/", True),
+        ("http://192.0.2.10:8100/", False),
+        ("https://usher.example/", False),
+        ("http://test/", False),
+    ],
+)
+def test_only_a_base_naming_this_machine_is_loopback(base: str, loopback: bool) -> None:
+    assert link_is_loopback(base) is loopback
 
 
 # -- the house changes while the source is asked ------------------------

@@ -143,6 +143,14 @@ class PlayersContract:
             async with asyncio.timeout(0.05):
                 await harness.players.wait_until(lambda house: False, timeout=10.0)
 
+    async def test_waiting_ends_as_soon_as_the_house_is_lost(self, harness: PlayersHarness) -> None:
+        waiting = asyncio.create_task(harness.players.wait_until(lambda house: False, timeout=10.0))
+        await asyncio.sleep(0)
+        assert not waiting.done(), "the premise: the wait has begun"
+        await harness.lose_the_house()
+        with pytest.raises(PortUnavailable):
+            await asyncio.wait_for(waiting, timeout=1.0)
+
     async def test_a_role_for_a_player_that_does_not_exist_is_refused(
         self, harness: PlayersHarness
     ) -> None:

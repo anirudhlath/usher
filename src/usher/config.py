@@ -92,6 +92,12 @@ def _is_browser_port(port: str | None) -> bool:
     return port is None or (not port.startswith("0") and int(port) <= _HIGHEST_PORT)
 
 
+def _is_http_url(url: str) -> bool:
+    """An `http://` or `https://` URL with something after the scheme."""
+    scheme, _, rest = url.partition("://")
+    return scheme in ("http", "https") and bool(rest.strip("/"))
+
+
 def _is_compose_only(key: object) -> bool:
     """Whether a settings-source key belongs to `compose.yml` rather than here.
 
@@ -401,6 +407,9 @@ class Settings(BaseSettings):
     players_backoff_seconds: float = Field(default=5.0, gt=0)
     # and where the doubling stops.
     players_max_backoff_seconds: float = Field(default=300.0, gt=0)
+    # Where a screen fetches a sent link, `http(s)://host:port` plus any path prefix.
+    # Unset, the link names the address the send was posted to.
+    players_link_base_url: str | None = None
 
     # Whether this process also serves Usher Console at `/console` (see
     # `usher.api.console`).
@@ -518,7 +527,7 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _players_need_somewhere_to_connect(self) -> "Settings":
-        """Players on with no Home Assistant, or a ceiling under its start, is refused.
+        """Players on with no Home Assistant, a ceiling under its start, or a URL not http(s).
 
         No message carries a value: a URL can hold a credential.
         """
@@ -526,12 +535,13 @@ class Settings(BaseSettings):
             raise ValueError(
                 "USHER_PLAYERS_MAX_BACKOFF_SECONDS must be at least USHER_PLAYERS_BACKOFF_SECONDS"
             )
+        if self.players_link_base_url is not None and not _is_http_url(self.players_link_base_url):
+            raise ValueError("USHER_PLAYERS_LINK_BASE_URL must be an http:// or https:// URL")
         if not self.players_enabled:
             return self
         if self.ha_url is None or self.ha_token is None:
             raise ValueError("USHER_PLAYERS_ENABLED=true needs USHER_HA_URL and USHER_HA_TOKEN")
-        scheme, _, rest = self.ha_url.partition("://")
-        if scheme not in ("http", "https") or not rest.strip("/"):
+        if not _is_http_url(self.ha_url):
             raise ValueError("USHER_HA_URL must be an http:// or https:// URL")
         return self
 
@@ -543,6 +553,7 @@ class Settings(BaseSettings):
         "tempo_url",
         "ha_url",
         "ha_token",
+        "players_link_base_url",
         mode="before",
     )
     @classmethod

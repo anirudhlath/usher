@@ -165,10 +165,15 @@ class HomeAssistantPlayers(Players):
     ) -> HouseSnapshot:
         try:
             async with asyncio.timeout(timeout):
+                seen = False
                 while True:
                     changed = self._changed
-                    if self._house is not None and predicate(self._house):
-                        return self._house
+                    if self._house is not None:
+                        if predicate(self._house):
+                            return self._house
+                        seen = True
+                    elif seen:
+                        raise self._no_house()
                     await changed.wait()
         except TimeoutError:
             raise PortUnavailable(

@@ -1,6 +1,7 @@
 """Sends to a screen: one task per screen runs a send's stages and publishes each."""
 
 import asyncio
+import ipaddress
 import time
 import uuid
 from collections import deque
@@ -9,6 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Final
+from urllib.parse import urlsplit
 
 from loguru import logger
 from opentelemetry import metrics
@@ -21,6 +23,8 @@ from usher.domain.screens import project
 from usher.domain.sends import (
     MAY_NOT_BE_INSTALLED,
     NOT_ANSWERING,
+    REFUSED,
+    REFUSED_USHER,
     STAYED_ASLEEP,
     USHER_FAILED,
     Send,
@@ -36,13 +40,13 @@ from usher.domain.source import MediaItem
 from usher.domain.title import Title
 from usher.domain.watch import WatchState
 from usher.domain.ways import Way, rank
-from usher.ports.errors import PortDataMalformed, PortUnavailable, UsherPortError
+from usher.ports.errors import PortAuthFailed, PortDataMalformed, PortUnavailable, UsherPortError
 from usher.ports.events import ClientEvent, ClientEventKind, EventPublisher
-from usher.ports.players import Players
+from usher.ports.players import CommandRefused, Players
 from usher.ports.repository import MediaItemRepository, WatchStateRepository
 from usher.ports.source import wrap_deep_link
 from usher.services.playback import PlaybackService, episode_name, title_name
-from usher.services.screens import PLAYERS_OFF, PlayersUnavailable, read_house
+from usher.services.screens import players_off, read_house
 
 _meter = metrics.get_meter("usher.send")
 
@@ -255,7 +259,7 @@ class SendDispatcher:
                 type(exc).__name__,
                 str(exc),
             )
-            await self._end(send_id, NOT_ANSWERING, _Outcome.UNAVAILABLE)
+            await self._end(send_id, _cause_of(exc), _Outcome.UNAVAILABLE)
         except Exception:
             logger.exception("send {} failed", send_id)
             await self._end(send_id, USHER_FAILED, _Outcome.FAILED)
@@ -306,24 +310,33 @@ class SendDispatcher:
     async def _hand_over(self, send_id: uuid.UUID, order: SendOrder) -> _Handed | None:
         """Wake the player and hand it the link until it takes it; `None` when it stays asleep.
 
-        A refusal is a player not awake yet; the last handover is the last that
-        fits inside the waking window.
+        A refusal, or a command not answered in time, is a player not awake yet:
+        the last handover is the last that fits inside the waking window, which
+        the wake counts against. A `CommandRefused` raises at once, and the
+        window running out on an unanswered handover raises that.
         """
         entity_id, windows = order.way.device.entity_id, order.way.recipe.windows
+        began = self._monotonic()
         try:
             await self._players.wake(entity_id)
-        except PortDataMalformed as exc:
+        except CommandRefused:
+            raise
+        except (PortDataMalformed, PortUnavailable) as exc:
             logger.info("send {} wake refused: {}: {}", send_id, type(exc).__name__, str(exc))
-        began = self._monotonic()
         while True:
             at_handover = self._players.snapshot().state(entity_id)
             try:
                 await self._players.play_url(entity_id, order.link())
-            except PortDataMalformed as exc:
+            except CommandRefused:
+                raise
+            except (PortDataMalformed, PortUnavailable) as exc:
+                spent = self._monotonic() - began + windows.retry_seconds > windows.waking_seconds
+                if spent and isinstance(exc, PortUnavailable):
+                    raise
                 logger.info(
                     "send {} handover refused: {}: {}", send_id, type(exc).__name__, str(exc)
                 )
-                if self._monotonic() - began + windows.retry_seconds > windows.waking_seconds:
+                if spent:
                     return None
             else:
                 return _Handed(at_handover)
@@ -354,35 +367,54 @@ class SendDispatcher:
         return True
 
 
+def _cause_of(error: UsherPortError) -> str:
+    """The printed cause of a send the port ended."""
+    if isinstance(error, CommandRefused):
+        return REFUSED.format(code=error.code.upper())
+    if isinstance(error, PortAuthFailed):
+        return REFUSED_USHER
+    return NOT_ANSWERING
+
+
 class UnknownWay(LookupError):
     """No way of this item's copies, on any screen, has this id."""
 
 
-class WayNotPlayable(Exception):
-    """The way cannot be sent. `detail` is safe to show."""
+class SendRefused(Exception):
+    """A send refused before it started. `detail` is safe to show."""
 
     def __init__(self, detail: str) -> None:
         super().__init__(detail)
         self.detail = detail
 
 
-class ScreenBusy(Exception):
-    """The screen is playing something else. `detail` is what, and is safe to show."""
-
-    def __init__(self, detail: str) -> None:
-        super().__init__(detail)
-        self.detail = detail
+class WayNotPlayable(SendRefused):
+    """The way cannot be sent."""
 
 
-class SourceUnavailable(Exception):
-    """The source holding the copy gave no URL. `detail` is safe to show."""
+class ScreenBusy(SendRefused):
+    """The screen is playing something else; `detail` is what."""
 
-    def __init__(self, detail: str) -> None:
-        super().__init__(detail)
-        self.detail = detail
+
+class SourceUnavailable(SendRefused):
+    """The source holding the copy gave no URL."""
 
 
 _SOURCE_UNAVAILABLE: Final = "could not reach the source holding this item"
+_LOOPBACK: Final = (
+    "CAN'T SEND · {device} CAN'T REACH A LOOPBACK ADDRESS; SET USHER_PLAYERS_LINK_BASE_URL"
+)
+
+
+def link_is_loopback(base_url: str) -> bool:
+    """Whether a link on this base names this machine, which no screen can reach."""
+    host = urlsplit(base_url).hostname or ""
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def build_link(handover: Handover, ticket_url: str, *, position_seconds: int) -> str:
@@ -411,6 +443,8 @@ class SendService:
         playback: PlaybackService,
         watch_states: WatchStateRepository,
         mint: Callable[[str, str], str],
+        *,
+        loopback: bool = False,
     ) -> None:
         self._players = players
         self._dispatcher = dispatcher
@@ -418,6 +452,7 @@ class SendService:
         self._playback = playback
         self._watch_states = watch_states
         self._mint = mint
+        self._loopback = loopback
 
     async def send_title(
         self, title: Title, *, way_id: uuid.UUID, take_over: bool, user_id: uuid.UUID
@@ -462,7 +497,7 @@ class SendService:
         episode_id: uuid.UUID | None,
         name: str,
     ) -> Send:
-        """Checks 1-5, the source and the watch state, then checks 2-5 again on a fresh reading.
+        """Checks 1-5, the link's address, the source and the watch state, then 2-5 again fresh.
 
         The second pass ranks the order's way, so a screen that turned busy
         during the awaits is refused, and nothing awaits between it and `start`.
@@ -470,6 +505,8 @@ class SendService:
         dispatcher, house = self._read()
         copies = await copies_of()
         way = _allowed(house, copies, way_id, take_over=take_over)
+        if self._loopback:
+            raise WayNotPlayable(_LOOPBACK.format(device=way.device.name.upper()))
         source_url = await self._source_url(way)
         position = _resume_point(await watch_of())
         dispatcher, house = self._read()
@@ -485,7 +522,7 @@ class SendService:
     def _read(self) -> tuple[SendDispatcher, HouseSnapshot]:
         """The dispatcher and the house as it reads now, or why there are none."""
         if self._dispatcher is None:
-            raise PlayersUnavailable(PLAYERS_OFF, retryable=False)
+            raise players_off()
         _, house = read_house(self._players)
         return self._dispatcher, house
 

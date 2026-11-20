@@ -32,8 +32,9 @@ from usher.domain.screens import project
 from usher.domain.sends import SendStage
 from usher.domain.source import MediaItem
 from usher.domain.ways import Way, rank
-from usher.ports.errors import PortDataMalformed, PortUnavailable
+from usher.ports.errors import PortAuthFailed, PortDataMalformed, PortUnavailable
 from usher.ports.events import ClientEvent, ClientEventKind
+from usher.ports.players import CommandRefused
 from usher.ports.source import wrap_deep_link
 from usher.services.send import SendDispatcher, SendOrder
 
@@ -73,6 +74,10 @@ INFUSE_PAUSED = _reading(PLAYER, "paused", app_id=INFUSE_APP, app_name="Infuse")
 def _way(area_id: str, recipe: Recipe = RECIPE) -> Way:
     ways = rank(project(two_screen_house(), (recipe,)).screens, [COPY])
     return next(way for way in ways if way.screen.area_id == area_id)
+
+
+def _refused_for_good() -> CommandRefused:
+    return CommandRefused("Home Assistant refused call_service: not_found", code="not_found")
 
 
 def _raises(error: Exception) -> Callable[..., NoReturn]:
@@ -376,7 +381,7 @@ async def test_the_old_item_still_playing_is_not_the_send_playing(
     send = dispatcher.start(order)
     await settle()
     assert _send_of(dispatcher, send.id).stage is SendStage.OPENING
-    infuse(state="playing", media_duration_seconds=1_000.0, media_position_seconds=61.0)
+    infuse(state="playing", media_duration_seconds=1_000.0, media_title="Example Film")
     await reaches(send.id, SendStage.STARTING)
     await settle()
     assert _send_of(dispatcher, send.id).stage is SendStage.STARTING
@@ -443,7 +448,7 @@ async def test_a_send_still_publishing_its_end_is_not_superseded(
     events = Holding()
     dispatcher = SendDispatcher(players, events, sleep=FakeTime().sleep)
     try:
-        players.refuse_plays = [PortUnavailable("Home Assistant is not answering")]
+        players.refuse_plays = [_refused_for_good()]
         first = dispatcher.start(order)
         await finished(first.id, dispatcher)
         assert [e.data["stage"] for e in events.events] == ["waking"], "the end is held"
@@ -493,13 +498,121 @@ async def test_a_handover_home_assistant_cannot_take_ends_the_send_at_waking(
     slept: list[float],
     finished: Finished,
 ) -> None:
-    players.refuse_plays = [PortUnavailable("Home Assistant is not answering")]
+    players.refuse_plays = [PortUnavailable("Home Assistant is not answering")] * 10
     started = dispatcher.start(order)
     await finished(started.id)
     send = _send_of(dispatcher, started.id)
-    assert ("play_url", PLAYER, LINK) in players.calls
+    assert len([c for c in players.calls if c[0] == "play_url"]) == 4
     assert send.detail == "DIDN'T TAKE · WAKING · HOME ASSISTANT IS NOT ANSWERING"
+    assert slept == [2.0, 2.0, 2.0]
+
+
+async def test_a_handover_home_assistant_answers_late_is_handed_over_again(
+    players: ParkingPlayers,
+    dispatcher: SendDispatcher,
+    order: SendOrder,
+    slept: list[float],
+    settle: Settle,
+) -> None:
+    players.refuse_plays = [PortUnavailable("Home Assistant did not answer within 10s")]
+    send = dispatcher.start(order)
+    await settle()
+    assert _send_of(dispatcher, send.id).stage is SendStage.OPENING
+    assert [call[0] for call in players.calls] == ["wake", "play_url", "play_url"]
+    assert slept == [2.0]
+
+
+async def test_a_wake_home_assistant_answers_late_still_hands_the_link_over(
+    players: ParkingPlayers, dispatcher: SendDispatcher, order: SendOrder, settle: Settle
+) -> None:
+    players.on_wake = _raises(PortUnavailable("Home Assistant did not answer within 10s"))
+    send = dispatcher.start(order)
+    await settle()
+    assert _send_of(dispatcher, send.id).stage is SendStage.OPENING
+    assert [call[0] for call in players.calls] == ["wake", "play_url"]
+
+
+async def test_a_handover_refused_for_good_ends_the_send_at_once_naming_the_code(
+    players: ParkingPlayers,
+    dispatcher: SendDispatcher,
+    order: SendOrder,
+    slept: list[float],
+    finished: Finished,
+) -> None:
+    players.refuse_plays = [_refused_for_good()]
+    started = dispatcher.start(order)
+    await finished(started.id)
+    send = _send_of(dispatcher, started.id)
+    assert [call[0] for call in players.calls] == ["wake", "play_url"]
     assert slept == []
+    assert (send.stage, send.failed_stage) == (SendStage.DIDNT_TAKE, SendStage.WAKING)
+    assert send.detail == "DIDN'T TAKE · WAKING · HOME ASSISTANT REFUSED NOT_FOUND"
+
+
+async def test_a_wake_refused_for_good_ends_the_send_before_any_handover(
+    rig: Rig,
+    players: ParkingPlayers,
+    dispatcher: SendDispatcher,
+    order: SendOrder,
+    finished: Finished,
+) -> None:
+    players.on_wake = _raises(_refused_for_good())
+    started = dispatcher.start(order)
+    await finished(started.id)
+    send = _send_of(dispatcher, started.id)
+    assert players.calls == [("wake", PLAYER, "")]
+    assert rig.links.minted == 0
+    assert send.detail == "DIDN'T TAKE · WAKING · HOME ASSISTANT REFUSED NOT_FOUND"
+
+
+async def test_a_refused_token_ends_the_send_saying_so(
+    players: ParkingPlayers,
+    dispatcher: SendDispatcher,
+    order: SendOrder,
+    slept: list[float],
+    finished: Finished,
+) -> None:
+    players.refuse_plays = [PortAuthFailed("Home Assistant refused call_service: unauthorized")]
+    started = dispatcher.start(order)
+    await finished(started.id)
+    send = _send_of(dispatcher, started.id)
+    assert slept == []
+    assert send.detail == "DIDN'T TAKE · WAKING · HOME ASSISTANT REFUSED USHER'S TOKEN"
+
+
+async def test_the_wake_counts_against_the_waking_window(
+    rig: Rig,
+    players: ParkingPlayers,
+    dispatcher: SendDispatcher,
+    order: SendOrder,
+    slept: list[float],
+    finished: Finished,
+) -> None:
+    players.on_wake = lambda: setattr(rig.clock, "now", rig.clock.now + 4.0)
+    players.refuse_plays = [PortDataMalformed("refused")] * 10
+    started = dispatcher.start(order)
+    await finished(started.id)
+    send = _send_of(dispatcher, started.id)
+    assert len([c for c in players.calls if c[0] == "play_url"]) == 2
+    assert slept == [2.0]
+    assert send.detail == "DIDN'T TAKE · WAKING · LIVING ROOM APPLE TV STAYED ASLEEP"
+
+
+async def test_a_house_lost_while_opening_ends_the_send_without_waiting_out_its_window(
+    players: ParkingPlayers, dispatcher: SendDispatcher, order: SendOrder, finished: Finished
+) -> None:
+    loop = asyncio.get_running_loop()
+
+    def drop_once_opening(wait: int) -> None:
+        if wait == 1:
+            loop.call_soon(players.drop)
+
+    players.on_wait = drop_once_opening
+    started = dispatcher.start(order)
+    await finished(started.id)
+    assert players.waits == 1, "the premise: the house dropped while the app was opening"
+    send = _send_of(dispatcher, started.id)
+    assert send.detail == "DIDN'T TAKE · OPENING · HOME ASSISTANT IS NOT ANSWERING"
 
 
 async def test_a_wake_home_assistant_cannot_take_ends_the_send_at_waking(
@@ -516,7 +629,7 @@ async def test_a_wake_home_assistant_cannot_take_ends_the_send_at_waking(
     send = _send_of(dispatcher, started.id)
     assert players.calls == []
     assert send.detail == "DIDN'T TAKE · WAKING · HOME ASSISTANT IS NOT ANSWERING"
-    assert (slept, rig.links.minted) == ([], 0)
+    assert (slept, rig.links.minted) == ([2.0, 2.0, 2.0], 4)
 
 
 async def test_a_house_lost_after_the_wake_ends_the_send_at_waking(
@@ -607,14 +720,17 @@ async def test_a_send_home_assistant_ends_logs_why_at_warning(
     finished: Finished,
     sink: list[str],
 ) -> None:
-    players.refuse_plays = [PortUnavailable(HA_CODE)]
+    players.refuse_plays = [PortUnavailable(HA_CODE)] * 10
     send = dispatcher.start(replace(order, link=lambda: SECRET_LINK))
     await finished(send.id)
     assert ("play_url", PLAYER, SECRET_LINK) in players.calls, "the premise: the link went out"
     assert _send_of(dispatcher, send.id).detail == (
         "DIDN'T TAKE · WAKING · HOME ASSISTANT IS NOT ANSWERING"
     )
-    _logged_once(sink, send.id, "WARNING", "PortUnavailable")
+    warnings = [line for line in sink if str(send.id) in line and "| WARNING" in line]
+    assert len(warnings) == 1, warnings
+    assert "PortUnavailable" in warnings[0] and HA_CODE in warnings[0]
+    assert [line for line in sink if any(secret in line for secret in SECRETS)] == []
 
 
 async def test_a_refused_wake_logs_why_and_the_send_goes_on(
@@ -667,7 +783,7 @@ async def test_finished_sends_are_kept_to_the_bound_and_a_running_one_is_never_d
     await settle()
     ids = []
     for _ in range(3):
-        rig.players.refuse_plays = [PortUnavailable("Home Assistant is not answering")]
+        rig.players.refuse_plays = [_refused_for_good()]
         send = dispatcher.start(order)
         await finished(send.id, dispatcher)
         ids.append(send.id)

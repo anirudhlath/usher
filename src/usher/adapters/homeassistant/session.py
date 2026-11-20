@@ -14,11 +14,23 @@ from pydantic import SecretStr
 
 from usher.adapters.websocket import WebSocketConnection, WebSocketConnector
 from usher.ports.errors import PortAuthFailed, PortDataMalformed, PortUnavailable, UsherPortError
+from usher.ports.players import CommandRefused
 
 #: How long `pump` waits on a quiet socket before waiting again. Liveness is the
 #: transport's ping, so a quiet socket is a tick and never a failure.
 _TICK_SECONDS: Final = 30.0
 _CODE: Final = re.compile(r"[a-z0-9_]{1,64}")
+# HA's codes for a command that is wrong as sent, which no wait or wake changes.
+_FINAL_CODES: Final = frozenset(
+    {
+        "invalid_format",
+        "not_allowed",
+        "not_found",
+        "not_supported",
+        "service_validation_error",
+        "unknown_command",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +97,8 @@ def _refusal(kind: str, frame: Mapping[str, object]) -> UsherPortError:
     named = code if isinstance(code, str) and _CODE.fullmatch(code) else "unknown"
     if named == "unauthorized":
         return PortAuthFailed(f"Home Assistant refused {kind}: unauthorized")
+    if named in _FINAL_CODES:
+        return CommandRefused(f"Home Assistant refused {kind}: {named}", code=named)
     return PortDataMalformed(f"Home Assistant refused {kind}: {named}")
 
 

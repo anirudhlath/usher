@@ -164,7 +164,7 @@ def test_both_arms_run_every_contract_case() -> None:
     from tests.unit.test_players_contract import TestFakePlayers
 
     cases = {name for name in dir(PlayersContract) if name.startswith("test_")}
-    assert len(cases) == 14
+    assert len(cases) == 15
     for arm in (TestHomeAssistantPlayers, TestFakePlayers):
         overridden = {
             name for name in cases if getattr(arm, name) is not getattr(PlayersContract, name)

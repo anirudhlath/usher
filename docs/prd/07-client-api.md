@@ -616,7 +616,8 @@ by default ([08](08-operations.md)).
 - **`/ways` mints no ticket and calls no source**, unlike `/play`.
 - **A send plays one way on its screen through Home Assistant**, in four
   stages: `waking` (the player is woken, and the link is handed over until the
-  player takes it), `opening` (the recipe's app comes to the front), `starting`
+  player takes it), `opening` (the recipe's app comes to the front, in a reading
+  that changed since the handover by more than its playback position), `starting`
   (the player is playing, with a duration within 2% of the copy's runtime when
   both are known) and `playing`. Each stage has a window of its own, set by the
   recipe. `POST /titles/{id}/send` and `POST /episodes/{id}/send` answer `202`
@@ -625,8 +626,9 @@ by default ([08](08-operations.md)).
   time and the send's `failed_stage` and `detail`. A `SendResponse` carries no
   URL of any kind. A `send.stage` frame for a send can arrive before the `202`
   that names it.
-- **The link handed to the player points at the host the send was posted to**,
-  so the player must be able to reach that host.
+- **The link handed to the player points at `USHER_PLAYERS_LINK_BASE_URL`**
+  when it is set, and otherwise at the host the send was posted to, so the
+  player must be able to reach that address.
 - **A send is refused before anything is written to the player or any ticket is
   minted**, in this order: an unknown title or episode (`404 not_found`);
   players off or the house unreadable (`503 players_unavailable`); a `way` that is no way of this item's copies (`422
@@ -634,8 +636,10 @@ by default ([08](08-operations.md)).
   `detail` `CAN'T · <the way's refusal>`); a recipe that is not proven (`409
   way_not_playable`, `detail` `CAN'T SEND · <RECIPE> IS NOT PROVEN`); a screen
   playing something else (`409 screen_busy`, `detail` the app and title
-  playing); then the source holding the copy, which is asked last (`503
-  source_unavailable`). **A busy screen is refused before the source is
+  playing); a link that would point at a loopback address (`409
+  way_not_playable`, `detail` `CAN'T SEND · <DEVICE> CAN'T REACH A LOOPBACK
+  ADDRESS; SET USHER_PLAYERS_LINK_BASE_URL`); then the source holding the copy,
+  which is asked last (`503 source_unavailable`). **A busy screen is refused before the source is
   asked.** **The screen is read again just before the send starts**, so a
   screen that turned busy in the meantime is still refused unless `take_over`.
   Only a proven recipe is sent through.
@@ -651,7 +655,12 @@ by default ([08](08-operations.md)).
   the handover and is now gone, off, standby or unavailable, and `<APP> MAY NOT
   BE INSTALLED` otherwise. A player that
   stays asleep through the waking window, or a Home Assistant that stops
-  answering, ends it the same way. Once Home Assistant accepts a handover the
+  answering, ends it the same way. Within the waking window, which the wake
+  counts against, a handover Home Assistant does not answer in time is handed
+  over again; one it refuses for a reason waking cannot change ends the send
+  at once as `HOME ASSISTANT REFUSED <CODE>`, and a refused token as `HOME
+  ASSISTANT REFUSED USHER'S TOKEN`. A connection lost during a stage ends it
+  at once. Once Home Assistant accepts a handover the
   link is never handed over again, and no stage is retried.
 - **A send is kept in memory only.** The last 32 finished sends are kept, and
   a restart forgets every send. Finished and running sends read alike at

@@ -52,6 +52,22 @@ def test_a_url_that_is_not_http_is_refused_without_echoing_it(url: str) -> None:
     assert [one for one in messages if url in one or _TOKEN in one] == []
 
 
+def test_the_link_base_is_unset_by_default_and_an_http_one_is_kept() -> None:
+    assert _settings().players_link_base_url is None
+    kept = _settings(players_link_base_url="http://192.0.2.10:8100")
+    assert kept.players_link_base_url == "http://192.0.2.10:8100"
+
+
+@pytest.mark.parametrize("url", ["ftp://bad-scheme-host-9e2:21", "192.0.2.10:8100", "http:///"])
+def test_a_link_base_that_is_not_http_is_refused_without_echoing_it(url: str) -> None:
+    with pytest.raises(ValidationError) as failure:
+        _settings(players_link_base_url=url)
+    messages = [error["msg"] for error in failure.value.errors()]
+    wanted = "USHER_PLAYERS_LINK_BASE_URL must be an http:// or https:// URL"
+    assert any(wanted in one for one in messages), messages
+    assert [one for one in messages if url in one] == []
+
+
 def test_a_backoff_ceiling_below_its_start_is_refused() -> None:
     with pytest.raises(ValidationError, match="USHER_PLAYERS_MAX_BACKOFF_SECONDS"):
         _settings(players_backoff_seconds=10.0, players_max_backoff_seconds=5.0)

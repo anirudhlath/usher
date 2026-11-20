@@ -16,10 +16,10 @@ from usher.api.dto.problem import ProblemCode, ProblemResponse
 from usher.api.dto.sends import SendRequest, SendResponse
 from usher.api.errors import ProblemException
 from usher.api.routers.screens import players_unavailable
-from usher.services.screens import PLAYERS_OFF, PlayersUnavailable
+from usher.services.screens import PlayersUnavailable, players_off
 from usher.services.send import (
     ScreenBusy,
-    SourceUnavailable,
+    SendRefused,
     UnknownWay,
     WayNotPlayable,
 )
@@ -89,7 +89,7 @@ async def send_title(
         sent = await sends.send_title(
             title, way_id=body.way, take_over=body.take_over, user_id=user_id
         )
-    except (UnknownWay, WayNotPlayable, ScreenBusy, SourceUnavailable, PlayersUnavailable) as error:
+    except (UnknownWay, SendRefused, PlayersUnavailable) as error:
         raise _refusal(error) from None
     return SendResponse.of(sent)
 
@@ -121,7 +121,7 @@ async def send_episode(
             take_over=body.take_over,
             user_id=user_id,
         )
-    except (UnknownWay, WayNotPlayable, ScreenBusy, SourceUnavailable, PlayersUnavailable) as error:
+    except (UnknownWay, SendRefused, PlayersUnavailable) as error:
         raise _refusal(error) from None
     return SendResponse.of(sent)
 
@@ -135,7 +135,7 @@ async def send_episode(
 async def read_send(send_id: uuid.UUID, dispatcher: SendDispatcherDep) -> SendResponse:
     """A running send, or one of the last 32 finished; a restart forgets them all."""
     if dispatcher is None:
-        raise players_unavailable(PlayersUnavailable(PLAYERS_OFF, retryable=False))
+        raise players_unavailable(players_off())
     send = dispatcher.get(send_id)
     if send is None:
         raise _not_found("send not found")
@@ -148,9 +148,7 @@ def _not_found(detail: str) -> ProblemException:
     )
 
 
-def _refusal(
-    error: UnknownWay | WayNotPlayable | ScreenBusy | SourceUnavailable | PlayersUnavailable,
-) -> ProblemException:
+def _refusal(error: UnknownWay | SendRefused | PlayersUnavailable) -> ProblemException:
     """The problem a refused send answers; every `detail` is the service's and carries no input."""
     if isinstance(error, PlayersUnavailable):
         return players_unavailable(error)

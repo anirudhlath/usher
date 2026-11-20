@@ -1,6 +1,7 @@
 """A send's stages and record, and what a player's reading says about each stage."""
 
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -153,6 +154,21 @@ def test_a_recipe_with_no_app_asks_only_that_the_reading_differs() -> None:
     assert opened(_state(state="playing", app_id=NETFLIX), at_handover=at, app_id=None)
     assert not opened(at, at_handover=at, app_id=None)
     assert not opened(None, at_handover=at, app_id=None)
+
+
+def test_a_reading_that_moved_only_its_position_is_not_the_app_opening() -> None:
+    at = replace(
+        _state(
+            state="playing", app_id=INFUSE, media_title="Old Film", media_duration_seconds=7_200.0
+        ),
+        media_position_seconds=60.0,
+        media_position_updated_at=T0,
+    )
+    now = replace(at, media_position_seconds=65.0, media_position_updated_at=T1)
+    assert now != at, "the premise: the readings differ"
+    assert not opened(now, at_handover=at, app_id=INFUSE)
+    assert not started(now, at_handover=at, app_id=INFUSE, runtime_seconds=7_200)
+    assert opened(replace(now, media_title="New Film"), at_handover=at, app_id=INFUSE)
 
 
 def test_started_needs_the_app_open_and_playing() -> None:

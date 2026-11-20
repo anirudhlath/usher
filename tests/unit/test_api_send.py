@@ -39,6 +39,7 @@ from usher.api.deps import (
     get_playback_service,
     get_players,
     get_send_dispatcher,
+    get_send_minter,
     get_ticket_minter,
     get_title_repository,
     get_watch_state_repository,
@@ -59,6 +60,7 @@ from usher.ports.events import ClientEventKind
 from usher.ports.ingest import MediaItemUpsert
 from usher.ports.source import wrap_deep_link
 from usher.services.playback import PlaybackService, title_name
+from usher.services.playback_ticket import build_ticket_cipher
 from usher.services.send import SendDispatcher, SendOrder
 
 SOURCE = uuid.UUID("01900000-0000-7000-8000-000000000002")
@@ -238,6 +240,7 @@ async def rig() -> AsyncIterator[Rig]:
     app.dependency_overrides[get_playback_service] = lambda: made.playback
     app.dependency_overrides[get_default_user_id] = lambda: USER
     app.dependency_overrides[get_ticket_minter] = lambda: mint
+    app.dependency_overrides[get_send_minter] = lambda: mint
     app.dependency_overrides[get_players] = lambda: players
     app.dependency_overrides[get_send_dispatcher] = lambda: dispatcher
     async with LifespanManager(app) as manager:
@@ -539,8 +542,8 @@ async def test_a_send_that_did_not_take_carries_its_failed_stage_and_detail() ->
 async def test_the_real_minter_works_when_the_dispatcher_calls_it_after_the_answer(
     rig: Rig,
 ) -> None:
-    """No `get_ticket_minter` override: `link` runs in the send's task, after the `202`."""
-    del rig.app.dependency_overrides[get_ticket_minter]
+    """No `get_send_minter` override: `link` runs in the send's task, after the `202`."""
+    del rig.app.dependency_overrides[get_send_minter]
     await rig.add_copy()
     way = await rig.way()
     answer = await rig.send_title(way.id)
@@ -658,3 +661,66 @@ async def test_the_lifespan_dispatcher_sends_through_the_players_and_publishes_o
         await _until(lambda: len(players.calls) == 2, "the handover never reached the players")
         assert [call[0] for call in players.calls] == ["wake", "play_url"]
     assert closed == ["sends", "players"]
+
+
+async def test_a_send_posted_to_a_loopback_address_is_refused_naming_the_setting(rig: Rig) -> None:
+    await rig.add_copy()
+    way = await rig.way()
+    answer = await rig.client.post(
+        f"/titles/{MOVIE.id}/send", json={"way": str(way.id)}, headers={"host": "localhost:8100"}
+    )
+    _problem(
+        answer,
+        409,
+        "way_not_playable",
+        "CAN'T SEND · LIVING ROOM APPLE TV CAN'T REACH A LOOPBACK ADDRESS; "
+        "SET USHER_PLAYERS_LINK_BASE_URL",
+    )
+    assert rig.playback.asked == 0
+
+
+@pytest.mark.parametrize(
+    ("base", "netloc"),
+    [("http://192.0.2.10:8100", "192.0.2.10:8100"), (None, "localhost:8100")],
+    ids=["configured", "the-request's"],
+)
+def test_a_send_minter_names_its_base_and_holds_no_request(base: str | None, netloc: str) -> None:
+    settings = Settings(
+        database_url="postgresql+asyncpg://usher:usher@127.0.0.1:1/usher",
+        secret_key="0123456789abcdef0123456789abcdef",
+        push_enabled=False,
+        worker_enabled=False,
+        players_link_base_url=base,
+    )
+    scope = {
+        "type": "http",
+        "app": create_app(settings),
+        "scheme": "http",
+        "server": ("localhost", 8100),
+        "path": "/",
+        "root_path": "",
+        "query_string": b"",
+        "headers": [(b"host", b"localhost:8100")],
+    }
+    minter = get_send_minter(Request(scope), build_ticket_cipher(settings.secret_key), settings)
+    assert urlsplit(minter("http://source.invalid/stream", "Example Film (2001)")).netloc == netloc
+    held = _held(minter)
+    assert held, "the premise: the minter is a closure"
+    assert [one for one in held if isinstance(one, Request)] == []
+
+
+def _held(function: object) -> list[object]:
+    """What a closure holds, and what the closures and bound methods it holds hold in turn."""
+    found: list[object] = []
+    pending = [function]
+    while pending:
+        current = pending.pop()
+        for cell in getattr(current, "__closure__", None) or ():
+            one = cell.cell_contents
+            if any(one is known for known in found):
+                continue
+            found.append(one)
+            pending.append(getattr(one, "__func__", one))
+            if hasattr(one, "__self__"):
+                found.append(one.__self__)
+    return found

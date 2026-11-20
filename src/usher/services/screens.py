@@ -23,6 +23,11 @@ class PlayersUnavailable(Exception):
         self.retryable = retryable
 
 
+def players_off() -> PlayersUnavailable:
+    """What every route answers while `USHER_PLAYERS_ENABLED` is off; asking again is no use."""
+    return PlayersUnavailable(PLAYERS_OFF, retryable=False)
+
+
 class UnknownCandidate(LookupError):
     """No player Usher could play on has this entity id."""
 
@@ -86,7 +91,7 @@ class ScreensService:
 def read_house(players: Players | None) -> tuple[Players, HouseSnapshot]:
     """The latest reading with the players that gave it; `PlayersUnavailable` when there is none."""
     if players is None:
-        raise PlayersUnavailable(PLAYERS_OFF, retryable=False)
+        raise players_off()
     try:
         return players, players.snapshot()
     except UsherPortError as error:

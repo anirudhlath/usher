@@ -9,6 +9,7 @@ from urllib.parse import quote
 from cryptography.fernet import Fernet
 from fastapi import Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from starlette.datastructures import URLPath
 
 from usher.api.lanes import LaneSupervisor
 from usher.composition import (
@@ -88,7 +89,7 @@ from usher.services.rows import enabled_row_providers, row_provider_settings
 from usher.services.rows.cache import RefreshQueue, RowCache
 from usher.services.screens import ScreensService
 from usher.services.search import SearchQueryBuffer, SearchService
-from usher.services.send import SendDispatcher, SendService
+from usher.services.send import SendDispatcher, SendService, link_is_loopback
 from usher.services.similar import SimilarityService
 from usher.services.sources import SourceService
 from usher.services.taste import TasteService
@@ -830,20 +831,26 @@ def get_ticket_cipher(settings: SettingsDep) -> Fernet:
 TicketCipherDep = Annotated[Fernet, Depends(get_ticket_cipher)]
 
 
-def get_ticket_minter(request: Request, cipher: TicketCipherDep) -> Callable[[str, str], str]:
-    """The closure that turns a source URL and an item's name into a ticket URL for this request."""
+def _ticket_minter(
+    cipher: Fernet, base_url: str, path_for: Callable[..., URLPath]
+) -> Callable[[str, str], str]:
+    """The closure that turns a source URL and an item's name into a ticket URL on `base_url`."""
 
     def mint_ticket_url(url: str, name: str) -> str:
         ticket = mint(cipher, url, minted_at=datetime.now(UTC))
-        return str(
-            request.url_for(
-                "redeem_named_playback_ticket",
-                ticket=quote(ticket, safe="="),
-                name=quote(name, safe=""),
-            )
+        path = path_for(
+            "redeem_named_playback_ticket",
+            ticket=quote(ticket, safe="="),
+            name=quote(name, safe=""),
         )
+        return str(path.make_absolute_url(base_url=base_url))
 
     return mint_ticket_url
+
+
+def get_ticket_minter(request: Request, cipher: TicketCipherDep) -> Callable[[str, str], str]:
+    """The ticket minter for this request, whose client is the player that follows it."""
+    return _ticket_minter(cipher, str(request.base_url), request.app.url_path_for)
 
 
 TicketMinterDep = Annotated[Callable[[str, str], str], Depends(get_ticket_minter)]
@@ -916,16 +923,33 @@ def get_send_dispatcher(request: Request) -> SendDispatcher | None:
 SendDispatcherDep = Annotated[SendDispatcher | None, Depends(get_send_dispatcher)]
 
 
+def _send_link_base(request: Request, settings: Settings) -> str:
+    """Where a screen fetches a sent link: `USHER_PLAYERS_LINK_BASE_URL`, else this request's."""
+    return settings.players_link_base_url or str(request.base_url)
+
+
+def get_send_minter(
+    request: Request, cipher: TicketCipherDep, settings: SettingsDep
+) -> Callable[[str, str], str]:
+    """The ticket minter a send hands a screen, holding no `Request`: a send outlives its own."""
+    return _ticket_minter(cipher, _send_link_base(request, settings), request.app.url_path_for)
+
+
 def get_send_service(
+    request: Request,
+    settings: SettingsDep,
     players: PlayersDep,
     dispatcher: SendDispatcherDep,
     media_items: MediaItemRepositoryDep,
     playback: PlaybackServiceDep,
     watch_states: Annotated[WatchStateRepository, Depends(get_watch_state_repository)],
-    minter: TicketMinterDep,
+    minter: Annotated[Callable[[str, str], str], Depends(get_send_minter)],
 ) -> SendService:
     """`SendService` over the process's players and dispatcher and this request's copies."""
-    return SendService(players, dispatcher, media_items, playback, watch_states, minter)
+    loopback = link_is_loopback(_send_link_base(request, settings))
+    return SendService(
+        players, dispatcher, media_items, playback, watch_states, minter, loopback=loopback
+    )
 
 
 SendServiceDep = Annotated[SendService, Depends(get_send_service)]

@@ -4,6 +4,15 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 
 from usher.domain.house import DeviceRole, HouseSnapshot
+from usher.ports.errors import PortDataMalformed
+
+
+class CommandRefused(PortDataMalformed):
+    """The registry refused a command for a reason asking again cannot change; `code` is its."""
+
+    def __init__(self, message: str, *, code: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class Players(ABC):
@@ -46,9 +55,10 @@ class Players(ABC):
         """Hand a player a URL to open.
 
         `PortDataMalformed` when the registry refuses, which is what a sleeping
-        player looks like; `PortUnavailable` with no connection or no answer in
-        time; `PortAuthFailed` for the credential. The URL is a credential and
-        appears in no error.
+        player looks like, and `CommandRefused` when no waking can change the
+        answer; `PortUnavailable` with no connection or no answer in time;
+        `PortAuthFailed` for the credential. The URL is a credential and appears
+        in no error.
         """
 
     @abstractmethod
@@ -58,6 +68,7 @@ class Players(ABC):
         """The current reading if `predicate` accepts it, else a later one.
 
         Readings published in one turn of the loop are seen only as the last of
-        them. `PortUnavailable` naming `timeout` when none arrives in time. A write
-        is done when the registry reports it, not when it was sent.
+        them. `PortUnavailable` naming `timeout` when none arrives in time, and
+        what `snapshot` would raise once a reading the wait has seen is gone. A
+        write is done when the registry reports it, not when it was sent.
         """
